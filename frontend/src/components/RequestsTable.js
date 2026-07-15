@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useMemo } from 'react';
+import Image from 'next/image';
 import { 
   ArrowUpDown, 
   Search, 
@@ -257,6 +258,21 @@ export default function RequestsTable({
     setTagFilter('');
   };
 
+  // Helper to determine which columns to show based on active category
+  const getCategoryColumns = () => {
+    switch (activeCategory) {
+      case 'Guest Difficulties':
+        return { showStars: false, showGuestDiff: true, showTags: false };
+      case 'Storyboards':
+      case 'Others':
+        return { showStars: false, showGuestDiff: false, showTags: true };
+      default: // All Requests, Hitsounds
+        return { showStars: true, showGuestDiff: false, showTags: false };
+    }
+  };
+
+  const { showStars, showGuestDiff, showTags } = getCategoryColumns();
+
   return (
     <div style={{ padding: '0 24px 24px 24px', display: 'flex', flexDirection: 'column', gap: '16px', position: 'relative' }}>
       
@@ -372,9 +388,19 @@ export default function RequestsTable({
                   Song / Artist <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
                 </th>
                 <th>Difficulties</th>
-                <th onClick={() => toggleSort('highest_stars')} style={{ cursor: 'pointer' }}>
-                  Highest Stars <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
-                </th>
+                {showStars && (
+                  <th onClick={() => toggleSort('highest_stars')} style={{ cursor: 'pointer' }}>
+                    Highest Stars <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
+                  </th>
+                )}
+                {showGuestDiff && (
+                  <th onClick={() => toggleSort('highest_stars')} style={{ cursor: 'pointer' }}>
+                    GD star rating <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
+                  </th>
+                )}
+                {showTags && (
+                  <th>Tags</th>
+                )}
                 <th>Beatmap Status</th>
                 <th>Request Status</th>
                 <th onClick={() => toggleSort('deadline')} style={{ cursor: 'pointer' }}>
@@ -411,9 +437,12 @@ export default function RequestsTable({
 
                     {/* Cover Photo */}
                     <td>
-                      <img 
+                      <Image
                         src={req.local_cover_path} 
                         alt="cover" 
+                        width={56}
+                        height={32}
+                        unoptimized
                         style={{ width: '56px', height: '32px', borderRadius: '4px', objectFit: 'cover', display: 'block', border: '1px solid var(--border)' }}
                         onError={(e) => {
                           e.target.src = '/uploads/covers/default.jpg';
@@ -449,32 +478,101 @@ export default function RequestsTable({
                     </td>
 
                     {/* Stars */}
-                    <td>
-                      {req.highest_stars > 0 ? (
-                        (() => {
-                          const color = getStarDifficultyColor(req.highest_stars);
-                          const textColor = getStarDifficultyTextColor(req.highest_stars);
-                          const [r, g, b] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
-                          return (
-                            <span style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              padding: '4px 10px',
-                              borderRadius: '20px',
-                              fontSize: '12px',
-                              fontWeight: '600',
-                              background: `rgba(${r}, ${g}, ${b}, 0.7)`,
-                              color: textColor,
-                              border: `1px solid rgba(${r}, ${g}, ${b}, 1.0)`,
-                            }}>
-                              ★ {req.highest_stars.toFixed(2)}
-                            </span>
-                          );
-                        })()
-                      ) : (
-                        <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>—</span>
-                      )}
-                    </td>
+                    {showStars && (
+                      <td>
+                        {req.highest_stars > 0 ? (
+                          (() => {
+                            const color = getStarDifficultyColor(req.highest_stars);
+                            const textColor = getStarDifficultyTextColor(req.highest_stars);
+                            const [r, g, b] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
+                            return (
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                padding: '4px 10px',
+                                borderRadius: '20px',
+                                fontSize: '12px',
+                                fontWeight: '600',
+                                background: `rgba(${r}, ${g}, ${b}, 0.7)`,
+                                color: textColor,
+                                border: `1px solid rgba(${r}, ${g}, ${b}, 1.0)`,
+                              }}>
+                                ★ {req.highest_stars.toFixed(2)}
+                              </span>
+                            );
+                          })()
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>—</span>
+                        )}
+                      </td>
+                    )}
+
+                    {/* Connected user's guest-difficulty star rating */}
+                    {showGuestDiff && (
+                      <td>
+                        {req.highest_stars > 0 ? (
+                          (() => {
+                            const color = getStarDifficultyColor(req.highest_stars);
+                            const textColor = getStarDifficultyTextColor(req.highest_stars);
+                            const [r, g, b] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
+                            return (
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                padding: '4px 10px',
+                                borderRadius: '20px',
+                                fontSize: '12px',
+                                fontWeight: '600',
+                                background: `rgba(${r}, ${g}, ${b}, 0.7)`,
+                                color: textColor,
+                                border: `1px solid rgba(${r}, ${g}, ${b}, 1.0)`,
+                              }}>
+                                ★ {req.highest_stars.toFixed(2)}
+                              </span>
+                            );
+                          })()
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>—</span>
+                        )}
+                      </td>
+                    )}
+
+                    {/* Tags */}
+                    {showTags && (
+                      <td>
+                        {req.tags && req.tags.length > 0 ? (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                            {req.tags.slice(0, 5).map(tag => (
+                              <span 
+                                key={tag}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '3px',
+                                  padding: '2px 8px',
+                                  backgroundColor: 'var(--hover-bg)',
+                                  border: '1px solid var(--border)',
+                                  borderRadius: '4px',
+                                  fontSize: '10px',
+                                  fontWeight: '600',
+                                  color: 'var(--text-main)'
+                                }}
+                              >
+                                <Tag size={9} />
+                                {tag}
+                              </span>
+                            ))}
+                            {req.tags.length > 5 && (
+                              <span style={{ fontSize: '10px', color: 'var(--text-muted)', paddingTop: '2px' }}>
+                                +{req.tags.length - 5}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>—</span>
+                        )}
+                      </td>
+                    )}
 
                     {/* Beatmap Status */}
                     <td>

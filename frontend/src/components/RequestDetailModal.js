@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import Image from 'next/image';
 import { 
   X, 
   ExternalLink, 
@@ -14,11 +15,96 @@ import {
   Clock
 } from 'lucide-react';
 
+// osu! official star difficulty spectrum from osu.Game.Rulesets.Osu.Difficulty.OsuColour
+// https://github.com/ppy/osu/blob/master/osu.Game.Rulesets.Osu/Difficulty/OsuColour.cs
+const STAR_DIFFICULTY_SPECTRUM = [
+  { stars: 0.0, color: '#aaaaaa' },
+  { stars: 0.1, color: '#aaaaaa' },
+  { stars: 0.1, color: '#4290fb' },
+  { stars: 1.25, color: '#4fc0ff' },
+  { stars: 2.0, color: '#4fffd5' },
+  { stars: 2.5, color: '#7cff4f' },
+  { stars: 3.3, color: '#f6f05c' },
+  { stars: 4.2, color: '#ff8068' },
+  { stars: 4.9, color: '#ff4e6f' },
+  { stars: 5.8, color: '#c645b8' },
+  { stars: 6.7, color: '#6563de' },
+  { stars: 7.7, color: '#18158e' },
+  { stars: 9.0, color: '#000000' },
+  { stars: 10.0, color: '#000000' },
+];
+
+function getStarDifficultyColor(stars) {
+  if (stars <= 0) return '#aaaaaa';
+  if (stars >= 10) return '#000000';
+  
+  for (let i = 0; i < STAR_DIFFICULTY_SPECTRUM.length - 1; i++) {
+    const current = STAR_DIFFICULTY_SPECTRUM[i];
+    const next = STAR_DIFFICULTY_SPECTRUM[i + 1];
+    
+    if (stars >= current.stars && stars <= next.stars) {
+      const ratio = (stars - current.stars) / (next.stars - current.stars);
+      return interpolateColor(current.color, next.color, ratio);
+    }
+  }
+  
+  return '#aaaaaa';
+}
+
+// osu! text colour logic from StarRatingDisplay.cs
+// < 6.5★: Black, 6.5–9.0★: Orange, 9.0★+: gradient spectrum
+const STAR_TEXT_CUTOFF = 6.5;
+const STAR_TEXT_GRADIENT_CUTOFF = 9.0;
+const STAR_TEXT_SPECTRUM = [
+  { stars: 9.0, color: '#f6f05c' },
+  { stars: 9.9, color: '#ff8068' },
+  { stars: 10.6, color: '#ff4e6f' },
+  { stars: 11.5, color: '#c645b8' },
+  { stars: 12.4, color: '#6563de' },
+];
+
+function getStarDifficultyTextColor(stars) {
+  if (stars < STAR_TEXT_CUTOFF) return 'rgba(0,0,0,0.75)';
+  if (stars < STAR_TEXT_GRADIENT_CUTOFF) return '#ff6600';
+
+  for (let i = 0; i < STAR_TEXT_SPECTRUM.length - 1; i++) {
+    const current = STAR_TEXT_SPECTRUM[i];
+    const next = STAR_TEXT_SPECTRUM[i + 1];
+    if (stars >= current.stars && stars <= next.stars) {
+      const ratio = (stars - current.stars) / (next.stars - current.stars);
+      return interpolateColor(current.color, next.color, ratio);
+    }
+  }
+
+  return '#6563de';
+}
+
+function interpolateColor(color1, color2, ratio) {
+  const hex1 = color1.replace('#', '');
+  const hex2 = color2.replace('#', '');
+  
+  const r1 = parseInt(hex1.substring(0, 2), 16);
+  const g1 = parseInt(hex1.substring(2, 4), 16);
+  const b1 = parseInt(hex1.substring(4, 6), 16);
+  
+  const r2 = parseInt(hex2.substring(0, 2), 16);
+  const g2 = parseInt(hex2.substring(2, 4), 16);
+  const b2 = parseInt(hex2.substring(4, 6), 16);
+  
+  const r = Math.round(r1 + (r2 - r1) * ratio);
+  const g = Math.round(g1 + (g2 - g1) * ratio);
+  const b = Math.round(b1 + (b2 - b1) * ratio);
+  
+  const toHex = (c) => c.toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
 export default function RequestDetailModal({ 
   request, 
   onClose, 
   onUpdateRequest,
-  onForceRefreshBeatmap
+  onForceRefreshBeatmap,
+  connectedAccount
 }) {
   const [activeRequest, setActiveRequest] = useState(request);
   const [historyLogs, setHistoryLogs] = useState([]);
@@ -30,6 +116,8 @@ export default function RequestDetailModal({
   const [priority, setPriority] = useState(request.priority);
   const [deadline, setDeadline] = useState(request.deadline || '');
   const [addedDate, setAddedDate] = useState(request.added_date ? request.added_date.split(' ')[0] : '');
+  const [guestDifficultyTargetSR, setGuestDifficultyTargetSR] = useState(request.guest_difficulty_target_sr || '');
+  const [guestDifficultyName, setGuestDifficultyName] = useState(request.guest_difficulty_name || '');
   const [isEditingDate, setIsEditingDate] = useState(false);
   const [isEditingDeadline, setIsEditingDeadline] = useState(false);
   const [notes, setNotes] = useState(request.notes || '');
@@ -51,12 +139,7 @@ export default function RequestDetailModal({
     })
   );
 
-  // Fetch history when modal opens
-  useEffect(() => {
-    fetchHistory();
-  }, [request.id]);
-
-  const fetchHistory = async () => {
+  const fetchHistory = useCallback(async () => {
     setIsLoadingHistory(true);
     try {
       const res = await fetch(`/api/requests/${request.id}/history`);
@@ -69,7 +152,15 @@ export default function RequestDetailModal({
     } finally {
       setIsLoadingHistory(false);
     }
-  };
+  }, [request.id]);
+
+  // Fetch history when the selected request changes.
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      void fetchHistory();
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
+  }, [fetchHistory]);
 
   const handleMetadataRefresh = async () => {
     if (!request.beatmapset_id) return;
@@ -132,11 +223,15 @@ export default function RequestDetailModal({
         other_text: c.name === 'Others' ? c.otherText : null,
       }));
 
+    const guestDiffTargetSR = categories.some(c => c.checked && c.name === 'Guest Difficulties') ? (parseFloat(guestDifficultyTargetSR) || null) : null;
+
     const payload = {
       request_status: requestStatus,
       priority,
       deadline: deadline || null,
       added_date: addedDate || null,
+      guest_difficulty_target_sr: guestDiffTargetSR,
+      guest_difficulty_name: guestDifficultyName || null,
       notes: notes || null,
       discord_link: discordLink || null,
       osu_profile_link: profileLink || null,
@@ -272,7 +367,7 @@ export default function RequestDetailModal({
                   {/* Difficulty Badges / Stars Grid */}
                   <div style={{ 
                     display: 'grid', 
-                    gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', 
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', 
                     gap: '10px',
                     backgroundColor: 'var(--bg-sidebar)',
                     padding: '12px',
@@ -308,6 +403,11 @@ export default function RequestDetailModal({
                             <span>AR: {diff.ar} • OD: {diff.od}</span>
                             <span>CS: {diff.cs} • HP: {diff.hp}</span>
                             <span>Length: {formatLength(diff.drain)}</span>
+                            {diff.creator_name && (
+                              <span style={{ color: 'var(--text-muted)', marginTop: '2px', borderTop: '1px solid var(--border)', paddingTop: '2px' }}>
+                                Creator: {diff.creator_name}
+                              </span>
+                            )}
                           </div>
                         </div>
                       ))
@@ -337,8 +437,96 @@ export default function RequestDetailModal({
               )}
             </div>
 
-            {/* Quick Links section */}
-            <div>
+            {request.categories.some(c => c.category_name === 'Guest Difficulties') && (
+                <div style={{ marginTop: '20px' }}>
+                  <h3 style={{ fontSize: '14px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.5px', marginBottom: '12px' }}>
+                    My Guest Difficulty
+                  </h3>
+                  {request.user_difficulty ? (
+                    // Show the detected difficulty belonging to the connected user
+                    (() => {
+                      const diff = request.user_difficulty;
+                      const color = getStarDifficultyColor(diff.stars);
+                      const textColor = getStarDifficultyTextColor(diff.stars);
+                      const [r, g, b] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
+                      return (
+                        <div style={{
+                          padding: '12px 14px',
+                          backgroundColor: 'var(--bg-sidebar)',
+                          borderRadius: '8px',
+                          border: `1px solid rgba(${r}, ${g}, ${b}, 0.4)`
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              padding: '3px 10px',
+                              borderRadius: '12px',
+                              fontSize: '13px',
+                              fontWeight: '700',
+                              background: `rgba(${r}, ${g}, ${b}, 0.7)`,
+                              color: textColor,
+                              border: `1px solid rgba(${r}, ${g}, ${b}, 1)`,
+                            }}>
+                              ★ {diff.stars.toFixed(2)}
+                            </span>
+                            <span style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={diff.name}>
+                              {diff.name}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: '10px', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: '1px' }}>
+                            <span>AR: {diff.ar} • OD: {diff.od}</span>
+                            <span>CS: {diff.cs} • HP: {diff.hp}</span>
+                            <span>Length: {formatLength(diff.drain)}</span>
+                            <span style={{ color: 'var(--osu-pink)', marginTop: '2px' }}>Creator: {diff.creator_name || connectedAccount?.username || 'You'}</span>
+                          </div>
+                        </div>
+                      );
+                    })()
+                  ) : (
+                    // No difficulty found — show target SR or a message
+                    <div style={{
+                      padding: '12px 14px',
+                      backgroundColor: 'var(--bg-sidebar)',
+                      borderRadius: '8px',
+                      border: '1px dashed var(--border)'
+                    }}>
+                      {request.guest_difficulty_target_sr ? (
+                        <>
+                          <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '4px' }}>Target SR (not yet uploaded)</div>
+                          {(() => {
+                            const color = getStarDifficultyColor(request.guest_difficulty_target_sr);
+                            const textColor = getStarDifficultyTextColor(request.guest_difficulty_target_sr);
+                            const [r, g, b] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
+                            return (
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                padding: '3px 10px',
+                                borderRadius: '12px',
+                                fontSize: '13px',
+                                fontWeight: '700',
+                                background: `rgba(${r}, ${g}, ${b}, 0.2)`,
+                                color: textColor,
+                                border: `1px solid rgba(${r}, ${g}, ${b}, 0.5)`,
+                              }}>
+                                ★ {parseFloat(request.guest_difficulty_target_sr).toFixed(2)}
+                              </span>
+                            );
+                          })()}
+                        </>
+                      ) : (
+                        <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                          No difficulty matched yet. Set a target SR or assign a difficulty name below.
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Quick Links section */}
+              <div>
               <h3 style={{ fontSize: '14px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.5px', marginBottom: '12px' }}>
                 Links & Modding Discussion
               </h3>
@@ -413,9 +601,12 @@ export default function RequestDetailModal({
                 borderRadius: '8px',
                 border: '1px solid var(--border)'
               }}>
-                <img 
+                <Image
                   src={request.requester_avatar || '/uploads/covers/default.jpg'} 
                   alt="avatar" 
+                  width={40}
+                  height={40}
+                  unoptimized
                   style={{ width: '40px', height: '40px', borderRadius: '50%', objectFit: 'cover', border: '1px solid var(--border)' }}
                   onError={(e) => {
                     e.target.src = '/uploads/covers/default.jpg';
@@ -577,6 +768,44 @@ export default function RequestDetailModal({
                         onChange={(e) => handleCategoryOtherTextChange(i, e.target.value)}
                         style={{ padding: '4px 8px', fontSize: '12px', backgroundColor: 'var(--bg-card)' }}
                       />
+                    )}
+
+                    {cat.name === 'Guest Difficulties' && cat.checked && (
+                      <div style={{ marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                        <div>
+                          <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', display: 'block', marginBottom: '4px' }}>
+                            Target SR (if not yet uploaded)
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            className="input-text"
+                            placeholder="e.g. 6.58"
+                            value={guestDifficultyTargetSR}
+                            onChange={(e) => setGuestDifficultyTargetSR(e.target.value)}
+                            style={{ padding: '4px 8px', fontSize: '12px', backgroundColor: 'var(--bg-card)' }}
+                          />
+                        </div>
+                        {request.is_osu_link && !request.user_difficulty && (
+                          <div>
+                            <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', display: 'block', marginBottom: '4px' }}>
+                              Assign Difficulty Name
+                            </label>
+                            <input
+                              type="text"
+                              className="input-text"
+                              placeholder="e.g. Mahiru's Expert"
+                              value={guestDifficultyName}
+                              onChange={(e) => setGuestDifficultyName(e.target.value)}
+                              style={{ padding: '4px 8px', fontSize: '12px', backgroundColor: 'var(--bg-card)' }}
+                            />
+                            <span style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '3px', display: 'block' }}>
+                              Match a difficulty by name when creator ID isn&apos;t cached yet.
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 ))}

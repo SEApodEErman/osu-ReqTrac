@@ -114,8 +114,37 @@ async function getDatabase() {
   // Lightweight migrations: add columns that may be missing on older databases
   await addColumnIfMissing(dbInstance, 'beatmap_cache', 'ranked_date', 'TEXT');
   await addColumnIfMissing(dbInstance, 'beatmap_cache', 'osu_last_updated', 'TEXT');
+  await addColumnIfMissing(dbInstance, 'requests', 'guest_difficulty_target_sr', 'REAL');
+  await addColumnIfMissing(dbInstance, 'requests', 'guest_difficulty_name', 'TEXT');
+
+  // Trigger difficulty migration asynchronously to update existing caches
+  migrateExistingDifficulties(dbInstance);
 
   return dbInstance;
+}
+
+// Migration to update difficulty creators/owners for old cache entries
+async function migrateExistingDifficulties(db) {
+  try {
+    const expiredMaps = await db.all("SELECT beatmapset_id FROM beatmap_cache WHERE difficulties_json NOT LIKE '%creator_name%'");
+    if (expiredMaps.length > 0) {
+      console.log(`[db] Found ${expiredMaps.length} beatmapsets in cache needing difficulty owner updates. Migrating...`);
+      const { refreshAndCacheBeatmapset } = require('./routes/beatmaps');
+      for (const row of expiredMaps) {
+        try {
+          console.log(`[db] Migrating beatmapset ${row.beatmapset_id}...`);
+          await refreshAndCacheBeatmapset(db, row.beatmapset_id);
+          // Wait 2 seconds to avoid rate limits
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        } catch (err) {
+          console.error(`[db] Failed to migrate beatmapset ${row.beatmapset_id}:`, err.message);
+        }
+      }
+      console.log('[db] Difficulty owner migration finished.');
+    }
+  } catch (error) {
+    console.error('[db] Error in migrateExistingDifficulties:', error.message);
+  }
 }
 
 // Add a column to a table if it does not already exist

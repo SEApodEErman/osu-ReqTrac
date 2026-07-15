@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Key, 
   UserCheck, 
@@ -25,22 +25,14 @@ export default function SettingsPanel({
   onImportJson
 }) {
   const { isConfigured, connectedAccount } = settingsData || {};
-  const [theme, setTheme] = useState('dark');
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === 'undefined') return 'dark';
+    return localStorage.getItem('theme') || 'dark';
+  });
   const [oauthValidation, setOauthValidation] = useState(null);
   const [isValidatingOauth, setIsValidatingOauth] = useState(false);
 
-  // Load theme from localStorage on mount
-  useEffect(() => {
-    const savedTheme = localStorage.getItem('theme') || 'dark';
-    setTheme(savedTheme);
-  }, []);
-
-  // Validate OAuth config on mount and when credentials change
-  useEffect(() => {
-    validateOauthConfig();
-  }, [isConfigured]);
-
-  const validateOauthConfig = async () => {
+  const validateOauthConfig = useCallback(async () => {
     if (!isConfigured) {
       setOauthValidation({ valid: false, issues: ['Client ID and Client Secret not configured'], clientIdConfigured: false, clientSecretConfigured: false, redirectUri: '' });
       return;
@@ -57,7 +49,15 @@ export default function SettingsPanel({
     } finally {
       setIsValidatingOauth(false);
     }
-  };
+  }, [isConfigured]);
+
+  // Validate OAuth config on mount and when credentials change.
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      void validateOauthConfig();
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
+  }, [validateOauthConfig]);
 
   const toggleTheme = (newTheme) => {
     setTheme(newTheme);
@@ -360,7 +360,7 @@ export default function SettingsPanel({
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             <h4 style={{ fontSize: '13px', fontWeight: '600' }}>Refresh Added Dates</h4>
             <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-              Set the "Date Added" of each osu! link request to the map's actual upload date from osu!. Useful after importing from a spreadsheet. Runs in the background and may take a while due to API rate limiting.
+              Set the &quot;Date Added&quot; of each osu! link request to the map&apos;s actual upload date from osu!. Useful after importing from a spreadsheet. Runs in the background and may take a while due to API rate limiting.
             </p>
             <button 
               type="button" 

@@ -39,17 +39,22 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId) {
   const localCoverPath = await downloadCover(beatmapsetId, mapsetData.covers?.cover);
 
   // Extract difficulties
-  const difficulties = mapsetData.beatmaps.map(b => ({
-    id: b.id,
-    name: b.version,
-    stars: b.difficulty_rating,
-    drain: b.hit_length, // hit_length is drain time (seconds)
-    bpm: b.bpm,
-    cs: b.cs,
-    ar: b.ar,
-    od: b.accuracy,
-    hp: b.drain
-  }));
+  const difficulties = mapsetData.beatmaps.map(b => {
+    const owner = b.owners && b.owners[0] ? b.owners[0] : null;
+    return {
+      id: b.id,
+      name: b.version,
+      stars: b.difficulty_rating,
+      drain: b.hit_length, // hit_length is drain time (seconds)
+      bpm: b.bpm,
+      cs: b.cs,
+      ar: b.ar,
+      od: b.accuracy,
+      hp: b.drain,
+      creator_id: owner ? owner.id : b.user_id,
+      creator_name: owner ? owner.username : mapsetData.creator
+    };
+  });
 
   // Cache the creator's user profile (name + avatar) to avoid repeat API calls
   await cacheUser(db, mapsetData.user_id);

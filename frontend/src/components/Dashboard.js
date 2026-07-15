@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import Image from 'next/image';
 import { 
   FileText, 
   Play, 
@@ -13,11 +14,23 @@ import {
   Calendar
 } from 'lucide-react';
 
-export default function Dashboard({ statsData, requestsList, onOpenRequest }) {
+export default function Dashboard({ statsData, requestsList, onOpenRequest, connectedAccount }) {
   const { overview = {}, stats = {}, yearSummary = [], requesterBreakdown = [] } = statsData || {};
+  const connectedUsername = connectedAccount?.username || null;
 
-  const maxRequesterCount = requesterBreakdown.length > 0
-    ? Math.max(...requesterBreakdown.map(r => r.count))
+  // Exclude the connected user from the breakdown (dashboard is for their own use)
+  const filteredBreakdown = connectedUsername
+    ? requesterBreakdown.filter(r => r.username !== connectedUsername)
+    : requesterBreakdown;
+
+  // Determine top requester excluding the connected user (fallback to next in line)
+  const nextTopRequester = filteredBreakdown.length > 0 ? filteredBreakdown[0].username : 'None';
+  const displayTopRequester = (connectedUsername && stats.mostFrequentRequester === connectedUsername)
+    ? nextTopRequester
+    : (stats.mostFrequentRequester || 'None');
+
+  const maxRequesterCount = filteredBreakdown.length > 0
+    ? Math.max(...filteredBreakdown.map(r => r.count))
     : 1;
   
   // Sort requests by added_date descending for recently added (max 5)
@@ -189,9 +202,12 @@ export default function Dashboard({ statsData, requestsList, onOpenRequest }) {
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
-                    <img 
+                    <Image
                       src={req.local_cover_path} 
                       alt="cover" 
+                      width={48}
+                      height={28}
+                      unoptimized
                       style={{ 
                         width: '48px', 
                         height: '28px', 
@@ -276,7 +292,7 @@ export default function Dashboard({ statsData, requestsList, onOpenRequest }) {
                 <span>Top Requester</span>
               </div>
               <span style={{ fontWeight: '700', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {stats.mostFrequentRequester || 'None'}
+                {displayTopRequester}
               </span>
             </div>
           </div>
@@ -314,7 +330,7 @@ export default function Dashboard({ statsData, requestsList, onOpenRequest }) {
                       <td style={{ fontWeight: '600', paddingLeft: 0 }}>{y.year}</td>
                       <td>{y.completedCount} requests</td>
                       <td>{y.totalDrainTime}</td>
-                      <td style={{ paddingRight: 0 }}>{y.mostRequestedUser}</td>
+                      <td style={{ paddingRight: 0 }}>{connectedUsername && y.mostRequestedUser === connectedUsername ? nextTopRequester : y.mostRequestedUser}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -406,17 +422,20 @@ export default function Dashboard({ statsData, requestsList, onOpenRequest }) {
           <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Top requesters by request count</span>
         </div>
 
-        {requesterBreakdown.length === 0 ? (
+        {filteredBreakdown.length === 0 ? (
           <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)' }}>
             No requester data yet.
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {requesterBreakdown.map((r, index) => (
+            {filteredBreakdown.map((r, index) => (
               <div key={r.username + index} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <img
+                <Image
                   src={r.avatar_url || '/uploads/covers/default.jpg'}
                   alt={r.username}
+                  width={32}
+                  height={32}
+                  unoptimized
                   style={{ width: '32px', height: '32px', borderRadius: '50%', objectFit: 'cover', border: '1px solid var(--border)', flexShrink: 0 }}
                   onError={(e) => { e.target.src = '/uploads/covers/default.jpg'; }}
                 />

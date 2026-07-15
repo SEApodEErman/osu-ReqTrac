@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useRef } from 'react';
 import { Plus, Link, AlertCircle, X, Loader2, UserCheck } from 'lucide-react';
 
 export default function QuickAdd({ 
@@ -39,23 +39,6 @@ export default function QuickAdd({
   });
   const [otherText, setOtherText] = useState('');
 
-  // Auto-detect osu! link
-  useEffect(() => {
-    if (inputVal.trim()) {
-      const isOsu = /osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i.test(inputVal);
-      if (isOsu) {
-        setIsManual(false);
-        // Fetch beatmap info to auto-populate requester
-        fetchBeatmapInfo(inputVal);
-      } else {
-        const isUrl = /^https?:\/\//i.test(inputVal);
-        if (isUrl && !isOsu) {
-          setIsManual(true);
-        }
-      }
-    }
-  }, [inputVal]);
-
   // Fetch beatmap info from osu! API
   const fetchBeatmapInfo = async (link) => {
     const isOsu = /osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i.test(link);
@@ -81,12 +64,18 @@ export default function QuickAdd({
     }
   };
 
-  // Reset form when closing
-  useEffect(() => {
-    if (!isOpen) {
-      resetForm();
+  const handleInputChange = (event) => {
+    const value = event.target.value;
+    setInputVal(value);
+
+    const isOsu = /osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i.test(value);
+    if (isOsu) {
+      setIsManual(false);
+      void fetchBeatmapInfo(value);
+    } else if (/^https?:\/\//i.test(value)) {
+      setIsManual(true);
     }
-  }, [isOpen]);
+  };
 
   const toggleCategory = (cat) => {
     setCategories(prev => ({ ...prev, [cat]: !prev[cat] }));
@@ -311,7 +300,7 @@ export default function QuickAdd({
                   className="input-text"
                   placeholder="Paste osu! beatmap link (e.g., https://osu.ppy.sh/beatmapsets/123456)..."
                   value={inputVal}
-                  onChange={(e) => setInputVal(e.target.value)}
+                  onChange={handleInputChange}
                   style={{ paddingLeft: '36px' }}
                   autoFocus
                 />

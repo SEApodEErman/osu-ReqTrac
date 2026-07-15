@@ -11,7 +11,10 @@ import QuickAdd from '../components/QuickAdd';
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [theme, setTheme] = useState('dark');
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === 'undefined') return 'dark';
+    return localStorage.getItem('theme') || 'dark';
+  });
   const [requestsList, setRequestsList] = useState([]);
   const [statsData, setStatsData] = useState({});
   const [settingsData, setSettingsData] = useState({});
@@ -20,17 +23,6 @@ export default function Home() {
   
   // QuickAdd duplicate check state
   const [duplicateError, setDuplicateError] = useState(null);
-
-  // Load theme and initial data
-  useEffect(() => {
-    // Theme setup
-    const savedTheme = localStorage.getItem('theme') || 'dark';
-    setTheme(savedTheme);
-    document.documentElement.setAttribute('data-theme', savedTheme);
-
-    // Initial API fetches
-    fetchData();
-  }, []);
 
   const fetchData = async () => {
     try {
@@ -87,6 +79,25 @@ export default function Home() {
       console.error('Error fetching settings:', e);
     }
   };
+
+  // Load the persisted theme and initial data once the client component mounts.
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark');
+
+    void Promise.all([
+      fetch('/api/requests').then(async (res) => {
+        if (res.ok) setRequestsList(await res.json());
+      }),
+      fetch('/api/stats').then(async (res) => {
+        if (res.ok) setStatsData(await res.json());
+      }),
+      fetch('/api/settings').then(async (res) => {
+        if (res.ok) setSettingsData(await res.json());
+      }),
+    ]).catch((error) => {
+      console.error('Failed to load initial data:', error);
+    });
+  }, []);
 
   const toggleTheme = (newTheme) => {
     setTheme(newTheme);
@@ -314,6 +325,7 @@ export default function Home() {
           statsData={statsData} 
           requestsList={requestsList}
           onOpenRequest={setSelectedRequest}
+          connectedAccount={settingsData.connectedAccount}
         />
       );
     }
@@ -398,6 +410,7 @@ export default function Home() {
           onClose={() => setSelectedRequest(null)}
           onUpdateRequest={handleUpdateRequest}
           onForceRefreshBeatmap={fetchRequests}
+          connectedAccount={settingsData.connectedAccount}
         />
       )}
 

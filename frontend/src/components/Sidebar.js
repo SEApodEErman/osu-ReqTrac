@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import Image from 'next/image';
 import { 
   LayoutDashboard, 
   ListTodo, 
@@ -175,9 +176,12 @@ export default function Sidebar({
             border: '1px solid var(--border)'
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <img 
+              <Image
                 src={connectedAccount.avatar || '/uploads/covers/default.jpg'} 
                 alt={connectedAccount.username} 
+                width={28}
+                height={28}
+                unoptimized
                 style={{ width: '28px', height: '28px', borderRadius: '50%', objectFit: 'cover' }}
               />
               <div style={{ maxWidth: '100px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

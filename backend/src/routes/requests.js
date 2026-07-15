@@ -3,37 +3,7 @@ const router = express.Router();
 const { getDatabase } = require('../db');
 const { fetchBeatmap, fetchBeatmapset, fetchUser, downloadCover } = require('../osuApi');
 const { refreshAndCacheBeatmapset } = require('./beatmaps');
-
-// Helper to parse osu! beatmap/beatmapset links
-function parseOsuLink(link) {
-  if (!link) return null;
-  
-  // Test for beatmapset link
-  // https://osu.ppy.sh/beatmapsets/123456
-  const setRegex = /osu\.ppy\.sh\/beatmapsets\/(\d+)/i;
-  const setMatch = link.match(setRegex);
-  if (setMatch) {
-    return { type: 'beatmapset', id: parseInt(setMatch[1], 10) };
-  }
-
-  // Test for beatmap link
-  // https://osu.ppy.sh/beatmaps/123456 or https://osu.ppy.sh/b/123456
-  const mapRegex = /osu\.ppy\.sh\/(?:beatmaps|b)\/(\d+)/i;
-  const mapMatch = link.match(mapRegex);
-  if (mapMatch) {
-    return { type: 'beatmap', id: parseInt(mapMatch[1], 10) };
-  }
-
-  return null;
-}
-
-// Helper to parse osu! user profile link
-function parseOsuUserLink(link) {
-  if (!link) return null;
-  const userRegex = /osu\.ppy\.sh\/(?:users|u)\/(\d+)/i;
-  const match = link.match(userRegex);
-  return match ? parseInt(match[1], 10) : null;
-}
+const { findUserDifficulty, parseOsuLink, parseOsuUserLink } = require('../utils/requestUtils');
 
 // Helper to update or cache a user profile
 async function fetchAndCacheUser(db, userIdOrUsername) {
@@ -92,6 +62,12 @@ router.get('/', async (req, res, next) => {
     const usersList = await db.all('SELECT * FROM users_cache');
     const userMap = new Map(usersList.map(u => [u.id, u]));
 
+    // Fetch connected user details from settings
+    const connectedUserIdSetting = await db.get("SELECT value FROM settings WHERE key = 'connected_user_id'");
+    const connectedUsernameSetting = await db.get("SELECT value FROM settings WHERE key = 'connected_username'");
+    const connectedUserId = connectedUserIdSetting ? parseInt(connectedUserIdSetting.value, 10) : null;
+    const connectedUsername = connectedUsernameSetting ? connectedUsernameSetting.value : null;
+
     // Map categories, tags, and compute highest stars
     const formattedRequests = requests.map(reqRow => {
       const reqId = reqRow.id;
@@ -113,19 +89,52 @@ router.get('/', async (req, res, next) => {
       let difficulties = [];
       let highestStars = 0;
       let numDifficulties = 0;
+      let guestDifficulties = [];
+      let highestGuestStars = 0;
+      let guestDifficultyCount = 0;
 
       if (reqRow.is_osu_link && reqRow.difficulties_json) {
         try {
           difficulties = JSON.parse(reqRow.difficulties_json);
           numDifficulties = difficulties.length;
           highestStars = difficulties.reduce((max, d) => d.stars > max ? d.stars : max, 0);
+
+          // Compute guest difficulties: difficulties where creator_id != beatmapset creator_id
+          const beatmapsetCreatorId = reqRow.cache_creator_id;
+          if (beatmapsetCreatorId) {
+            guestDifficulties = difficulties.filter(d => d.creator_id && d.creator_id !== beatmapsetCreatorId);
+            guestDifficultyCount = guestDifficulties.length;
+            highestGuestStars = guestDifficulties.reduce((max, d) => d.stars > max ? d.stars : max, 0);
+          }
         } catch (e) {
           console.error(`Error parsing difficulties for request ${reqId}`, e);
         }
       } else if (!reqRow.is_osu_link) {
         // For non-osu links, mock a single difficulty based on text field
         numDifficulties = reqRow.non_osu_difficulty ? 1 : 0;
-        highestStars = 0; // Not available for manual entry unless we add it
+        highestStars = reqRow.guest_difficulty_target_sr || 0;
+      }
+
+      // Check if this request is a Guest Difficulties request
+      const isGuestDiffRequest = categories.some(c => c.category_name === 'Guest Difficulties');
+      let userDifficulty = null;
+      
+      if (isGuestDiffRequest) {
+        // Find if there's any difficulty belonging to the connected user
+        if (reqRow.is_osu_link && difficulties.length > 0) {
+          userDifficulty = findUserDifficulty(difficulties, {
+            connectedUserId,
+            connectedUsername,
+            assignedName: reqRow.guest_difficulty_name,
+          });
+        }
+        
+        if (userDifficulty) {
+          highestStars = userDifficulty.stars;
+        } else {
+          // Fallback to target SR
+          highestStars = reqRow.guest_difficulty_target_sr || 0;
+        }
       }
 
       // Requester cache info
@@ -181,7 +190,14 @@ router.get('/', async (req, res, next) => {
         tags,
         difficulties,
         highest_stars: highestStars,
-        num_difficulties: numDifficulties
+        num_difficulties: numDifficulties,
+        // Guest difficulty info
+        guest_difficulties: guestDifficulties,
+        highest_guest_stars: highestGuestStars,
+        guest_difficulty_count: guestDifficultyCount,
+        guest_difficulty_target_sr: reqRow.guest_difficulty_target_sr,
+        guest_difficulty_name: reqRow.guest_difficulty_name,
+        user_difficulty: userDifficulty || null
       };
     });
 
@@ -271,7 +287,8 @@ router.post('/', async (req, res, next) => {
       discord_link,
       tags = [],
       force = false,
-      add_to_existing_id = null
+      add_to_existing_id = null,
+      guest_difficulty_target_sr
     } = req.body;
 
     const db = await getDatabase();
@@ -368,8 +385,9 @@ router.post('/', async (req, res, next) => {
     const result = await db.run(`
       INSERT INTO requests (
         beatmapset_id, is_osu_link, non_osu_artist, non_osu_title, non_osu_creator, non_osu_difficulty,
-        requester_id, requester_username, request_status, priority, deadline, notes, discord_link, osu_profile_link
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        requester_id, requester_username, request_status, priority, deadline, notes, discord_link, osu_profile_link,
+        guest_difficulty_target_sr
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       beatmapsetId,
       isOsuLink ? 1 : 0,
@@ -384,7 +402,8 @@ router.post('/', async (req, res, next) => {
       deadline || null,
       notes || null,
       discord_link || null,
-      osu_profile_link || null
+      osu_profile_link || null,
+      guest_difficulty_target_sr || null
     ]);
 
     const requestId = result.lastID;
@@ -438,6 +457,8 @@ router.patch('/:id', async (req, res, next) => {
       priority,
       deadline,
       added_date,
+      guest_difficulty_target_sr,
+      guest_difficulty_name,
       notes,
       discord_link,
       osu_profile_link,
@@ -538,6 +559,24 @@ router.patch('/:id', async (req, res, next) => {
         details: `Added date updated: ${oldDate} -> ${newDate}`
       });
       await db.run('UPDATE requests SET added_date = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', added_date, requestId);
+    }
+
+    // Update guest_difficulty_target_sr
+    if (guest_difficulty_target_sr !== undefined && guest_difficulty_target_sr !== oldRequest.guest_difficulty_target_sr) {
+      historyLogs.push({
+        action: 'guest_difficulty_target_sr_change',
+        details: `Guest Difficulty target SR updated: ${oldRequest.guest_difficulty_target_sr || 'None'} -> ${guest_difficulty_target_sr || 'None'}`
+      });
+      await db.run('UPDATE requests SET guest_difficulty_target_sr = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', guest_difficulty_target_sr, requestId);
+    }
+
+    // Update guest_difficulty_name (manual assignment for unmatched GDs)
+    if (guest_difficulty_name !== undefined && guest_difficulty_name !== oldRequest.guest_difficulty_name) {
+      historyLogs.push({
+        action: 'guest_difficulty_name_change',
+        details: `Guest Difficulty name assignment: ${oldRequest.guest_difficulty_name || 'None'} -> ${guest_difficulty_name || 'None'}`
+      });
+      await db.run('UPDATE requests SET guest_difficulty_name = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', guest_difficulty_name || null, requestId);
     }
 
     // Update Categories
