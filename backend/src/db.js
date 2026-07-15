@@ -1,0 +1,121 @@
+const path = require('path');
+const sqlite3 = require('sqlite3');
+const { open } = require('sqlite');
+const fs = require('fs');
+
+const dbPath = path.resolve(__dirname, '../data/database.sqlite');
+const dbDir = path.dirname(dbPath);
+
+// Ensure the data directory exists
+if (!fs.existsSync(dbDir)) {
+  fs.mkdirSync(dbDir, { recursive: true });
+}
+
+// Ensure the local covers directory exists
+const coversDir = path.resolve(dbDir, 'covers');
+if (!fs.existsSync(coversDir)) {
+  fs.mkdirSync(coversDir, { recursive: true });
+}
+
+let dbInstance = null;
+
+async function getDatabase() {
+  if (dbInstance) return dbInstance;
+
+  dbInstance = await open({
+    filename: dbPath,
+    driver: sqlite3.Database
+  });
+
+  // Enable foreign key support
+  await dbInstance.run('PRAGMA foreign_keys = ON');
+
+  // Initialize schema
+  await dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      beatmapset_id INTEGER NULL,
+      is_osu_link BOOLEAN NOT NULL DEFAULT 1,
+      non_osu_artist TEXT,
+      non_osu_title TEXT,
+      non_osu_creator TEXT,
+      non_osu_difficulty TEXT,
+      requester_id INTEGER,
+      requester_username TEXT,
+      request_status TEXT CHECK(request_status IN ('Accepted', 'Working', 'Completed', 'Cancelled')) DEFAULT 'Accepted',
+      priority TEXT CHECK(priority IN ('Low', 'Medium', 'High')) DEFAULT 'Medium',
+      deadline DATE,
+      notes TEXT,
+      discord_link TEXT,
+      osu_profile_link TEXT,
+      added_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed_date DATETIME,
+      last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS request_categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL,
+      category_name TEXT NOT NULL,
+      other_text TEXT,
+      status TEXT CHECK(status IN ('Pending', 'Working', 'Completed', 'Cancelled')) DEFAULT 'Pending',
+      FOREIGN KEY(request_id) REFERENCES requests(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS beatmap_cache (
+      beatmapset_id INTEGER PRIMARY KEY,
+      artist TEXT NOT NULL,
+      title TEXT NOT NULL,
+      creator TEXT NOT NULL,
+      creator_id INTEGER NOT NULL,
+      cover_url TEXT NOT NULL,
+      local_cover_path TEXT NOT NULL,
+      ranked_status TEXT NOT NULL,
+      difficulties_json TEXT NOT NULL,
+      last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS users_cache (
+      id INTEGER PRIMARY KEY,
+      username TEXT NOT NULL,
+      avatar_url TEXT NOT NULL,
+      country_code TEXT NOT NULL,
+      last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS tags (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS request_tags (
+      request_id INTEGER NOT NULL,
+      tag_id INTEGER NOT NULL,
+      PRIMARY KEY(request_id, tag_id),
+      FOREIGN KEY(request_id) REFERENCES requests(id) ON DELETE CASCADE,
+      FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL,
+      action_type TEXT NOT NULL,
+      details TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(request_id) REFERENCES requests(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+
+  return dbInstance;
+}
+
+module.exports = {
+  getDatabase,
+  dbPath,
+  coversDir
+};
