@@ -111,7 +111,21 @@ async function getDatabase() {
     );
   `);
 
+  // Lightweight migrations: add columns that may be missing on older databases
+  await addColumnIfMissing(dbInstance, 'beatmap_cache', 'ranked_date', 'TEXT');
+  await addColumnIfMissing(dbInstance, 'beatmap_cache', 'osu_last_updated', 'TEXT');
+
   return dbInstance;
+}
+
+// Add a column to a table if it does not already exist
+async function addColumnIfMissing(db, table, column, type) {
+  const cols = await db.all(`PRAGMA table_info(${table})`);
+  const exists = cols.some(c => c.name === column);
+  if (!exists) {
+    await db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    console.log(`[db] Added missing column ${table}.${column}`);
+  }
 }
 
 module.exports = {

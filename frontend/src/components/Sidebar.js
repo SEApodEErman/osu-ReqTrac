@@ -5,10 +5,7 @@ import {
   LayoutDashboard, 
   ListTodo, 
   Settings, 
-  Moon, 
-  Sun, 
   Music, 
-  Layers, 
   Film, 
   HelpCircle,
   LogOut,
@@ -18,8 +15,6 @@ import {
 export default function Sidebar({ 
   activeTab, 
   setActiveTab, 
-  theme, 
-  toggleTheme, 
   connectedAccount,
   onDisconnect
 }) {
@@ -163,13 +158,10 @@ export default function Sidebar({
         </button>
       </nav>
 
-      {/* Connected Account & Theme Toggle footer */}
+      {/* Connected Account footer */}
       <div style={{ 
         padding: '16px', 
         borderTop: '1px solid var(--border)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '12px'
       }}>
         {/* Connected Profile */}
         {connectedAccount ? (
@@ -210,52 +202,6 @@ export default function Sidebar({
             osu! API disconnected
           </div>
         )}
-
-        {/* Theme Selector */}
-        <div style={{ 
-          display: 'flex', 
-          backgroundColor: 'var(--bg-app)', 
-          borderRadius: '8px', 
-          padding: '2px',
-          border: '1px solid var(--border)'
-        }}>
-          <button
-            onClick={() => toggleTheme('dark')}
-            style={{
-              flexGrow: 1,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '6px 0',
-              borderRadius: '6px',
-              backgroundColor: theme === 'dark' ? 'var(--bg-card)' : 'transparent',
-              color: theme === 'dark' ? 'var(--osu-pink)' : 'var(--text-muted)',
-              cursor: 'pointer',
-              transition: 'all 0.2s'
-            }}
-          >
-            <Moon size={14} style={{ marginRight: '6px' }} />
-            <span style={{ fontSize: '11px', fontWeight: '600' }}>Dark</span>
-          </button>
-          <button
-            onClick={() => toggleTheme('light')}
-            style={{
-              flexGrow: 1,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              padding: '6px 0',
-              borderRadius: '6px',
-              backgroundColor: theme === 'light' ? 'var(--bg-card)' : 'transparent',
-              color: theme === 'light' ? 'var(--osu-pink)' : 'var(--text-muted)',
-              cursor: 'pointer',
-              transition: 'all 0.2s'
-            }}
-          >
-            <Sun size={14} style={{ marginRight: '6px' }} />
-            <span style={{ fontSize: '11px', fontWeight: '600' }}>Light</span>
-          </button>
-        </div>
       </div>
     </aside>
   );

@@ -1,7 +1,24 @@
 const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db');
-const { fetchBeatmapset, downloadCover } = require('../osuApi');
+const { fetchBeatmapset, fetchUser, downloadCover } = require('../osuApi');
+
+// Fetch and cache a user profile (used for beatmap creators / requesters)
+async function cacheUser(db, userIdOrUsername) {
+  try {
+    const userData = await fetchUser(userIdOrUsername);
+    if (userData) {
+      await db.run(`
+        INSERT OR REPLACE INTO users_cache (id, username, avatar_url, country_code, last_updated)
+        VALUES (?, ?, ?, ?, ?)
+      `, [userData.id, userData.username, userData.avatar_url, userData.country_code, new Date().toISOString()]);
+      return userData;
+    }
+  } catch (error) {
+    console.error('Failed to cache user:', error.message);
+  }
+  return null;
+}
 
 // Helper to check if cache is older than 7 days
 function isCacheExpired(lastUpdatedStr) {
@@ -34,6 +51,9 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId) {
     hp: b.drain
   }));
 
+  // Cache the creator's user profile (name + avatar) to avoid repeat API calls
+  await cacheUser(db, mapsetData.user_id);
+
   const cacheEntry = {
     beatmapset_id: mapsetData.id,
     artist: mapsetData.artist,
@@ -44,13 +64,16 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId) {
     local_cover_path: localCoverPath,
     ranked_status: mapsetData.status.charAt(0).toUpperCase() + mapsetData.status.slice(1).toLowerCase(), // Capitalize status
     difficulties_json: JSON.stringify(difficulties),
+    ranked_date: mapsetData.ranked_date || null,
+    osu_last_updated: mapsetData.last_updated || null,
+    submitted_date: mapsetData.submitted_date || null,
     last_updated: new Date().toISOString()
   };
 
   await db.run(`
     INSERT OR REPLACE INTO beatmap_cache (
-      beatmapset_id, artist, title, creator, creator_id, cover_url, local_cover_path, ranked_status, difficulties_json, last_updated
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      beatmapset_id, artist, title, creator, creator_id, cover_url, local_cover_path, ranked_status, difficulties_json, ranked_date, osu_last_updated, last_updated
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
     cacheEntry.beatmapset_id,
     cacheEntry.artist,
@@ -61,6 +84,8 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId) {
     cacheEntry.local_cover_path,
     cacheEntry.ranked_status,
     cacheEntry.difficulties_json,
+    cacheEntry.ranked_date,
+    cacheEntry.osu_last_updated,
     cacheEntry.last_updated
   ]);
 

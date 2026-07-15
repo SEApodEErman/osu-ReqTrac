@@ -14,7 +14,11 @@ import {
 } from 'lucide-react';
 
 export default function Dashboard({ statsData, requestsList, onOpenRequest }) {
-  const { overview = {}, stats = {}, yearSummary = [] } = statsData || {};
+  const { overview = {}, stats = {}, yearSummary = [], requesterBreakdown = [] } = statsData || {};
+
+  const maxRequesterCount = requesterBreakdown.length > 0
+    ? Math.max(...requesterBreakdown.map(r => r.count))
+    : 1;
   
   // Sort requests by added_date descending for recently added (max 5)
   const recentlyAdded = [...requestsList]
@@ -390,6 +394,60 @@ export default function Dashboard({ statsData, requestsList, onOpenRequest }) {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Requester Breakdown */}
+      <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <User size={16} />
+            Requester Breakdown
+          </h3>
+          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Top requesters by request count</span>
+        </div>
+
+        {requesterBreakdown.length === 0 ? (
+          <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)' }}>
+            No requester data yet.
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            {requesterBreakdown.map((r, index) => (
+              <div key={r.username + index} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <img
+                  src={r.avatar_url || '/uploads/covers/default.jpg'}
+                  alt={r.username}
+                  style={{ width: '32px', height: '32px', borderRadius: '50%', objectFit: 'cover', border: '1px solid var(--border)', flexShrink: 0 }}
+                  onError={(e) => { e.target.src = '/uploads/covers/default.jpg'; }}
+                />
+                <div style={{ flexGrow: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                    <span style={{ fontSize: '13px', fontWeight: '600', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {r.country_code && (
+                        <span style={{ color: 'var(--text-muted)', fontWeight: '700', marginRight: '6px', textTransform: 'uppercase' }}>
+                          [{r.country_code}]
+                        </span>
+                      )}
+                      {r.username}
+                    </span>
+                    <span style={{ fontSize: '12px', fontWeight: '700', color: 'var(--osu-pink)', flexShrink: 0, marginLeft: '8px' }}>
+                      {r.count}
+                    </span>
+                  </div>
+                  <div style={{ height: '6px', backgroundColor: 'var(--bg-app)', borderRadius: '3px', overflow: 'hidden' }}>
+                    <div style={{
+                      height: '100%',
+                      width: `${(r.count / maxRequesterCount) * 100}%`,
+                      backgroundColor: 'var(--osu-pink)',
+                      borderRadius: '3px',
+                      transition: 'width 0.3s'
+                    }} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

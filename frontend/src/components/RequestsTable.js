@@ -14,6 +14,96 @@ import {
   Tag
 } from 'lucide-react';
 
+// osu! official star difficulty spectrum from osu.Game.Rulesets.Osu.Difficulty.OsuColour
+// https://github.com/ppy/osu/blob/master/osu.Game.Rulesets.Osu/Difficulty/OsuColour.cs
+const STAR_DIFFICULTY_SPECTRUM = [
+  { stars: 0.0, color: '#aaaaaa' },
+  { stars: 0.1, color: '#aaaaaa' },
+  { stars: 0.1, color: '#4290fb' },
+  { stars: 1.25, color: '#4fc0ff' },
+  { stars: 2.0, color: '#4fffd5' },
+  { stars: 2.5, color: '#7cff4f' },
+  { stars: 3.3, color: '#f6f05c' },
+  { stars: 4.2, color: '#ff8068' },
+  { stars: 4.9, color: '#ff4e6f' },
+  { stars: 5.8, color: '#c645b8' },
+  { stars: 6.7, color: '#6563de' },
+  { stars: 7.7, color: '#18158e' },
+  { stars: 9.0, color: '#000000' },
+  { stars: 10.0, color: '#000000' },
+];
+
+function getStarDifficultyColor(stars) {
+  if (stars <= 0) return '#aaaaaa';
+  if (stars >= 10) return '#000000';
+  
+  // Find the two spectrum points to interpolate between
+  for (let i = 0; i < STAR_DIFFICULTY_SPECTRUM.length - 1; i++) {
+    const current = STAR_DIFFICULTY_SPECTRUM[i];
+    const next = STAR_DIFFICULTY_SPECTRUM[i + 1];
+    
+    if (stars >= current.stars && stars <= next.stars) {
+      // Linear interpolation between the two colors
+      const ratio = (stars - current.stars) / (next.stars - current.stars);
+      return interpolateColor(current.color, next.color, ratio);
+    }
+  }
+  
+  // Fallback
+  return '#aaaaaa';
+}
+
+// osu! text colour logic from StarRatingDisplay.cs
+// < 6.5★: Black, 6.5–9.0★: Orange, 9.0★+: gradient spectrum
+const STAR_TEXT_CUTOFF = 6.5;
+const STAR_TEXT_GRADIENT_CUTOFF = 9.0;
+const STAR_TEXT_SPECTRUM = [
+  { stars: 9.0, color: '#f6f05c' },
+  { stars: 9.9, color: '#ff8068' },
+  { stars: 10.6, color: '#ff4e6f' },
+  { stars: 11.5, color: '#c645b8' },
+  { stars: 12.4, color: '#6563de' },
+];
+
+function getStarDifficultyTextColor(stars) {
+  if (stars < STAR_TEXT_CUTOFF) return 'rgba(0,0,0,0.75)';
+  if (stars < STAR_TEXT_GRADIENT_CUTOFF) return '#f6f05c';
+
+  for (let i = 0; i < STAR_TEXT_SPECTRUM.length - 1; i++) {
+    const current = STAR_TEXT_SPECTRUM[i];
+    const next = STAR_TEXT_SPECTRUM[i + 1];
+    if (stars >= current.stars && stars <= next.stars) {
+      const ratio = (stars - current.stars) / (next.stars - current.stars);
+      return interpolateColor(current.color, next.color, ratio);
+    }
+  }
+
+  return '#6563de';
+}
+
+function interpolateColor(color1, color2, ratio) {
+  // Parse hex colors to RGB
+  const hex1 = color1.replace('#', '');
+  const hex2 = color2.replace('#', '');
+  
+  const r1 = parseInt(hex1.substring(0, 2), 16);
+  const g1 = parseInt(hex1.substring(2, 4), 16);
+  const b1 = parseInt(hex1.substring(4, 6), 16);
+  
+  const r2 = parseInt(hex2.substring(0, 2), 16);
+  const g2 = parseInt(hex2.substring(2, 4), 16);
+  const b2 = parseInt(hex2.substring(4, 6), 16);
+  
+  // Interpolate
+  const r = Math.round(r1 + (r2 - r1) * ratio);
+  const g = Math.round(g1 + (g2 - g1) * ratio);
+  const b = Math.round(b1 + (b2 - b1) * ratio);
+  
+  // Convert back to hex
+  const toHex = (c) => c.toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
 export default function RequestsTable({ 
   requestsList, 
   onOpenRequest, 
@@ -163,7 +253,7 @@ export default function RequestsTable({
   const handleClearFilters = () => {
     setSearchTerm('');
     setStatusFilter('');
-    priorityFilter('');
+    setPriorityFilter('');
     setTagFilter('');
   };
 
@@ -285,11 +375,7 @@ export default function RequestsTable({
                 <th onClick={() => toggleSort('highest_stars')} style={{ cursor: 'pointer' }}>
                   Highest Stars <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
                 </th>
-                {activeCategory !== 'All' ? (
-                  <th>Category Status</th>
-                ) : (
-                  <th>Beatmap Status</th>
-                )}
+                <th>Beatmap Status</th>
                 <th>Request Status</th>
                 <th onClick={() => toggleSort('deadline')} style={{ cursor: 'pointer' }}>
                   Deadline <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
@@ -305,14 +391,7 @@ export default function RequestsTable({
                 const deadlineInfo = getDeadlineInfo(req.deadline);
                 const isChecked = selectedIds.includes(req.id);
                 
-                // Fetch relevant category status when filtered inside category
-                let targetCategoryStatus = null;
-                if (activeCategory !== 'All') {
-                  const activeCatObj = req.categories.find(c => c.category_name === activeCategory);
-                  if (activeCatObj) {
-                    targetCategoryStatus = activeCatObj.status;
-                  }
-                }
+
 
                 return (
                   <tr 
@@ -370,36 +449,83 @@ export default function RequestsTable({
                     </td>
 
                     {/* Stars */}
-                    <td style={{ fontWeight: '600', color: 'var(--osu-pink)', fontSize: '12px' }}>
-                      {req.highest_stars > 0 ? `★ ${req.highest_stars.toFixed(2)}` : '—'}
-                    </td>
-
-                    {/* Beatmap Status / Specific Category Status */}
                     <td>
-                      {activeCategory !== 'All' && targetCategoryStatus ? (
-                        <span className={`badge badge-${targetCategoryStatus.toLowerCase()}`} style={{ fontSize: '10px' }}>
-                          {targetCategoryStatus}
-                        </span>
+                      {req.highest_stars > 0 ? (
+                        (() => {
+                          const color = getStarDifficultyColor(req.highest_stars);
+                          const textColor = getStarDifficultyTextColor(req.highest_stars);
+                          const [r, g, b] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
+                          return (
+                            <span style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              padding: '4px 10px',
+                              borderRadius: '20px',
+                              fontSize: '12px',
+                              fontWeight: '600',
+                              background: `rgba(${r}, ${g}, ${b}, 0.7)`,
+                              color: textColor,
+                              border: `1px solid rgba(${r}, ${g}, ${b}, 1.0)`,
+                            }}>
+                              ★ {req.highest_stars.toFixed(2)}
+                            </span>
+                          );
+                        })()
                       ) : (
-                        <span className={`badge badge-${(req.ranked_status || 'Manual').toLowerCase()}`}>
-                          {req.ranked_status}
-                        </span>
+                        <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>—</span>
                       )}
                     </td>
 
-                    {/* Inline Request Status Selector */}
+                    {/* Beatmap Status */}
+                    <td>
+                      <span className={`badge badge-${(req.ranked_status || 'Manual').toLowerCase()}`}>
+                        {req.ranked_status}
+                      </span>
+                    </td>
+
+{/* Inline Request Status Selector */}
                     <td onClick={(e) => e.stopPropagation()}>
-                      <select
-                        value={req.request_status}
-                        onChange={(e) => onUpdateRequest(req.id, { request_status: e.target.value })}
-                        className={`badge badge-${req.request_status.toLowerCase()}`}
-                        style={{ border: '1px solid var(--border)', cursor: 'pointer', paddingRight: '4px', textTransform: 'capitalize', fontWeight: '600' }}
-                      >
-                        <option value="Accepted">Accepted</option>
-                        <option value="Working">Working</option>
-                        <option value="Completed">Completed</option>
-                        <option value="Cancelled">Cancelled</option>
-                      </select>
+                      <div className={`status-badge-select badge badge-${req.request_status.toLowerCase()}`} style={{ position: 'relative', display: 'inline-block' }}>
+                        <select
+                          value={req.request_status}
+                          onChange={(e) => onUpdateRequest(req.id, { request_status: e.target.value })}
+                          className={`status-badge-inner badge badge-${req.request_status.toLowerCase()}`}
+                          style={{
+                            cursor: 'pointer',
+                            textTransform: 'uppercase',
+                            fontWeight: '600',
+                            WebkitAppearance: 'none',
+                            MozAppearance: 'none',
+                            appearance: 'none',
+                            textAlign: 'center',
+                            textAlignLast: 'center',
+                            paddingRight: '22px',
+                            paddingLeft: '10px',
+                            border: 'none',
+                            backgroundImage: 'none',
+                            backgroundColor: 'transparent',
+                          }}
+                        >
+                          <option value="Accepted">Accepted</option>
+                          <option value="Working">Working</option>
+                          <option value="Completed">Completed</option>
+                          <option value="Cancelled">Cancelled</option>
+                        </select>
+                        <div style={{ 
+                          position: 'absolute', 
+                          right: '8px', 
+                          top: '50%', 
+                          transform: 'translateY(-50%)',
+                          pointerEvents: 'none',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center'
+                        }}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="6 9 12 15 18 9"/>
+                          </svg>
+                        </div>
+                      </div>
                     </td>
 
                     {/* Deadline */}

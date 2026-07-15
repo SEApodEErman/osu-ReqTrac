@@ -29,6 +29,9 @@ export default function RequestDetailModal({
   const [requestStatus, setRequestStatus] = useState(request.request_status);
   const [priority, setPriority] = useState(request.priority);
   const [deadline, setDeadline] = useState(request.deadline || '');
+  const [addedDate, setAddedDate] = useState(request.added_date ? request.added_date.split(' ')[0] : '');
+  const [isEditingDate, setIsEditingDate] = useState(false);
+  const [isEditingDeadline, setIsEditingDeadline] = useState(false);
   const [notes, setNotes] = useState(request.notes || '');
   const [discordLink, setDiscordLink] = useState(request.discord_link || '');
   const [profileLink, setProfileLink] = useState(request.osu_profile_link || '');
@@ -99,15 +102,6 @@ export default function RequestDetailModal({
     }));
   };
 
-  const handleCategoryStatusChange = (index, status) => {
-    setCategories(prev => prev.map((cat, i) => {
-      if (i === index) {
-        return { ...cat, status };
-      }
-      return cat;
-    }));
-  };
-
   const handleCategoryOtherTextChange = (index, otherText) => {
     setCategories(prev => prev.map((cat, i) => {
       if (i === index) {
@@ -131,24 +125,18 @@ export default function RequestDetailModal({
   };
 
   const handleSave = async () => {
-    // Format categories payload
     const catsPayload = categories
       .filter(c => c.checked)
       .map(c => ({
         category_name: c.name,
         other_text: c.name === 'Others' ? c.otherText : null,
-        status: c.status
       }));
-
-    if (catsPayload.length === 0) {
-      alert('Please select at least one request category.');
-      return;
-    }
 
     const payload = {
       request_status: requestStatus,
       priority,
       deadline: deadline || null,
+      added_date: addedDate || null,
       notes: notes || null,
       discord_link: discordLink || null,
       osu_profile_link: profileLink || null,
@@ -443,7 +431,7 @@ export default function RequestDetailModal({
                         [{request.requester_country}]
                       </span>
                     )}
-                    <span>{request.requester_id ? 'osu! ID Cached' : 'Manual Entry'}</span>
+                    <span>{request.requester_is_creator ? 'Mapper (auto)' : (request.requester_id ? 'osu! ID Cached' : 'Manual Entry')}</span>
                   </div>
                 </div>
               </div>
@@ -505,13 +493,67 @@ export default function RequestDetailModal({
               </div>
             </div>
 
-            {/* Category checklist & individual statuses */}
+
+
+            {/* Deadline */}
             <div>
               <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>
-                Request Categories Progress
+                Deadline
+              </label>
+              {isEditingDeadline ? (
+                <input
+                  type="date"
+                  className="input-text"
+                  value={deadline}
+                  autoFocus
+                  onChange={(e) => setDeadline(e.target.value)}
+                  onBlur={() => setIsEditingDeadline(false)}
+                />
+              ) : (
+                <div
+                  onClick={() => setIsEditingDeadline(true)}
+                  className="input-text"
+                  style={{ cursor: 'pointer', color: deadline ? 'var(--text-main)' : 'var(--text-muted)', fontWeight: '600', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                >
+                  <span>{deadline ? new Date(deadline).toLocaleDateString() : 'No deadline set'}</span>
+                  <Calendar size={14} style={{ opacity: 0.6 }} />
+                </div>
+              )}
+            </div>
+
+            {/* Date Added */}
+            <div>
+              <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>
+                Date Added
+              </label>
+              {isEditingDate ? (
+                <input
+                  type="date"
+                  className="input-text"
+                  value={addedDate}
+                  autoFocus
+                  onChange={(e) => setAddedDate(e.target.value)}
+                  onBlur={() => setIsEditingDate(false)}
+                />
+              ) : (
+                <div
+                  onClick={() => setIsEditingDate(true)}
+                  className="input-text"
+                  style={{ cursor: 'pointer', color: addedDate ? 'var(--text-main)' : 'var(--text-muted)', fontWeight: '600', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                >
+                  <span>{request.added_date ? new Date(request.added_date).toLocaleDateString() : 'No date set'}</span>
+                  <Calendar size={14} style={{ opacity: 0.6 }} />
+                </div>
+              )}
+            </div>
+
+            {/* Category checklist */}
+            <div>
+              <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>
+                Request Categories
               </label>
               
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 {categories.map((cat, i) => (
                   <div key={cat.name} style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '8px 12px', backgroundColor: 'var(--bg-sidebar)', borderRadius: '8px', border: '1px solid var(--border)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -524,21 +566,6 @@ export default function RequestDetailModal({
                         <span className="checkmark"></span>
                         <span style={{ fontSize: '13px' }}>{cat.name}</span>
                       </label>
-
-                      {/* Dropdown status for category progress */}
-                      {cat.checked && (
-                        <select
-                          className="input-text"
-                          value={cat.status}
-                          onChange={(e) => handleCategoryStatusChange(i, e.target.value)}
-                          style={{ padding: '2px 6px', fontSize: '11px', width: '100px', backgroundColor: 'var(--bg-card)' }}
-                        >
-                          <option value="Pending">Pending</option>
-                          <option value="Working">Working</option>
-                          <option value="Completed">Completed</option>
-                          <option value="Cancelled">Cancelled</option>
-                        </select>
-                      )}
                     </div>
 
                     {cat.name === 'Others' && cat.checked && (
@@ -554,19 +581,6 @@ export default function RequestDetailModal({
                   </div>
                 ))}
               </div>
-            </div>
-
-            {/* Deadline */}
-            <div>
-              <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>
-                Deadline
-              </label>
-              <input 
-                type="date" 
-                className="input-text" 
-                value={deadline} 
-                onChange={(e) => setDeadline(e.target.value)} 
-              />
             </div>
 
             {/* Tags section */}

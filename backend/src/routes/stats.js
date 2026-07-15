@@ -13,6 +13,36 @@ function formatDrainTime(seconds) {
   return `${hours.toFixed(1)} hours`;
 }
 
+// Determine the effective requester (falls back to beatmap creator when none set)
+function getEffectiveRequester(row) {
+  const hasExplicit = !!row.requester_id ||
+    (row.requester_username && row.requester_username.toLowerCase() !== 'anonymous');
+  if (hasExplicit) {
+    return { id: row.requester_id, name: row.requester_username };
+  }
+  if (row.creator) {
+    return { id: row.creator_id, name: row.creator };
+  }
+  return null;
+}
+
+// Determine the year used for the yearly breakdown. Prefers the beatmap's
+// ranked/loved date, then its last-updated date, then the request completion date.
+function getEffectiveYear(row) {
+  const status = (row.ranked_status || '').toLowerCase();
+  let dateStr = null;
+  if ((status === 'ranked' || status === 'loved') && row.ranked_date) {
+    dateStr = row.ranked_date;
+  } else if (row.osu_last_updated) {
+    dateStr = row.osu_last_updated;
+  } else if (row.completed_date) {
+    dateStr = row.completed_date;
+  }
+  if (!dateStr) return null;
+  const year = new Date(dateStr).getFullYear();
+  return isNaN(year) ? null : year;
+}
+
 // GET /api/stats - get dashboard statistics
 router.get('/', async (req, res, next) => {
   try {
@@ -40,9 +70,14 @@ router.get('/', async (req, res, next) => {
         AND deadline <= ?
     `, [nowStr, oneWeekLaterStr]);
 
+    // User cache for avatars/countries
+    const usersList = await db.all('SELECT * FROM users_cache');
+    const userMap = new Map(usersList.map(u => [u.id, u]));
+
     // 2. Fetch all completed requests with cached beatmaps to compute drain time and ranked status
     const completedRequests = await db.all(`
-      SELECT r.id, r.completed_date, r.requester_username, b.ranked_status, b.difficulties_json
+      SELECT r.id, r.completed_date, r.requester_id, r.requester_username,
+             b.ranked_status, b.difficulties_json, b.creator, b.creator_id, b.ranked_date, b.osu_last_updated
       FROM requests r
       LEFT JOIN beatmap_cache b ON r.beatmapset_id = b.beatmapset_id
       WHERE r.request_status = 'Completed'
@@ -71,9 +106,10 @@ router.get('/', async (req, res, next) => {
         rankedCompletedCount++;
       }
 
-      // Count requesters
-      if (req.requester_username && req.requester_username.toLowerCase() !== 'anonymous') {
-        requesterCounts[req.requester_username] = (requesterCounts[req.requester_username] || 0) + 1;
+      // Count requesters (using creator fallback)
+      const eff = getEffectiveRequester(req);
+      if (eff && eff.name) {
+        requesterCounts[eff.name] = (requesterCounts[eff.name] || 0) + 1;
       }
     });
 
@@ -88,13 +124,12 @@ router.get('/', async (req, res, next) => {
     }
 
     // 3. Year Summary Breakdown
-    // Group completed requests by completion year
+    // Group completed requests by the beatmap's ranked/loved (or last-updated) year
     const yearSummary = {};
 
     completedRequests.forEach(req => {
-      if (!req.completed_date) return;
-      const year = new Date(req.completed_date).getFullYear();
-      if (isNaN(year)) return;
+      const year = getEffectiveYear(req);
+      if (year === null) return;
 
       if (!yearSummary[year]) {
         yearSummary[year] = {
@@ -116,8 +151,9 @@ router.get('/', async (req, res, next) => {
       }
       yearSummary[year].drainSeconds += maxDrain;
 
-      if (req.requester_username && req.requester_username.toLowerCase() !== 'anonymous') {
-        yearSummary[year].requesters[req.requester_username] = (yearSummary[year].requesters[req.requester_username] || 0) + 1;
+      const eff = getEffectiveRequester(req);
+      if (eff && eff.name) {
+        yearSummary[year].requesters[eff.name] = (yearSummary[year].requesters[eff.name] || 0) + 1;
       }
     });
 
@@ -139,6 +175,34 @@ router.get('/', async (req, res, next) => {
       };
     }).sort((a, b) => b.year - a.year); // Sorted descending by year
 
+    // 4. Requester Breakdown (across all requests, using creator fallback)
+    const allRequests = await db.all(`
+      SELECT r.requester_id, r.requester_username, b.creator, b.creator_id
+      FROM requests r
+      LEFT JOIN beatmap_cache b ON r.beatmapset_id = b.beatmapset_id
+    `);
+
+    const requesterMap = {};
+    allRequests.forEach(req => {
+      const eff = getEffectiveRequester(req);
+      if (!eff || !eff.name) return;
+      if (!requesterMap[eff.name]) {
+        const cache = eff.id ? userMap.get(eff.id) : null;
+        requesterMap[eff.name] = {
+          username: eff.name,
+          count: 0,
+          avatar_url: cache ? cache.avatar_url : null,
+          country_code: cache ? cache.country_code : null,
+          profile_url: eff.id ? `https://osu.ppy.sh/users/${eff.id}` : null
+        };
+      }
+      requesterMap[eff.name].count++;
+    });
+
+    const requesterBreakdown = Object.values(requesterMap)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+
     res.json({
       overview: {
         total: totalRequestsRow.count,
@@ -152,7 +216,8 @@ router.get('/', async (req, res, next) => {
         rankedCompletedCount,
         mostFrequentRequester
       },
-      yearSummary: yearSummaryList
+      yearSummary: yearSummaryList,
+      requesterBreakdown
     });
   } catch (error) {
     next(error);

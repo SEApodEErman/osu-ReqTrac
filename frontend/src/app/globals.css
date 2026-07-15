@@ -228,6 +228,28 @@ button, input, select, textarea {
   box-shadow: 0 0 0 2px var(--osu-pink-transparent);
 }
 
+select.input-text {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 34px;
+  line-height: 1.4;
+}
+
+.status-badge-select .status-badge-inner,
+.status-badge-select .status-badge-inner:focus {
+  color: inherit !important;
+  background-color: transparent !important;
+}
+
+/* Chevron inside table status badge container inherits badge color */
+.status-badge-select > div:last-child svg {
+  color: inherit;
+}
+
 .btn-primary {
   background-color: var(--osu-pink);
   color: white;

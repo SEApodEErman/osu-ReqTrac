@@ -4,6 +4,34 @@ const { getDatabase, coversDir } = require('./db');
 
 let accessToken = null;
 let tokenExpiresAt = null;
+let rateLimitedUntil = null;
+let lastRequestTime = 0;
+const RATE_LIMIT_WAIT = 30000;
+const MIN_REQUEST_INTERVAL = 2000;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function throttle() {
+  const elapsed = Date.now() - lastRequestTime;
+  if (elapsed < MIN_REQUEST_INTERVAL) {
+    await sleep(MIN_REQUEST_INTERVAL - elapsed);
+  }
+}
+
+async function waitIfRateLimited() {
+  while (rateLimitedUntil && Date.now() < rateLimitedUntil) {
+    const remaining = Math.ceil((rateLimitedUntil - Date.now()) / 1000);
+    console.warn(`[osuApi] Rate limited. Waiting ${remaining}s...`);
+    await sleep(2000);
+  }
+}
+
+function setRateLimited() {
+  rateLimitedUntil = Date.now() + RATE_LIMIT_WAIT;
+  console.warn(`[osuApi] 429 detected. Pausing all API calls for ${RATE_LIMIT_WAIT / 1000}s.`);
+}
 
 // Get credentials from environment or settings table
 async function getCredentials() {
@@ -29,19 +57,30 @@ async function getAccessToken() {
     throw new Error('osu! API credentials are not configured. Please set them in settings or .env file.');
   }
 
+  await waitIfRateLimited();
+  await throttle();
+
   const response = await fetch('https://osu.ppy.sh/oauth/token', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Accept': 'application/json'
     },
-    body: new URLSearchParams({
-      client_id: client_id.toString(),
+    body: JSON.stringify({
+      client_id: parseInt(client_id, 10),
       client_secret: client_secret,
       grant_type: 'client_credentials',
       scope: 'public'
     })
   });
+
+  lastRequestTime = Date.now();
+
+  if (response.status === 429) {
+    setRateLimited();
+    await waitIfRateLimited();
+    return getAccessToken();
+  }
 
   if (!response.ok) {
     const errText = await response.text();
@@ -57,6 +96,9 @@ async function getAccessToken() {
 
 // Helper to make authenticated requests to osu! API
 async function apiFetch(endpoint) {
+  await waitIfRateLimited();
+  await throttle();
+
   const token = await getAccessToken();
   const url = endpoint.startsWith('http') ? endpoint : `https://osu.ppy.sh/api/v2/${endpoint.replace(/^\//, '')}`;
 
@@ -67,6 +109,14 @@ async function apiFetch(endpoint) {
       'x-api-version': '20220705'
     }
   });
+
+  lastRequestTime = Date.now();
+
+  if (response.status === 429) {
+    setRateLimited();
+    await waitIfRateLimited();
+    return apiFetch(endpoint);
+  }
 
   if (!response.ok) {
     if (response.status === 404) {

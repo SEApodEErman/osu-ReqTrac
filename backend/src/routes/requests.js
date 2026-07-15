@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db');
-const { fetchBeatmap, fetchUser, downloadCover } = require('../osuApi');
+const { fetchBeatmap, fetchBeatmapset, fetchUser, downloadCover } = require('../osuApi');
 const { refreshAndCacheBeatmapset } = require('./beatmaps');
 
 // Helper to parse osu! beatmap/beatmapset links
@@ -71,7 +71,7 @@ router.get('/', async (req, res, next) => {
     // Fetch all requests and join with beatmap cache
     const requests = await db.all(`
       SELECT r.*, 
-             b.artist AS cache_artist, b.title AS cache_title, b.creator AS cache_creator,
+             b.artist AS cache_artist, b.title AS cache_title, b.creator AS cache_creator, b.creator_id AS cache_creator_id,
              b.cover_url, b.local_cover_path, b.ranked_status, b.difficulties_json
       FROM requests r
       LEFT JOIN beatmap_cache b ON r.beatmapset_id = b.beatmapset_id
@@ -131,6 +131,26 @@ router.get('/', async (req, res, next) => {
       // Requester cache info
       const requesterCache = reqRow.requester_id ? userMap.get(reqRow.requester_id) : null;
 
+      // Determine effective requester. When no explicit requester was provided
+      // (e.g. imported rows default to "Anonymous"), fall back to the beatmap creator.
+      const hasExplicitRequester = !!reqRow.requester_id ||
+        (reqRow.requester_username && reqRow.requester_username.toLowerCase() !== 'anonymous');
+
+      let requesterId = reqRow.requester_id;
+      let requesterUsername = reqRow.requester_username;
+      let requesterAvatar = requesterCache ? requesterCache.avatar_url : null;
+      let requesterCountry = requesterCache ? requesterCache.country_code : null;
+      let requesterIsCreator = false;
+
+      if (!hasExplicitRequester && reqRow.is_osu_link && reqRow.cache_creator) {
+        const creatorCache = reqRow.cache_creator_id ? userMap.get(reqRow.cache_creator_id) : null;
+        requesterId = reqRow.cache_creator_id || null;
+        requesterUsername = reqRow.cache_creator;
+        requesterAvatar = creatorCache ? creatorCache.avatar_url : null;
+        requesterCountry = creatorCache ? creatorCache.country_code : null;
+        requesterIsCreator = true;
+      }
+
       return {
         id: reqRow.id,
         beatmapset_id: reqRow.beatmapset_id,
@@ -142,10 +162,12 @@ router.get('/', async (req, res, next) => {
         cover_url: reqRow.cover_url,
         local_cover_path: reqRow.local_cover_path || '/uploads/covers/default.jpg',
         ranked_status: reqRow.is_osu_link ? reqRow.ranked_status : 'Manual',
-        requester_id: reqRow.requester_id,
-        requester_username: reqRow.requester_username,
-        requester_avatar: requesterCache ? requesterCache.avatar_url : null,
-        requester_country: requesterCache ? requesterCache.country_code : null,
+        requester_id: requesterId,
+        requester_username: requesterUsername,
+        requester_avatar: requesterAvatar,
+        requester_country: requesterCountry,
+        requester_is_creator: requesterIsCreator,
+        requester_profile_link: requesterIsCreator && requesterId ? `https://osu.ppy.sh/users/${requesterId}` : reqRow.osu_profile_link,
         request_status: reqRow.request_status,
         priority: reqRow.priority,
         deadline: reqRow.deadline,
@@ -415,6 +437,7 @@ router.patch('/:id', async (req, res, next) => {
       request_status,
       priority,
       deadline,
+      added_date,
       notes,
       discord_link,
       osu_profile_link,
@@ -504,6 +527,17 @@ router.patch('/:id', async (req, res, next) => {
           parsedUserLink, finalUsername, requestId
         );
       }
+    }
+
+    // Update added_date
+    if (added_date !== undefined && added_date !== oldRequest.added_date) {
+      const oldDate = oldRequest.added_date ? new Date(oldRequest.added_date).toLocaleDateString() : 'None';
+      const newDate = added_date ? new Date(added_date).toLocaleDateString() : 'None';
+      historyLogs.push({
+        action: 'added_date_change',
+        details: `Added date updated: ${oldDate} -> ${newDate}`
+      });
+      await db.run('UPDATE requests SET added_date = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', added_date, requestId);
     }
 
     // Update Categories
@@ -605,6 +639,105 @@ router.get('/:id/history', async (req, res, next) => {
     
     const logs = await db.all('SELECT * FROM history WHERE request_id = ? ORDER BY created_at DESC', requestId);
     res.json(logs);
+  } catch (error) {
+    next(error);
+  }
+});
+
+module.exports = router;
+
+// GET /api/requests/beatmap-info - fetch beatmap metadata from osu! link
+router.get('/beatmap-info', async (req, res, next) => {
+  try {
+    const { link } = req.query;
+    if (!link) {
+      return res.status(400).json({ error: 'Link parameter is required' });
+    }
+
+    const parsedLink = parseOsuLink(link);
+    if (!parsedLink) {
+      return res.status(400).json({ error: 'Invalid osu! beatmap/beatmapset link' });
+    }
+
+    let beatmapsetId;
+    if (parsedLink.type === 'beatmapset') {
+      beatmapsetId = parsedLink.id;
+    } else {
+      // It's a beatmap link, fetch to get the beatmapset ID
+      const mapData = await fetchBeatmap(parsedLink.id);
+      if (mapData && mapData.beatmapset_id) {
+        beatmapsetId = mapData.beatmapset_id;
+      } else {
+        return res.status(400).json({ error: 'Could not resolve beatmapset ID from osu! link' });
+      }
+    }
+
+    // Fetch beatmapset details
+    const beatmapset = await fetchBeatmapset(beatmapsetId);
+    if (!beatmapset) {
+      return res.status(404).json({ error: 'Beatmapset not found on osu!' });
+    }
+
+    // Fetch creator info
+    const creatorInfo = await fetchUser(beatmapset.user_id);
+
+    res.json({
+      beatmapsetId: beatmapset.id,
+      artist: beatmapset.artist,
+      title: beatmapset.title,
+      creator: beatmapset.creator,
+      creatorId: beatmapset.user_id,
+      creatorUsername: creatorInfo?.username,
+      creatorAvatar: creatorInfo?.avatar_url,
+      creatorCountry: creatorInfo?.country_code,
+      creatorProfileUrl: creatorInfo ? `https://osu.ppy.sh/users/${creatorInfo.id}` : `https://osu.ppy.sh/users/${beatmapset.user_id}`,
+      coverUrl: beatmapset.covers?.cover || `https://assets.ppy.sh/beatmaps/${beatmapset.id}/covers/cover.jpg`,
+      status: beatmapset.status,
+      rankedDate: beatmapset.ranked_date,
+      bpm: beatmapset.bpm,
+      genres: beatmapset.genres,
+      language: beatmapset.language
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/requests/refresh-dates - Update added_date from each beatmapset's upload date
+router.post('/refresh-dates', async (req, res, next) => {
+  try {
+    const db = await getDatabase();
+    const rows = await db.all('SELECT id, beatmapset_id FROM requests WHERE beatmapset_id IS NOT NULL');
+
+    if (rows.length === 0) {
+      return res.json({ success: true, message: 'No osu! link requests found to update.' });
+    }
+
+    // Respond immediately; process in the background (throttled osu! API calls)
+    res.json({
+      success: true,
+      message: `Refreshing added dates for ${rows.length} requests in the background. This may take a while due to API rate limiting.`
+    });
+
+    (async () => {
+      let updated = 0;
+      for (const row of rows) {
+        try {
+          // Full refresh also caches the creator profile and osu! dates
+          const cacheEntry = await refreshAndCacheBeatmapset(db, row.beatmapset_id);
+          if (cacheEntry && cacheEntry.submitted_date) {
+            await db.run(
+              'UPDATE requests SET added_date = ? WHERE id = ?',
+              [cacheEntry.submitted_date, row.id]
+            );
+            updated++;
+          }
+        } catch (err) {
+          console.error(`Failed to refresh added_date for request ${row.id} (beatmapset ${row.beatmapset_id}):`, err.message);
+        }
+      }
+      console.log(`[refresh-dates] Updated added_date for ${updated}/${rows.length} requests.`);
+    })();
   } catch (error) {
     next(error);
   }

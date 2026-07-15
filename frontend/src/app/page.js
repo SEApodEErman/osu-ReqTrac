@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import { Plus } from 'lucide-react';
 import Sidebar from '../components/Sidebar';
 import Dashboard from '../components/Dashboard';
 import RequestsTable from '../components/RequestsTable';
@@ -15,6 +16,7 @@ export default function Home() {
   const [statsData, setStatsData] = useState({});
   const [settingsData, setSettingsData] = useState({});
   const [selectedRequest, setSelectedRequest] = useState(null);
+  const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
   
   // QuickAdd duplicate check state
   const [duplicateError, setDuplicateError] = useState(null);
@@ -333,14 +335,27 @@ export default function Home() {
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', padding: '24px 0 0 0' }}>
           
-          {/* Quick Add Bar */}
+          {/* Quick Add - Collapsible */}
           <div style={{ padding: '0 24px' }}>
-            <QuickAdd
-              onAddRequest={handleAddRequest}
-              duplicateError={duplicateError}
-              onResolveDuplicate={handleResolveDuplicate}
-              onCancelDuplicate={() => setDuplicateError(null)}
-            />
+            {isQuickAddOpen ? (
+              <QuickAdd
+                onAddRequest={handleAddRequest}
+                duplicateError={duplicateError}
+                onResolveDuplicate={handleResolveDuplicate}
+                onCancelDuplicate={() => setDuplicateError(null)}
+                isOpen={isQuickAddOpen}
+                onToggle={() => setIsQuickAddOpen(false)}
+              />
+            ) : (
+              <button
+                onClick={() => setIsQuickAddOpen(true)}
+                className="btn-primary"
+                style={{ width: 'fit-content', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+              >
+                <Plus size={18} style={{ color: '#fff' }} />
+                <span style={{ fontWeight: '600', lineHeight: '1' }}>Quick Add Request</span>
+              </button>
+            )}
           </div>
 
           {/* Requests List */}
@@ -367,8 +382,6 @@ export default function Home() {
       <Sidebar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
-        theme={theme}
-        toggleTheme={toggleTheme}
         connectedAccount={settingsData.connectedAccount}
         onDisconnect={handleDisconnect}
       />

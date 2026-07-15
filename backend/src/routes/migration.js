@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db');
 const { refreshAndCacheBeatmapset } = require('./beatmaps');
-const { fetchUser, downloadCover } = require('../osuApi');
+const { fetchBeatmap, fetchUser, downloadCover } = require('../osuApi');
 
 // GET /api/migration/export - Export backup JSON
 router.get('/export', async (req, res, next) => {
@@ -158,6 +158,7 @@ function parseCSVLine(line) {
 }
 
 // POST /api/migration/import-csv - Parse and load Google Sheets CSV file content
+// Expected columns: Artist, Title, Mapper, Link, Map Status, Remarks
 router.post('/import-csv', async (req, res, next) => {
   try {
     const { csvText } = req.body;
@@ -173,81 +174,112 @@ router.post('/import-csv', async (req, res, next) => {
 
     const headers = parseCSVLine(lines[0]);
     
-    // Find index of standard columns
-    const colIndices = {
-      link: headers.findIndex(h => /link|url|beatmapset|beatmap/i.test(h)),
-      artist: headers.findIndex(h => /artist|song/i.test(h)),
-      title: headers.findIndex(h => /title|name/i.test(h)),
-      creator: headers.findIndex(h => /creator|mapper|host/i.test(h)),
-      difficulty: headers.findIndex(h => /diff/i.test(h)),
-      requester: headers.findIndex(h => /requestor|requester|user/i.test(h)),
-      status: headers.findIndex(h => /status|state/i.test(h)),
-      priority: headers.findIndex(h => /priority|importance/i.test(h)),
-      deadline: headers.findIndex(h => /deadline|date|due/i.test(h)),
-      notes: headers.findIndex(h => /notes|desc|details|comment/i.test(h)),
-      tags: headers.findIndex(h => /tags|tag/i.test(h)),
-      categories: headers.findIndex(h => /categories|category|type/i.test(h))
+    // Map columns by header name (case-insensitive, ignores extra whitespace)
+    const headerMap = {};
+    headers.forEach((h, idx) => {
+      const normalized = h.trim().toLowerCase();
+      headerMap[normalized] = idx;
+    });
+
+    // Required column mappings
+    const getColIndex = (names) => {
+      for (const name of names) {
+        const idx = headerMap[name.toLowerCase()];
+        if (idx !== undefined) return idx;
+      }
+      return -1;
     };
+
+    const colIndices = {
+      artist: getColIndex(['artist']),
+      title: getColIndex(['title']),
+      mapper: getColIndex(['mapper', 'creator']),
+      link: getColIndex(['link', 'url', 'beatmapset', 'beatmap']),
+      mapStatus: getColIndex(['map status', 'mapstatus', 'status']),
+      remarks: getColIndex(['remarks', 'notes', 'comments'])
+    };
+
+    // Validate required columns
+    const missingColumns = [];
+    if (colIndices.artist === -1) missingColumns.push('Artist');
+    if (colIndices.title === -1) missingColumns.push('Title');
+    if (colIndices.mapper === -1) missingColumns.push('Mapper');
+    if (colIndices.link === -1) missingColumns.push('Link');
+    if (colIndices.mapStatus === -1) missingColumns.push('Map Status');
+    if (colIndices.remarks === -1) missingColumns.push('Remarks');
+
+    if (missingColumns.length > 0) {
+      return res.status(400).json({ 
+        error: `Missing required columns: ${missingColumns.join(', ')}. Expected columns: Artist, Title, Mapper, Link, Map Status, Remarks`,
+        expectedColumns: ['Artist', 'Title', 'Mapper', 'Link', 'Map Status', 'Remarks'],
+        foundHeaders: headers
+      });
+    }
 
     const db = await getDatabase();
     let importCount = 0;
+    const errors = [];
 
     for (let i = 1; i < lines.length; i++) {
       const row = parseCSVLine(lines[i]);
       if (row.length === 0 || (row.length === 1 && !row[0])) continue;
 
-      // Extract values using indices
-      const rawLink = colIndices.link !== -1 ? row[colIndices.link] : '';
-      const rawArtist = colIndices.artist !== -1 ? row[colIndices.artist] : '';
-      const rawTitle = colIndices.title !== -1 ? row[colIndices.title] : '';
-      const rawCreator = colIndices.creator !== -1 ? row[colIndices.creator] : '';
-      const rawDiff = colIndices.difficulty !== -1 ? row[colIndices.difficulty] : '';
-      const rawRequester = colIndices.requester !== -1 ? row[colIndices.requester] : 'Anonymous';
-      const rawStatus = colIndices.status !== -1 ? row[colIndices.status] : 'Accepted';
-      const rawPriority = colIndices.priority !== -1 ? row[colIndices.priority] : 'Medium';
-      const rawDeadline = colIndices.deadline !== -1 ? row[colIndices.deadline] : null;
-      const rawNotes = colIndices.notes !== -1 ? row[colIndices.notes] : '';
-      const rawTags = colIndices.tags !== -1 ? row[colIndices.tags] : '';
-      const rawCategories = colIndices.categories !== -1 ? row[colIndices.categories] : 'Hitsounds';
+      // Extract values using column indices
+      const rawArtist = row[colIndices.artist] || '';
+      const rawTitle = row[colIndices.title] || '';
+      const rawMapper = row[colIndices.mapper] || '';
+      const rawLink = row[colIndices.link] || '';
+      const rawMapStatus = row[colIndices.mapStatus] || '';
+      const rawRemarks = row[colIndices.remarks] || '';
 
-      // Parse link
+      // Trim whitespace
+      const artist = rawArtist.trim();
+      const title = rawTitle.trim();
+      const mapper = rawMapper.trim();
+      const link = rawLink.trim();
+      const mapStatus = rawMapStatus.trim();
+      const remarks = rawRemarks.trim();
+
+      // Validate required fields
+      if (!artist || !title || !mapper || !link) {
+        errors.push(`Row ${i + 1}: Missing required fields (Artist, Title, Mapper, Link)`);
+        continue;
+      }
+
+      // Parse link to detect osu! beatmap link
       let beatmapsetId = null;
       let isOsuLink = false;
       const setRegex = /osu\.ppy\.sh\/beatmapsets\/(\d+)/i;
-      const setMatch = rawLink.match(setRegex);
+      const setMatch = link.match(setRegex);
       if (setMatch) {
         beatmapsetId = parseInt(setMatch[1], 10);
         isOsuLink = true;
       } else {
         const mapRegex = /osu\.ppy\.sh\/(?:beatmaps|b)\/(\d+)/i;
-        const mapMatch = rawLink.match(mapRegex);
+        const mapMatch = link.match(mapRegex);
         if (mapMatch) {
-          // It's a beatmap link, we can attempt to fetch it in the background or insert it and fetch later
-          // For CSV migration, we'll try to retrieve the beatmapset_id
+          // It's a beatmap link, fetch to get beatmapset_id
           isOsuLink = true;
+          try {
+            const mapData = await fetchBeatmap(parseInt(mapMatch[1], 10));
+            if (mapData && mapData.beatmapset_id) {
+              beatmapsetId = mapData.beatmapset_id;
+            }
+          } catch (e) {
+            console.error(`Failed to fetch beatmapset for beatmap ${mapMatch[1]}:`, e.message);
+          }
         }
       }
 
-      // Format status to correct enum
+      // Map status to enum
       let status = 'Accepted';
-      const normStatus = rawStatus.toLowerCase();
-      if (normStatus.includes('work') || normStatus.includes('prog')) status = 'Working';
-      else if (normStatus.includes('comp') || normStatus.includes('done')) status = 'Completed';
-      else if (normStatus.includes('canc') || normStatus.includes('drop')) status = 'Cancelled';
-
-      // Format priority
-      let priority = 'Medium';
-      const normPriority = rawPriority.toLowerCase();
-      if (normPriority.includes('low')) priority = 'Low';
-      else if (normPriority.includes('high') || normPriority.includes('urg')) priority = 'High';
-
-      // Format deadline
-      let deadline = null;
-      if (rawDeadline) {
-        const d = new Date(rawDeadline);
-        if (!isNaN(d.getTime())) {
-          deadline = d.toISOString().split('T')[0];
-        }
+      const normStatus = mapStatus.toLowerCase();
+      if (normStatus.includes('work') || normStatus.includes('prog') || normStatus.includes('wip')) {
+        status = 'Working';
+      } else if (normStatus.includes('comp') || normStatus.includes('done') || normStatus.includes('complete')) {
+        status = 'Completed';
+      } else if (normStatus.includes('canc') || normStatus.includes('drop') || normStatus.includes('reject')) {
+        status = 'Cancelled';
       }
 
       // Check if beatmapset ID is already added
@@ -258,12 +290,10 @@ router.post('/import-csv', async (req, res, next) => {
           continue;
         }
 
-        // Pre-fetch beatmap in cache synchronously so the table is populated correctly
-        try {
-          await refreshAndCacheBeatmapset(db, beatmapsetId);
-        } catch (err) {
+        // Pre-fetch beatmap metadata in the background (does not block the HTTP response)
+        refreshAndCacheBeatmapset(db, beatmapsetId).catch(err => {
           console.error(`Failed to pre-fetch metadata for ID ${beatmapsetId} during CSV import:`, err.message);
-        }
+        });
       }
 
       // Insert request
@@ -275,61 +305,25 @@ router.post('/import-csv', async (req, res, next) => {
       `, [
         beatmapsetId,
         isOsuLink ? 1 : 0,
-        isOsuLink ? null : rawArtist,
-        isOsuLink ? null : rawTitle,
-        isOsuLink ? null : rawCreator,
-        isOsuLink ? null : rawDiff,
-        rawRequester || 'Anonymous',
+        isOsuLink ? null : artist,
+        isOsuLink ? null : title,
+        isOsuLink ? null : mapper,
+        null, // difficulty not in new format
+        'Anonymous', // requester - will be auto-populated from osu! API for osu links
         status,
-        priority,
-        deadline,
-        rawNotes || null,
+        'Medium', // default priority
+        null, // deadline not in new format
+        remarks || null,
         status === 'Completed' ? new Date().toISOString() : null
       ]);
 
       const requestId = result.lastID;
 
-      // Parse and insert Categories
-      // Support comma-separated categories in CSV e.g., "Hitsounds, Guest Difficulty"
-      const catsList = rawCategories.split(/[,;|]/).map(c => c.trim()).filter(Boolean);
-      const validCategories = ['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others'];
-      
-      if (catsList.length === 0) {
-        catsList.push('Hitsounds');
-      }
-
-      for (const cat of catsList) {
-        let catName = 'Others';
-        let otherText = null;
-
-        // Try to match standard categories
-        const normCat = cat.toLowerCase();
-        if (normCat.includes('sound') || normCat.includes('hit')) {
-          catName = 'Hitsounds';
-        } else if (normCat.includes('guest') || normCat.includes('diff') || normCat.includes('gd')) {
-          catName = 'Guest Difficulties';
-        } else if (normCat.includes('story') || normCat.includes('sb') || normCat.includes('board')) {
-          catName = 'Storyboards';
-        } else {
-          catName = 'Others';
-          otherText = cat;
-        }
-
-        await db.run(`
-          INSERT INTO request_categories (request_id, category_name, other_text, status)
-          VALUES (?, ?, ?, ?)
-        `, [requestId, catName, otherText, status === 'Completed' ? 'Completed' : 'Pending']);
-      }
-
-      // Parse and insert Tags
-      const tagsList = rawTags.split(/[,;|]/).map(t => t.trim()).filter(Boolean);
-      for (const tag of tagsList) {
-        await db.run('INSERT OR IGNORE INTO tags (name) VALUES (?)', tag);
-        const tagRow = await db.get('SELECT id FROM tags WHERE name = ?', tag);
-        if (tagRow) {
-          await db.run('INSERT OR IGNORE INTO request_tags (request_id, tag_id) VALUES (?, ?)', requestId, tagRow.id);
-        }
-      }
+      // Default category: Hitsounds
+      await db.run(`
+        INSERT INTO request_categories (request_id, category_name, other_text, status)
+        VALUES (?, ?, ?, ?)
+      `, [requestId, 'Hitsounds', null, status === 'Completed' ? 'Completed' : 'Pending']);
 
       // Create history
       await db.run(`
@@ -342,7 +336,8 @@ router.post('/import-csv', async (req, res, next) => {
 
     res.json({
       success: true,
-      message: `CSV imported successfully. Imported ${importCount} requests.`
+      message: `CSV imported successfully. Imported ${importCount} requests.${errors.length > 0 ? ` ${errors.length} rows had errors.` : ''}`,
+      errors: errors.length > 0 ? errors : undefined
     });
   } catch (error) {
     next(error);

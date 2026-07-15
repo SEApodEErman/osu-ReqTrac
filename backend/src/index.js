@@ -98,9 +98,12 @@ async function startServer() {
       console.warn('To enable beatmap syncing and account connection, please configure them in your backend/.env file or through the Settings page in the web UI.\n');
     }
     
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);
     });
+    // Prevent connection timeouts during long operations (CSV import, etc.)
+    server.timeout = 0;
+    server.keepAliveTimeout = 300000;
   } catch (error) {
     console.error('Failed to initialize database and start server:', error);
     process.exit(1);
