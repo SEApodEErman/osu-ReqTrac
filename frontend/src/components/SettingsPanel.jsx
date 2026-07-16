@@ -14,13 +14,15 @@ import {
   RefreshCw
 } from 'lucide-react';
 
+const IMPORT_CATEGORY_NAMES = ['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others'];
+
 export default function SettingsPanel({ 
   settingsData, 
   theme,
   onThemeChange,
   onSaveCredentials, 
   onDisconnect, 
-  onImportCsv,
+  onImportBeatmapLinks,
   onImportJson,
   showFirstLaunchSetup = false,
   onDismissFirstLaunchSetup
@@ -66,12 +68,98 @@ export default function SettingsPanel({
   const [connectedUserId, setConnectedUserId] = useState('');
   const [isSavingCreds, setIsSavingCreds] = useState(false);
 
-  // CSV State
-  const [csvText, setCsvText] = useState('');
-  const [isImportingCsv, setIsImportingCsv] = useState(false);
+  // Beatmap link import state
+  const [linksText, setLinksText] = useState('');
+  const [isImportingLinks, setIsImportingLinks] = useState(false);
+  const [importCategories, setImportCategories] = useState({
+    Hitsounds: true,
+    'Guest Difficulties': false,
+    Storyboards: false,
+    Others: false
+  });
 
   // Refresh added dates state
   const [isRefreshingDates, setIsRefreshingDates] = useState(false);
+
+  // Google Sheets publishing state
+  const [googleStatus, setGoogleStatus] = useState(null);
+  const [isGoogleBusy, setIsGoogleBusy] = useState(false);
+
+  const loadGoogleStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/google/status');
+      if (res.ok) setGoogleStatus(await res.json());
+    } catch (e) {
+      console.error('Failed to load Google Sheets status:', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadGoogleStatus();
+  }, [loadGoogleStatus]);
+
+  useEffect(() => {
+    const refreshWhenFocused = () => {
+      void loadGoogleStatus();
+    };
+    window.addEventListener('focus', refreshWhenFocused);
+    return () => window.removeEventListener('focus', refreshWhenFocused);
+  }, [loadGoogleStatus]);
+
+  const connectGoogle = async () => {
+    setIsGoogleBusy(true);
+    try {
+      const res = await fetch('/api/google/auth-url');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Google Sheets is not configured.');
+      if (window.electronAPI?.openExternal) {
+        await window.electronAPI.openExternal(data.url);
+      } else {
+        window.open(data.url, '_blank', 'noopener,noreferrer');
+      }
+      alert('Complete Google authorization in your browser, then return to ReqTrac and refresh this page.');
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setIsGoogleBusy(false);
+    }
+  };
+
+  const syncGoogle = async () => {
+    setIsGoogleBusy(true);
+    try {
+      const resolvedTheme = theme === 'system'
+        ? (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+        : theme;
+      const res = await fetch('/api/google/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ theme: resolvedTheme })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Google Sheets sync failed.');
+      setGoogleStatus((current) => ({ ...current, connected: true, sheetUrl: data.url, syncedAt: data.syncedAt }));
+      alert('Google Sheet updated and set to read-only link sharing.');
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setIsGoogleBusy(false);
+    }
+  };
+
+  const disconnectGoogle = async () => {
+    if (!confirm('Disconnect Google Sheets? The existing sheet will remain in your Drive.')) return;
+    setIsGoogleBusy(true);
+    try {
+      const res = await fetch('/api/google/disconnect', { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to disconnect Google Sheets.');
+      setGoogleStatus((current) => ({ ...current, connected: false, sheetUrl: null, syncedAt: null }));
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setIsGoogleBusy(false);
+    }
+  };
 
   const handleRefreshDates = async () => {
     const confirmRefresh = confirm('This will overwrite the "Date Added" of all osu! link requests with each map\'s upload date from osu!. Continue?');
@@ -122,32 +210,27 @@ export default function SettingsPanel({
     }
   };
 
-  const handleCsvImport = async (e) => {
+  const handleBeatmapLinksImport = async (e) => {
     e.preventDefault();
-    if (!csvText.trim()) return;
+    if (!linksText.trim()) return;
 
-    setIsImportingCsv(true);
+    const selectedCategories = IMPORT_CATEGORY_NAMES.filter((category) => importCategories[category]);
+    if (selectedCategories.length === 0) {
+      alert('Please select at least one request category.');
+      return;
+    }
+
+    setIsImportingLinks(true);
     try {
-      const success = await onImportCsv(csvText);
+      const success = await onImportBeatmapLinks(linksText, selectedCategories);
       if (success) {
-        setCsvText('');
+        setLinksText('');
       }
     } catch (e) {
       console.error(e);
     } finally {
-      setIsImportingCsv(false);
+      setIsImportingLinks(false);
     }
-  };
-
-  const handleCsvFileChange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      setCsvText(event.target.result);
-    };
-    reader.readAsText(file);
   };
 
   const handleJsonRestore = async (e) => {
@@ -188,7 +271,7 @@ export default function SettingsPanel({
           Settings
         </h1>
         <p style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
-          Manage your osu! API integration, import data from spreadsheets, or backup/restore requests database.
+            Manage your osu! API integration, import beatmap links, or backup/restore requests database.
         </p>
       </div>
 
@@ -307,35 +390,89 @@ export default function SettingsPanel({
 
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <FileSpreadsheet size={18} style={{ color: 'var(--req-completed)' }} />
+            Public Google Sheet
+          </h3>
+          <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+            Create a formatted, read-only copy of your request table in your Google Drive. You can put the resulting link on your osu! profile.
+          </p>
+
+          {!googleStatus?.configured && (
+            <div style={{ padding: '12px', borderRadius: '8px', backgroundColor: 'rgba(243, 156, 18, 0.1)', color: 'var(--text-muted)', fontSize: '12px' }}>
+              Google Sheets export needs a Google OAuth desktop application configured by the app maintainer. See the setup notes in the project README.
+            </div>
+          )}
+
+          {googleStatus?.connected && googleStatus.sheetUrl && (
+            <div style={{ padding: '12px', borderRadius: '8px', backgroundColor: 'rgba(46, 204, 113, 0.1)', border: '1px solid rgba(46, 204, 113, 0.3)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <span style={{ fontSize: '12px', fontWeight: '600' }}>Published sheet</span>
+              <a href={googleStatus.sheetUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--osu-pink)', fontSize: '12px', wordBreak: 'break-all' }}>{googleStatus.sheetUrl}</a>
+              {googleStatus.syncedAt && <span style={{ color: 'var(--text-muted)', fontSize: '11px' }}>Last synced: {new Date(googleStatus.syncedAt).toLocaleString()}</span>}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            {!googleStatus?.connected ? (
+              <button type="button" className="btn-primary" onClick={connectGoogle} disabled={isGoogleBusy || !googleStatus?.configured}>
+                {isGoogleBusy ? 'Opening...' : 'Connect Google Drive'}
+              </button>
+            ) : (
+              <>
+                <button type="button" className="btn-primary" onClick={syncGoogle} disabled={isGoogleBusy}>
+                  {isGoogleBusy ? 'Syncing...' : googleStatus.sheetUrl ? 'Sync Sheet' : 'Publish Sheet'}
+                </button>
+                <button type="button" className="btn-secondary" onClick={disconnectGoogle} disabled={isGoogleBusy}>Disconnect</button>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
             <FileSpreadsheet size={18} style={{ color: 'var(--req-working)' }} />
             Import Beatmap Links
           </h3>
           <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
-            Paste one osu! beatmap link per line to import multiple requests at once. Legacy CSV files are still supported with the column headers: <code>Artist, Title, Mapper, Link, Map Status, Remarks</code>. Imported requests intentionally have no added date.
+            Paste one osu! beatmap link per line to import multiple requests at once. Imported requests intentionally have no added date.
           </p>
 
-          <form onSubmit={handleCsvImport} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <form onSubmit={handleBeatmapLinksImport} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             <div>
               <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>
-                Paste beatmap links (one per line) or select a legacy CSV file
+                Paste beatmap links (one per line)
               </label>
-              <input 
-                type="file" 
-                accept=".csv" 
-                onChange={handleCsvFileChange}
-                style={{ fontSize: '12px', marginBottom: '8px', color: 'var(--text-muted)' }}
-              />
               <textarea 
                 className="input-text" 
                 placeholder={'https://osu.ppy.sh/beatmapsets/123456\nhttps://osu.ppy.sh/beatmaps/789012'}
-                value={csvText}
-                onChange={(e) => setCsvText(e.target.value)}
+                value={linksText}
+                onChange={(e) => setLinksText(e.target.value)}
                 style={{ minHeight: '120px', fontFamily: 'monospace', fontSize: '12px', resize: 'vertical' }}
               />
             </div>
             <div>
-              <button type="submit" className="btn-primary" disabled={isImportingCsv || !csvText.trim()}>
-                {isImportingCsv ? 'Importing & Syncing...' : 'Import Requests'}
+              <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', marginBottom: '8px', display: 'block' }}>
+                Request Categories
+              </span>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px' }}>
+                {IMPORT_CATEGORY_NAMES.map((category) => (
+                  <label key={category} className="checkbox-container">
+                    <input
+                      type="checkbox"
+                      checked={importCategories[category]}
+                      onChange={() => setImportCategories((current) => ({
+                        ...current,
+                        [category]: !current[category]
+                      }))}
+                    />
+                    <span className="checkmark" />
+                    <span style={{ fontSize: '13px' }}>{category}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <button type="submit" className="btn-primary" disabled={isImportingLinks || !linksText.trim()}>
+                {isImportingLinks ? 'Importing & Syncing...' : 'Import Requests'}
               </button>
             </div>
           </form>

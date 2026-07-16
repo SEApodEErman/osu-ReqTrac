@@ -281,7 +281,7 @@ router.post('/', async (req, res, next) => {
       difficulty,
       notes,
       categories, // Array: [{name: 'Hitsounds', status: 'Pending'}, {name: 'Others', other_text: 'Storyboard', status: 'Working'}]
-      priority = 'Medium',
+      priority = 'Low',
       deadline,
       requester_username,
       non_osu_artist,

@@ -25,7 +25,7 @@ export default function QuickAdd({
   const [profileLink, setProfileLink] = useState('');
   const [discordLink, setDiscordLink] = useState('');
   const [notes, setNotes] = useState('');
-  const [priority, setPriority] = useState('Medium');
+  const [priority, setPriority] = useState('Low');
   const [deadline, setDeadline] = useState('');
   const [tags, setTags] = useState('');
   
@@ -91,7 +91,7 @@ export default function QuickAdd({
     setProfileLink('');
     setDiscordLink('');
     setNotes('');
-    setPriority('Medium');
+    setPriority('Low');
     setDeadline('');
     setTags('');
     localStorage.setItem('lastRequestCategories', JSON.stringify(categories));

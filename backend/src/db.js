@@ -57,8 +57,8 @@ async function getDatabase() {
       non_osu_difficulty TEXT,
       requester_id INTEGER,
       requester_username TEXT,
-      request_status TEXT CHECK(request_status IN ('Accepted', 'Working', 'Completed', 'Cancelled')) DEFAULT 'Accepted',
-      priority TEXT CHECK(priority IN ('Low', 'Medium', 'High')) DEFAULT 'Medium',
+      request_status TEXT CHECK(request_status IN ('Accepted', 'Considering', 'Working', 'Completed', 'Cancelled')) DEFAULT 'Accepted',
+      priority TEXT CHECK(priority IN ('Low', 'Medium', 'High')) DEFAULT 'Low',
       deadline DATE,
       notes TEXT,
       discord_link TEXT,
@@ -131,6 +131,7 @@ async function getDatabase() {
   await addColumnIfMissing(dbInstance, 'beatmap_cache', 'osu_last_updated', 'TEXT');
   await addColumnIfMissing(dbInstance, 'requests', 'guest_difficulty_target_sr', 'REAL');
   await addColumnIfMissing(dbInstance, 'requests', 'guest_difficulty_name', 'TEXT');
+  await migrateRequestStatusConstraint(dbInstance);
 
   // Trigger difficulty migration asynchronously to update existing caches
   migrateExistingDifficulties(dbInstance);
@@ -169,6 +170,77 @@ async function addColumnIfMissing(db, table, column, type) {
   if (!exists) {
     await db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     console.log(`[db] Added missing column ${table}.${column}`);
+  }
+}
+
+// SQLite does not support altering a CHECK constraint, so rebuild older request
+// tables that predate the Considering status while preserving their data.
+async function migrateRequestStatusConstraint(db) {
+  const table = await db.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'requests'");
+  if (!table?.sql || table.sql.includes("'Considering'")) return;
+
+  const requestColumns = [
+    'id',
+    'beatmapset_id',
+    'is_osu_link',
+    'non_osu_artist',
+    'non_osu_title',
+    'non_osu_creator',
+    'non_osu_difficulty',
+    'requester_id',
+    'requester_username',
+    'request_status',
+    'priority',
+    'deadline',
+    'notes',
+    'discord_link',
+    'osu_profile_link',
+    'added_date',
+    'completed_date',
+    'last_updated',
+    'guest_difficulty_target_sr',
+    'guest_difficulty_name'
+  ];
+  const existingColumns = new Set((await db.all('PRAGMA table_info(requests)')).map(column => column.name));
+  const columnsToCopy = requestColumns.filter(column => existingColumns.has(column));
+  const columnList = columnsToCopy.join(', ');
+
+  await db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    await db.exec('BEGIN TRANSACTION');
+    await db.exec(`
+      CREATE TABLE requests_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        beatmapset_id INTEGER NULL,
+        is_osu_link BOOLEAN NOT NULL DEFAULT 1,
+        non_osu_artist TEXT,
+        non_osu_title TEXT,
+        non_osu_creator TEXT,
+        non_osu_difficulty TEXT,
+        requester_id INTEGER,
+        requester_username TEXT,
+        request_status TEXT CHECK(request_status IN ('Accepted', 'Considering', 'Working', 'Completed', 'Cancelled')) DEFAULT 'Accepted',
+        priority TEXT CHECK(priority IN ('Low', 'Medium', 'High')) DEFAULT 'Low',
+        deadline DATE,
+        notes TEXT,
+        discord_link TEXT,
+        osu_profile_link TEXT,
+        added_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+        completed_date DATETIME,
+        last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
+        guest_difficulty_target_sr REAL,
+        guest_difficulty_name TEXT
+      )
+    `);
+    await db.exec(`INSERT INTO requests_new (${columnList}) SELECT ${columnList} FROM requests`);
+    await db.exec('DROP TABLE requests');
+    await db.exec('ALTER TABLE requests_new RENAME TO requests');
+    await db.exec('COMMIT');
+  } catch (error) {
+    await db.exec('ROLLBACK');
+    throw error;
+  } finally {
+    await db.exec('PRAGMA foreign_keys = ON');
   }
 }
 

@@ -108,6 +108,7 @@ export default function RequestsTable({
   onDeleteRequest, 
   onUpdateRequest,
   onBulkUpdateStatus,
+  onBulkUpdatePriority,
   onBulkDelete,
   activeCategory
 }) {
@@ -319,6 +320,7 @@ export default function RequestsTable({
         >
           <option value="">All Statuses</option>
           <option value="Accepted">Accepted</option>
+          <option value="Considering">Considering</option>
           <option value="Working">Working</option>
           <option value="Completed">Completed</option>
           <option value="Cancelled">Cancelled</option>
@@ -384,7 +386,6 @@ export default function RequestsTable({
                 <th onClick={() => toggleSort('title')} style={{ cursor: 'pointer' }}>
                   Song / Artist <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
                 </th>
-                <th>Difficulties</th>
                 {showStars && (
                   <th onClick={() => toggleSort('highest_stars')} style={{ cursor: 'pointer' }}>
                     Highest Stars <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
@@ -400,6 +401,7 @@ export default function RequestsTable({
                 )}
                 <th>Beatmap Status</th>
                 <th>Request Status</th>
+                <th>Priority</th>
                 <th onClick={() => toggleSort('deadline')} style={{ cursor: 'pointer' }}>
                   Deadline <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
                 </th>
@@ -464,13 +466,6 @@ export default function RequestsTable({
                           {req.artist} • <span style={{ color: 'var(--text-main)' }}>{req.creator}</span>
                         </div>
                       </div>
-                    </td>
-
-                    {/* Diffs Count */}
-                    <td>
-                      <span style={{ fontSize: '12px' }}>
-                        {req.num_difficulties} {req.num_difficulties === 1 ? 'diff' : 'diffs'}
-                      </span>
                     </td>
 
                     {/* Stars */}
@@ -600,10 +595,55 @@ export default function RequestsTable({
                             backgroundColor: 'transparent',
                           }}
                         >
-                          <option value="Accepted">Accepted</option>
-                          <option value="Working">Working</option>
-                          <option value="Completed">Completed</option>
-                          <option value="Cancelled">Cancelled</option>
+                          <option className="status-option-accepted" value="Accepted">Accepted</option>
+                          <option className="status-option-considering" value="Considering">Considering</option>
+                          <option className="status-option-working" value="Working">Working</option>
+                          <option className="status-option-completed" value="Completed">Completed</option>
+                          <option className="status-option-cancelled" value="Cancelled">Cancelled</option>
+                        </select>
+                        <div style={{
+                          position: 'absolute',
+                          right: '8px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          pointerEvents: 'none',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center'
+                        }}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="6 9 12 15 18 9"/>
+                          </svg>
+                        </div>
+                      </div>
+                    </td>
+
+                    {/* Inline Priority Selector */}
+                    <td onClick={(e) => e.stopPropagation()}>
+                      <div className={`status-badge-select badge badge-priority-${(req.priority || 'Low').toLowerCase()}`} style={{ position: 'relative', display: 'inline-block' }}>
+                        <select
+                          value={req.priority || 'Low'}
+                          onChange={(e) => onUpdateRequest(req.id, { priority: e.target.value })}
+                          className={`status-badge-inner badge badge-priority-${(req.priority || 'Low').toLowerCase()}`}
+                          style={{
+                            cursor: 'pointer',
+                            textTransform: 'uppercase',
+                            fontWeight: '600',
+                            WebkitAppearance: 'none',
+                            MozAppearance: 'none',
+                            appearance: 'none',
+                            textAlign: 'center',
+                            textAlignLast: 'center',
+                            paddingRight: '22px',
+                            paddingLeft: '10px',
+                            border: 'none',
+                            backgroundImage: 'none',
+                            backgroundColor: 'transparent',
+                          }}
+                        >
+                          <option value="Low">Low</option>
+                          <option value="Medium">Medium</option>
+                          <option value="High">High</option>
                         </select>
                         <div style={{ 
                           position: 'absolute', 
@@ -719,9 +759,31 @@ export default function RequestsTable({
             >
               <option value="">Change Status...</option>
               <option value="Accepted">Accepted</option>
+              <option value="Considering">Considering</option>
               <option value="Working">Working</option>
               <option value="Completed">Completed</option>
               <option value="Cancelled">Cancelled</option>
+            </select>
+          </div>
+
+          {/* Change Priority Dropdown */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Priority:</span>
+            <select
+              onChange={(e) => {
+                if (e.target.value) {
+                  onBulkUpdatePriority(selectedIds, e.target.value);
+                  setSelectedIds([]);
+                  e.target.value = '';
+                }
+              }}
+              className="input-text"
+              style={{ padding: '4px 8px', fontSize: '12px', width: '125px' }}
+            >
+              <option value="">Change Priority...</option>
+              <option value="Low">Low</option>
+              <option value="Medium">Medium</option>
+              <option value="High">High</option>
             </select>
           </div>
 

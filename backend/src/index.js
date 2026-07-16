@@ -3,6 +3,13 @@ const cors = require('cors');
 const path = require('path');
 const { getDatabase, coversDir } = require('./db');
 
+// Load local backend/.env when running outside a process manager.
+try {
+  process.loadEnvFile?.(path.resolve(__dirname, '../.env'));
+} catch (error) {
+  console.warn('[env] Could not load backend/.env:', error.message);
+}
+
 const app = express();
 const isElectron = process.env.ELECTRON_RUN === '1';
 // In Electron production we bind to an OS-assigned free port (0) to avoid conflicts.
@@ -39,6 +46,7 @@ const statsRouter = require('./routes/stats');
 const migrationRouter = require('./routes/migration');
 const settingsRouter = require('./routes/settings');
 const osuRouter = require('./routes/osu');
+const googleSheetsRouter = require('./routes/googleSheets');
 
 // Mount routes
 app.use('/api/requests', requestsRouter);
@@ -47,6 +55,7 @@ app.use('/api/stats', statsRouter);
 app.use('/api/migration', migrationRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/osu', osuRouter);
+app.use('/api/google', googleSheetsRouter);
 
 // Basic health check
 app.get('/api/health', (req, res) => {
@@ -116,7 +125,7 @@ async function startServer() {
       resolve(actualPort);
     });
     server.on('error', reject);
-    // Prevent connection timeouts during long operations (CSV import, etc.)
+    // Prevent connection timeouts during long beatmap-link imports and API syncs.
     server.timeout = 0;
     server.keepAliveTimeout = 300000;
   });

@@ -32,6 +32,11 @@
 
 -  **Local-First Data** — SQLite database stored in your user data directory (persists across updates)
 
+- **Google Sheets Integration** - Allows syncing to a public viewable Google Sheets that are automatically formatted using Google's OAuth.
+
+
+Since this project is still actively being worked on, feel free to open up issues for suggestions or bug reports. Or, if Discord is your preferred way of communication, you may contact me on my [discord server](https://discord.gg/Z5VFCdkExJ).
+
   
 
 ---
@@ -123,6 +128,40 @@ To enable beatmap syncing and cover art caching:
 > Credentials are stored locally in your SQLite database (encrypted at rest via SQLite). They are **never** bundled in the build or sent anywhere except osu!.ppy.sh.
 
 ## Building & Distribution
+
+### Google Sheets public table
+
+The desktop app can publish a sanitized, read-only copy of a table to the
+user's Google Drive. The resulting Google Sheets link can be placed on an osu!
+profile. ReqTrac does not host the published table or receive the user's
+Google data.
+
+To enable this for a packaged build:
+
+1. Create a project in Google Cloud Console and enable the Google Sheets API
+   and Google Drive API.
+2. Create an OAuth client of type **Desktop app**.
+3. Copy `backend/google-oauth.json.example` to `backend/google-oauth.json` and
+   put your client ID in the `clientId` field. The client secret is optional
+   for the PKCE desktop flow.
+4. Build ReqTrac. The configuration file is bundled into the installer.
+5. Start ReqTrac and open Settings → Public Google Sheet.
+6. Connect Google Drive, then click Publish Sheet or Sync Sheet.
+
+For development, `GOOGLE_CLIENT_ID` and the optional
+`GOOGLE_CLIENT_SECRET` environment variables are also supported in
+`backend/.env`. End users do not enter either value; they only authorize their
+own Google account in the browser.
+
+The export includes osu!-linked request metadata, categories, tags, statuses,
+dates, and osu! links. Manual/non-osu entries are intentionally excluded from
+the public sheet because they may represent unreleased maps. The export also
+excludes private notes, Discord links, settings, OAuth credentials, and
+database internals. The Drive file is shared as
+`anyone with the link: Viewer`; disconnecting ReqTrac removes the local OAuth
+tokens but does not delete the existing sheet from Google Drive. Packaged
+desktop builds use PKCE, and Electron encrypts stored Google tokens with the
+operating system credential store when available.
 
 **Quick local build:**
 

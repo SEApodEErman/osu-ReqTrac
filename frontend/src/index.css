@@ -52,6 +52,7 @@
   --status-graveyard: #8c8a93;
   
   --req-accepted: #00bc8c;
+  --req-considering: #f39c12;
   --req-working: #3498db;
   --req-completed: #2ecc71;
   --req-cancelled: #e74c3c;
@@ -314,9 +315,15 @@ button, input, select, textarea {
 
 /* Request status colors */
 .badge-accepted { background: rgba(0, 188, 140, 0.15); color: var(--req-accepted); border: 1px solid rgba(0, 188, 140, 0.3); }
+.badge-considering { background: rgba(243, 156, 18, 0.15); color: var(--req-considering); border: 1px solid rgba(243, 156, 18, 0.3); }
 .badge-working { background: rgba(52, 152, 219, 0.15); color: var(--req-working); border: 1px solid rgba(52, 152, 219, 0.3); }
 .badge-completed { background: rgba(46, 204, 113, 0.15); color: var(--req-completed); border: 1px solid rgba(46, 204, 113, 0.3); }
 .badge-cancelled { background: rgba(231, 76, 60, 0.15); color: var(--req-cancelled); border: 1px solid rgba(231, 76, 60, 0.3); }
+
+/* Priority badge colors shared with the priority selector in the detail modal */
+.badge-priority-low { background: rgba(52, 152, 219, 0.15); color: var(--priority-low); border: 1px solid rgba(52, 152, 219, 0.3); }
+.badge-priority-medium { background: rgba(243, 156, 18, 0.15); color: var(--priority-medium); border: 1px solid rgba(243, 156, 18, 0.3); }
+.badge-priority-high { background: rgba(231, 76, 60, 0.15); color: var(--priority-high); border: 1px solid rgba(231, 76, 60, 0.3); }
 
 /* Priorities */
 .priority-indicator {
@@ -372,6 +379,36 @@ select.input-text {
 .status-badge-select .status-badge-inner:focus {
   color: inherit !important;
   background-color: transparent !important;
+}
+
+.status-badge-inner option {
+  font-weight: 600;
+  color-scheme: light;
+}
+
+.status-badge-inner option.status-option-accepted {
+  background-color: #c6e8df;
+  color: #075445;
+}
+
+.status-badge-inner option.status-option-considering {
+  background-color: #f9e5c5;
+  color: #7a4c00;
+}
+
+.status-badge-inner option.status-option-working {
+  background-color: #d2e5f3;
+  color: #184f72;
+}
+
+.status-badge-inner option.status-option-completed {
+  background-color: #d4ecd9;
+  color: #1c5b2f;
+}
+
+.status-badge-inner option.status-option-cancelled {
+  background-color: #f1d6d3;
+  color: #742c26;
 }
 
 /* Chevron inside table status badge container inherits badge color */

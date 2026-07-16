@@ -22,8 +22,35 @@ if (!isDev) {
 const { startServer } = require('../backend/src/index');
 const { initAutoUpdater } = require('./updater');
 
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+  process.exit(0);
+}
+
 let mainWindow;
 let backendPort;
+
+function focusMainWindow() {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function handleProtocolArguments(commandLine) {
+  const callbackUrl = commandLine.find((argument) => argument.startsWith('osureqtrac://'));
+  if (callbackUrl) focusMainWindow();
+}
+
+app.on('second-instance', (_event, commandLine) => {
+  handleProtocolArguments(commandLine);
+});
+
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  if (url.startsWith('osureqtrac://')) focusMainWindow();
+});
 
 ipcMain.handle('window:minimize', () => mainWindow?.minimize());
 ipcMain.handle('window:toggle-maximize', () => {
@@ -93,6 +120,7 @@ async function createWindow() {
 
 app.whenReady().then(async () => {
   try {
+    app.setAsDefaultProtocolClient('osureqtrac');
     // In dev the standalone backend runs separately; don't double-start it.
     if (!isDev) {
       backendPort = await startServer();

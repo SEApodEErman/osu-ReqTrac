@@ -50,7 +50,7 @@ router.get('/', async (req, res, next) => {
 
     // 1. Overview counts
     const totalRequestsRow = await db.get('SELECT COUNT(*) AS count FROM requests');
-    const activeRequestsRow = await db.get("SELECT COUNT(*) AS count FROM requests WHERE request_status IN ('Accepted', 'Working')");
+    const activeRequestsRow = await db.get("SELECT COUNT(*) AS count FROM requests WHERE request_status IN ('Accepted', 'Considering', 'Working')");
     const completedRequestsRow = await db.get("SELECT COUNT(*) AS count FROM requests WHERE request_status = 'Completed'");
 
     // Due within a week (7 days)
@@ -64,7 +64,7 @@ router.get('/', async (req, res, next) => {
     const dueSoonRow = await db.get(`
       SELECT COUNT(*) AS count 
       FROM requests 
-      WHERE request_status IN ('Accepted', 'Working') 
+      WHERE request_status IN ('Accepted', 'Considering', 'Working')
         AND deadline IS NOT NULL 
         AND deadline >= ? 
         AND deadline <= ?

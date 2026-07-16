@@ -1,6 +1,6 @@
 {
   "name": "osu-reqtrac-root",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Root package runner for osu!ReqTrac",
   "author": "seapodeerman",
   "main": "electron/main.js",
@@ -45,6 +45,7 @@
     "files": [
       "electron/**/*",
       "backend/src/**/*",
+      "backend/google-oauth.json",
       "backend/package.json",
       "frontend/dist/**/*",
       "node_modules/**/*",

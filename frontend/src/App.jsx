@@ -277,6 +277,26 @@ export default function App() {
     }
   };
 
+  // Bulk priority update
+  const handleBulkUpdatePriority = async (ids, priority) => {
+    try {
+      await Promise.all(
+        ids.map(id =>
+          fetch(`/api/requests/${id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ priority })
+          })
+        )
+      );
+      await Promise.all([fetchRequests(), fetchStats()]);
+      alert(`Successfully updated priority to "${priority}" for ${ids.length} requests.`);
+    } catch (e) {
+      console.error(e);
+      alert('Failed to update priority for some requests.');
+    }
+  };
+
   // Bulk delete
   const handleBulkDelete = async (ids) => {
     try {
@@ -317,27 +337,27 @@ export default function App() {
     }
   };
 
-  // Google Sheets CSV migration
-  const handleImportCsv = async (csvText) => {
+  // Beatmap link migration
+  const handleImportBeatmapLinks = async (linksText, categories) => {
     try {
-      const res = await fetch('/api/migration/import-csv', {
+      const res = await fetch('/api/migration/import-beatmap-links', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ csvText })
+        body: JSON.stringify({ linksText, categories })
       });
 
       const data = await res.json();
       if (res.ok) {
-        alert(data.message);
         await Promise.all([fetchRequests(), fetchStats()]);
+        alert(data.message);
         return true;
       } else {
-        alert(`CSV Import Failed: ${data.error}`);
+        alert(`Beatmap Link Import Failed: ${data.error}`);
         return false;
       }
     } catch (e) {
       console.error(e);
-      alert('CSV Import Network Error.');
+      alert('Beatmap Link Import Network Error.');
       return false;
     }
   };
@@ -390,7 +410,7 @@ export default function App() {
           onDismissFirstLaunchSetup={() => setShowFirstLaunchSetup(false)}
           onSaveCredentials={handleSaveCredentials}
           onDisconnect={handleDisconnect}
-          onImportCsv={handleImportCsv}
+          onImportBeatmapLinks={handleImportBeatmapLinks}
           onImportJson={handleImportJson}
         />
       );
@@ -432,6 +452,7 @@ export default function App() {
             onDeleteRequest={handleDeleteRequest}
             onUpdateRequest={handleUpdateRequest}
             onBulkUpdateStatus={handleBulkUpdateStatus}
+            onBulkUpdatePriority={handleBulkUpdatePriority}
             onBulkDelete={handleBulkDelete}
             activeCategory={activeCategory}
           />

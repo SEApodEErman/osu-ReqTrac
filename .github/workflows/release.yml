@@ -41,6 +41,10 @@ jobs:
       - name: Generate application icons
         run: npm run generate:icon
 
+      - name: Create Google OAuth config
+        env:
+            GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+        run: node -e "require('fs').writeFileSync('backend/google-oauth.json', JSON.stringify({clientId: process.env.GOOGLE_CLIENT_ID}))"
       - name: Build and publish (Electron)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

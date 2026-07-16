@@ -117,7 +117,7 @@ export default function RequestDetailModal({
   
   // Local editable states
   const [requestStatus, setRequestStatus] = useState(request.request_status);
-  const [priority, setPriority] = useState(request.priority);
+  const [priority, setPriority] = useState(request.priority || 'Low');
   const [deadline, setDeadline] = useState(dateInputValue(request.deadline));
   const [addedDate, setAddedDate] = useState(dateInputValue(request.added_date));
   const [artist, setArtist] = useState(request.artist || '');
@@ -669,6 +669,7 @@ export default function RequestDetailModal({
                 style={{ fontWeight: '600' }}
               >
                 <option value="Accepted">Accepted</option>
+                <option value="Considering">Considering</option>
                 <option value="Working">Working</option>
                 <option value="Completed">Completed</option>
                 <option value="Cancelled">Cancelled</option>

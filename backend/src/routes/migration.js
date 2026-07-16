@@ -2,8 +2,11 @@ const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db');
 const { refreshAndCacheBeatmapset } = require('./beatmaps');
-const { fetchBeatmap, fetchUser, downloadCover } = require('../osuApi');
+const { fetchBeatmap } = require('../osuApi');
 const { createApiJob, addApiJobWork, updateApiJob, finishApiJob } = require('../osuApi');
+const { parseOsuLink } = require('../utils/requestUtils');
+
+const IMPORT_CATEGORY_NAMES = new Set(['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others']);
 
 // GET /api/migration/export - Export backup JSON
 router.get('/export', async (req, res, next) => {
@@ -132,167 +135,62 @@ router.post('/import-json', async (req, res, next) => {
   }
 });
 
-// Clean up double quotes and escape characters in CSV cells
-function cleanCSVCell(val) {
-  if (!val) return '';
-  return val.replace(/^"|"$/g, '').replace(/""/g, '"').trim();
-}
-
-// Custom CSV Line Parser supporting quotes
-function parseCSVLine(line) {
-  const result = [];
-  let current = '';
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    if (char === '"') {
-      inQuotes = !inQuotes;
-    } else if (char === ',' && !inQuotes) {
-      result.push(current);
-      current = '';
-    } else {
-      current += char;
-    }
-  }
-  result.push(current);
-  return result.map(cleanCSVCell);
-}
-
-// POST /api/migration/import-csv - Parse and load Google Sheets CSV file content
-// Expected columns: Artist, Title, Mapper, Link, Map Status, Remarks
-router.post('/import-csv', async (req, res, next) => {
+// POST /api/migration/import-beatmap-links - Import one osu! beatmap link per line.
+router.post('/import-beatmap-links', async (req, res, next) => {
   try {
-    const { csvText } = req.body;
-    if (!csvText) {
-      return res.status(400).json({ error: 'csvText is required in request body' });
+    const { linksText, categories } = req.body;
+    if (typeof linksText !== 'string' || !linksText.trim()) {
+      return res.status(400).json({ error: 'linksText is required in request body' });
     }
 
-    // Accept either the legacy CSV format or a simple one-link-per-line list.
-    const lines = csvText.split(/\r?\n/).filter(line => line.trim().length > 0);
+    const importCategories = Array.isArray(categories)
+      ? [...new Set(categories.filter(category => IMPORT_CATEGORY_NAMES.has(category)))]
+      : ['Hitsounds'];
+    if (importCategories.length === 0) {
+      return res.status(400).json({ error: 'Select at least one valid request category.' });
+    }
+
+    const lines = linksText.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
     if (lines.length === 0) {
-      return res.status(400).json({ error: 'Provide at least one beatmap link or a CSV data row.' });
+      return res.status(400).json({ error: 'Provide at least one osu! beatmap link.' });
     }
 
-    const linkListMode = lines.every(line => /^https?:\/\/(?:www\.)?osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i.test(line.trim()));
-    const headers = linkListMode ? [] : parseCSVLine(lines[0]);
-    
-    // Map columns by header name (case-insensitive, ignores extra whitespace)
-    const headerMap = {};
-    headers.forEach((h, idx) => {
-      const normalized = h.trim().toLowerCase();
-      headerMap[normalized] = idx;
-    });
-
-    // Required column mappings
-    const getColIndex = (names) => {
-      for (const name of names) {
-        const idx = headerMap[name.toLowerCase()];
-        if (idx !== undefined) return idx;
-      }
-      return -1;
-    };
-
-    const colIndices = {
-      artist: getColIndex(['artist']),
-      title: getColIndex(['title']),
-      mapper: getColIndex(['mapper', 'creator']),
-      link: getColIndex(['link', 'url', 'beatmapset', 'beatmap']),
-      mapStatus: getColIndex(['map status', 'mapstatus', 'status']),
-      remarks: getColIndex(['remarks', 'notes', 'comments'])
-    };
-
-    // Validate required columns
-    const missingColumns = [];
-    if (!linkListMode && colIndices.artist === -1) missingColumns.push('Artist');
-    if (!linkListMode && colIndices.title === -1) missingColumns.push('Title');
-    if (!linkListMode && colIndices.mapper === -1) missingColumns.push('Mapper');
-    if (!linkListMode && colIndices.link === -1) missingColumns.push('Link');
-    if (!linkListMode && colIndices.mapStatus === -1) missingColumns.push('Map Status');
-    if (!linkListMode && colIndices.remarks === -1) missingColumns.push('Remarks');
-
-    if (missingColumns.length > 0) {
-      return res.status(400).json({ 
-        error: `Missing required columns: ${missingColumns.join(', ')}. Expected columns: Artist, Title, Mapper, Link, Map Status, Remarks`,
-        expectedColumns: ['Artist', 'Title', 'Mapper', 'Link', 'Map Status', 'Remarks'],
-        foundHeaders: headers
+    const beatmapLinkPattern = /^https?:\/\/(?:www\.)?osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+(?:[/?#].*)?$/i;
+    const invalidLines = lines
+      .map((link, index) => ({ link, line: index + 1 }))
+      .filter(({ link }) => !beatmapLinkPattern.test(link) || !parseOsuLink(link));
+    if (invalidLines.length > 0) {
+      return res.status(400).json({
+        error: `Only osu! beatmap links are supported. Invalid line${invalidLines.length === 1 ? '' : 's'}: ${invalidLines.map(({ line }) => line).join(', ')}`
       });
     }
 
     const db = await getDatabase();
     let importCount = 0;
-    const errors = [];
-    const apiJobId = createApiJob(linkListMode ? 'Importing beatmap links' : 'Importing CSV metadata');
+    const apiJobId = createApiJob('Importing beatmap links');
     const prefetches = [];
 
-    for (let i = linkListMode ? 0 : 1; i < lines.length; i++) {
-      const row = parseCSVLine(lines[i]);
-      if (row.length === 0 || (row.length === 1 && !row[0])) continue;
-
-      // Extract values using column indices
-      const rawArtist = linkListMode ? '' : (row[colIndices.artist] || '');
-      const rawTitle = linkListMode ? '' : (row[colIndices.title] || '');
-      const rawMapper = linkListMode ? '' : (row[colIndices.mapper] || '');
-      const rawLink = linkListMode ? lines[i] : (row[colIndices.link] || '');
-      const rawMapStatus = linkListMode ? '' : (row[colIndices.mapStatus] || '');
-      const rawRemarks = linkListMode ? '' : (row[colIndices.remarks] || '');
-
-      // Trim whitespace
-      const artist = rawArtist.trim();
-      const title = rawTitle.trim();
-      const mapper = rawMapper.trim();
-      const link = rawLink.trim();
-      const mapStatus = rawMapStatus.trim();
-      const remarks = rawRemarks.trim();
-
-      // Validate required fields
-      if ((!linkListMode && (!artist || !title || !mapper)) || !link) {
-        errors.push(`Row ${i + 1}: Missing required fields (Artist, Title, Mapper, Link)`);
-        continue;
-      }
-
-      // Parse link to detect osu! beatmap link
+    for (let i = 0; i < lines.length; i++) {
+      const link = lines[i];
+      const parsedLink = parseOsuLink(link);
       let beatmapsetId = null;
-      let isOsuLink = false;
-      const setRegex = /osu\.ppy\.sh\/beatmapsets\/(\d+)/i;
-      const setMatch = link.match(setRegex);
-      if (setMatch) {
-        beatmapsetId = parseInt(setMatch[1], 10);
-        isOsuLink = true;
+      if (parsedLink.type === 'beatmapset') {
+        beatmapsetId = parsedLink.id;
       } else {
-        const mapRegex = /osu\.ppy\.sh\/(?:beatmaps|b)\/(\d+)/i;
-        const mapMatch = link.match(mapRegex);
-        if (mapMatch) {
-          // It's a beatmap link, fetch to get beatmapset_id
-          isOsuLink = true;
-          addApiJobWork(apiJobId, 1);
-          updateApiJob(apiJobId, 1);
-          try {
-            const mapData = await fetchBeatmap(parseInt(mapMatch[1], 10));
-            if (mapData && mapData.beatmapset_id) {
-              beatmapsetId = mapData.beatmapset_id;
-            }
-          } catch (e) {
-            console.error(`Failed to fetch beatmapset for beatmap ${mapMatch[1]}:`, e.message);
-          }
+        addApiJobWork(apiJobId, 1);
+        updateApiJob(apiJobId, 1);
+        const mapData = await fetchBeatmap(parsedLink.id);
+        if (mapData && mapData.beatmapset_id) {
+          beatmapsetId = mapData.beatmapset_id;
+        } else {
+          continue;
         }
-      }
-
-      // Map status to enum
-      let status = 'Accepted';
-      const normStatus = mapStatus.toLowerCase();
-      if (normStatus.includes('work') || normStatus.includes('prog') || normStatus.includes('wip')) {
-        status = 'Working';
-      } else if (normStatus.includes('comp') || normStatus.includes('done') || normStatus.includes('complete')) {
-        status = 'Completed';
-      } else if (normStatus.includes('canc') || normStatus.includes('drop') || normStatus.includes('reject')) {
-        status = 'Cancelled';
       }
 
       // Check if beatmapset ID is already added
       if (beatmapsetId) {
         const existing = await db.get('SELECT id FROM requests WHERE beatmapset_id = ?', beatmapsetId);
         if (existing) {
-          // Skip duplicates during bulk CSV import
           continue;
         }
 
@@ -314,42 +212,46 @@ router.post('/import-csv', async (req, res, next) => {
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
       `, [
         beatmapsetId,
-        isOsuLink ? 1 : 0,
-        isOsuLink ? null : artist,
-        isOsuLink ? null : title,
-        isOsuLink ? null : mapper,
-        null, // difficulty not in new format
-        'Anonymous', // requester - will be auto-populated from osu! API for osu links
-        status,
-        'Medium', // default priority
-        null, // deadline not in new format
-        remarks || null,
-        status === 'Completed' ? new Date().toISOString() : null
+        1,
+        null,
+        null,
+        null,
+        null,
+        'Anonymous',
+        'Accepted',
+        'Low',
+        null,
+        null,
+        null
       ]);
 
       const requestId = result.lastID;
 
-      // Default category: Hitsounds
-      await db.run(`
-        INSERT INTO request_categories (request_id, category_name, other_text, status)
-        VALUES (?, ?, ?, ?)
-      `, [requestId, 'Hitsounds', null, status === 'Completed' ? 'Completed' : 'Pending']);
+      for (const categoryName of importCategories) {
+        await db.run(`
+          INSERT INTO request_categories (request_id, category_name, other_text, status)
+          VALUES (?, ?, ?, ?)
+        `, [requestId, categoryName, null, 'Pending']);
+      }
 
       // Create history
       await db.run(`
         INSERT INTO history (request_id, action_type, details)
         VALUES (?, ?, ?)
-      `, [requestId, 'created', linkListMode ? 'Request imported from beatmap link list' : 'Request imported via CSV']);
+      `, [requestId, 'created', 'Request imported from beatmap link list']);
 
       importCount++;
     }
 
-    Promise.allSettled(prefetches).then(() => finishApiJob(apiJobId));
+    // Do not return until all imported beatmaps have finished their metadata sync.
+    // The frontend refreshes the request table after this response, so the cache
+    // must be populated before the response is sent.
+    await Promise.allSettled(prefetches);
+    finishApiJob(apiJobId);
 
     res.json({
       success: true,
-      message: `${linkListMode ? 'Beatmap links' : 'CSV'} imported successfully. Imported ${importCount} requests.${errors.length > 0 ? ` ${errors.length} rows had errors.` : ''}`,
-      errors: errors.length > 0 ? errors : undefined
+      message: `Beatmap links imported successfully. Imported ${importCount} requests.`
     });
   } catch (error) {
     next(error);
