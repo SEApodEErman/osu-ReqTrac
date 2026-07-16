@@ -5,11 +5,18 @@ const path = require('path');
 const { getDatabase, coversDir } = require('./db');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const isElectron = process.env.ELECTRON_RUN === '1';
+// In Electron production we bind to an OS-assigned free port (0) to avoid conflicts.
+// In standalone/dev we keep the fixed port for the Vite proxy.
+const PORT = process.env.PORT || (isElectron ? 0 : 3001);
 
-// CORS setup
+// CORS setup — allow both Vite dev server and Electron file:// protocol
+const corsOrigin = process.env.ELECTRON_RUN === '1'
+  ? true
+  : (process.env.FRONTEND_URL || 'http://localhost:3000');
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: corsOrigin,
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   credentials: true
 }));
@@ -44,6 +51,17 @@ app.use('/api/settings', settingsRouter);
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date() });
 });
+
+// In Electron/production, serve the built frontend so relative /api and /uploads
+// URLs resolve against this same origin (http://localhost:<port>).
+if (isElectron && process.env.FRONTEND_DIST) {
+  const frontendDist = process.env.FRONTEND_DIST;
+  app.use(express.static(frontendDist));
+  // SPA fallback: any non-API GET returns index.html
+  app.get(/^(?!\/api|\/uploads).*/, (req, res) => {
+    res.sendFile(path.join(frontendDist, 'index.html'));
+  });
+}
 
 // Global error handler
 app.use((err, req, res, next) => {
@@ -84,30 +102,40 @@ function fsWriteFileSync(p, c) {
   fs.writeFileSync(p, c);
 }
 
-// Start database and server
+// Start database and server. Resolves with the actual bound port so the
+// Electron main process can point the window at the right URL.
 async function startServer() {
-  try {
-    await getDatabase();
-    console.log('Database initialized successfully.');
+  await getDatabase();
+  console.log('Database initialized successfully.');
 
-    // Verify osu! OAuth credentials exist in environment variables
-    const oauthClientId = process.env.OSU_CLIENT_ID;
-    const oauthClientSecret = process.env.OSU_CLIENT_SECRET;
-    if (!oauthClientId || !oauthClientSecret) {
-      console.warn('\n[WARNING] osu! OAuth credentials are missing from environment variables (OSU_CLIENT_ID and/or OSU_CLIENT_SECRET).');
-      console.warn('To enable beatmap syncing and account connection, please configure them in your backend/.env file or through the Settings page in the web UI.\n');
-    }
-    
-    const server = app.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
+  // Verify osu! OAuth credentials exist in environment variables
+  const oauthClientId = process.env.OSU_CLIENT_ID;
+  const oauthClientSecret = process.env.OSU_CLIENT_SECRET;
+  if (!oauthClientId || !oauthClientSecret) {
+    console.warn('\n[WARNING] osu! OAuth credentials are missing from environment variables (OSU_CLIENT_ID and/or OSU_CLIENT_SECRET).');
+    console.warn('To enable beatmap syncing and account connection, please configure them in your backend/.env file or through the Settings page in the web UI.\n');
+  }
+
+  return new Promise((resolve, reject) => {
+    const server = app.listen(PORT, '127.0.0.1', () => {
+      const actualPort = server.address().port;
+      console.log(`Server is running on port ${actualPort}`);
+      resolve(actualPort);
     });
+    server.on('error', reject);
     // Prevent connection timeouts during long operations (CSV import, etc.)
     server.timeout = 0;
     server.keepAliveTimeout = 300000;
-  } catch (error) {
-    console.error('Failed to initialize database and start server:', error);
-    process.exit(1);
-  }
+  });
 }
 
-startServer();
+module.exports = { startServer, app };
+
+// When run standalone (node src/index.js) start immediately.
+// When imported by Electron, the main process calls startServer() itself.
+if (require.main === module) {
+  startServer().catch((error) => {
+    console.error('Failed to initialize database and start server:', error);
+    process.exit(1);
+  });
+}

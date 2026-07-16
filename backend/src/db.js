@@ -3,16 +3,31 @@ const sqlite3 = require('sqlite3');
 const { open } = require('sqlite');
 const fs = require('fs');
 
-const dbPath = path.resolve(__dirname, '../data/database.sqlite');
-const dbDir = path.dirname(dbPath);
+// Determine data directory — use Electron userData path if available
+function getDataDir() {
+  if (process.env.ELECTRON_RUN === '1') {
+    try {
+      const { app } = require('electron');
+      const userDataPath = app.getPath('userData');
+      return path.join(userDataPath, 'data');
+    } catch (e) {
+      // Fallback if electron isn't fully loaded yet
+    }
+  }
+  return path.resolve(__dirname, '../data');
+}
+
+const dbDir = getDataDir();
 
 // Ensure the data directory exists
 if (!fs.existsSync(dbDir)) {
   fs.mkdirSync(dbDir, { recursive: true });
 }
 
+const dbPath = path.join(dbDir, 'database.sqlite');
+
 // Ensure the local covers directory exists
-const coversDir = path.resolve(dbDir, 'covers');
+const coversDir = path.join(dbDir, 'covers');
 if (!fs.existsSync(coversDir)) {
   fs.mkdirSync(coversDir, { recursive: true });
 }

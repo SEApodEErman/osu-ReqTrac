@@ -1,5 +1,3 @@
-'use client';
-
 import React, { useState, useRef } from 'react';
 import { Plus, Link, AlertCircle, X, Loader2, UserCheck } from 'lucide-react';
 

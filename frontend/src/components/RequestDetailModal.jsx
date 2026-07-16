@@ -1,7 +1,4 @@
-'use client';
-
 import React, { useState, useEffect, useCallback } from 'react';
-import Image from 'next/image';
 import { 
   X, 
   ExternalLink, 
@@ -601,12 +598,11 @@ export default function RequestDetailModal({
                 borderRadius: '8px',
                 border: '1px solid var(--border)'
               }}>
-                <Image
+                <img
                   src={request.requester_avatar || '/uploads/covers/default.jpg'} 
                   alt="avatar" 
                   width={40}
                   height={40}
-                  unoptimized
                   style={{ width: '40px', height: '40px', borderRadius: '50%', objectFit: 'cover', border: '1px solid var(--border)' }}
                   onError={(e) => {
                     e.target.src = '/uploads/covers/default.jpg';
@@ -941,7 +937,7 @@ export default function RequestDetailModal({
       </div>
 
       {/* Local spin loader CSS style injected locally */}
-      <style jsx global>{`
+      <style>{`
         @keyframes spin {
           from { transform: rotate(0deg); }
           to { transform: rotate(360deg); }

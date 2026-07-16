@@ -1,7 +1,4 @@
-'use client';
-
 import React from 'react';
-import Image from 'next/image';
 import { 
   FileText, 
   Play, 
@@ -202,12 +199,11 @@ export default function Dashboard({ statsData, requestsList, onOpenRequest, conn
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
-                    <Image
+                    <img
                       src={req.local_cover_path} 
                       alt="cover" 
                       width={48}
                       height={28}
-                      unoptimized
                       style={{ 
                         width: '48px', 
                         height: '28px', 
@@ -430,12 +426,11 @@ export default function Dashboard({ statsData, requestsList, onOpenRequest, conn
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             {filteredBreakdown.map((r, index) => (
               <div key={r.username + index} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <Image
+                <img
                   src={r.avatar_url || '/uploads/covers/default.jpg'}
                   alt={r.username}
                   width={32}
                   height={32}
-                  unoptimized
                   style={{ width: '32px', height: '32px', borderRadius: '50%', objectFit: 'cover', border: '1px solid var(--border)', flexShrink: 0 }}
                   onError={(e) => { e.target.src = '/uploads/covers/default.jpg'; }}
                 />

@@ -18,7 +18,10 @@ node_modules/
 .next/
 out/
 dist/
-build/
+release/
+# NOTE: /build holds electron-builder resources (icons) and IS committed.
+# Only ignore nested build output dirs, not the top-level build resources.
+**/dist/
 
 # ==========================
 # Logs

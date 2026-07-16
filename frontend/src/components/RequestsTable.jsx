@@ -1,7 +1,4 @@
-'use client';
-
 import React, { useState, useMemo } from 'react';
-import Image from 'next/image';
 import { 
   ArrowUpDown, 
   Search, 
@@ -437,12 +434,11 @@ export default function RequestsTable({
 
                     {/* Cover Photo */}
                     <td>
-                      <Image
+                      <img
                         src={req.local_cover_path} 
                         alt="cover" 
                         width={56}
                         height={32}
-                        unoptimized
                         style={{ width: '56px', height: '32px', borderRadius: '4px', objectFit: 'cover', display: 'block', border: '1px solid var(--border)' }}
                         onError={(e) => {
                           e.target.src = '/uploads/covers/default.jpg';

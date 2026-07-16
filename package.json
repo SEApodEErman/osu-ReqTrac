@@ -2,15 +2,88 @@
   "name": "osu-reqtrac-root",
   "version": "1.0.0",
   "description": "Root package runner for osu!ReqTrac",
+  "author": "seapodeerman",
+  "main": "electron/main.js",
   "scripts": {
     "install:backend": "npm install --prefix backend",
     "install:frontend": "npm install --prefix frontend",
     "install:all": "npm install && npm run install:backend && npm run install:frontend",
-    "dev:backend": "npm run dev --prefix backend",
-    "dev:frontend": "npm run dev --prefix frontend",
-    "dev": "concurrently -n \"backend,frontend\" -c \"magenta,cyan\" \"npm run dev:backend\" \"npm run dev:frontend\""
+    "postinstall": "electron-builder install-app-deps",
+    "dev:backend": "cross-env PORT=3001 npm run dev --prefix backend",
+    "dev:frontend": "cd frontend && npx vite",
+    "dev:electron": "wait-on tcp:3000 tcp:3001 && cross-env NODE_ENV=development electron .",
+    "dev": "concurrently -n \"backend,frontend,electron\" -c \"yellow,cyan,green\" \"npm run dev:backend\" \"npm run dev:frontend\" \"npm run dev:electron\"",
+    "build:frontend": "cd frontend && npx vite build",
+    "build": "npm run build:frontend && electron-builder",
+    "build:dir": "npm run build:frontend && electron-builder --dir",
+    "release": "npm run build:frontend && electron-builder --publish always",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "electron-updater": "^6.3.9",
+    "express": "^4.19.2",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^35.0.0",
+    "electron-builder": "^25.0.0",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.osureqtrac.app",
+    "productName": "osu!ReqTrac",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "backend/src/**/*",
+      "backend/package.json",
+      "frontend/dist/**/*",
+      "node_modules/**/*",
+      "!**/*.map"
+    ],
+    "asarUnpack": [
+      "node_modules/sqlite3/**/*"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "seapodeerman",
+        "repo": "osu-ReqTrac"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-${version}-Setup.${ext}"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.utilities"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "build/icon.png",
+      "category": "Utility"
+    }
   }
 }

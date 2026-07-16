@@ -1,15 +1,13 @@
-'use client';
-
 import React, { useState, useEffect } from 'react';
 import { Plus } from 'lucide-react';
-import Sidebar from '../components/Sidebar';
-import Dashboard from '../components/Dashboard';
-import RequestsTable from '../components/RequestsTable';
-import RequestDetailModal from '../components/RequestDetailModal';
-import SettingsPanel from '../components/SettingsPanel';
-import QuickAdd from '../components/QuickAdd';
+import Sidebar from './components/Sidebar';
+import Dashboard from './components/Dashboard';
+import RequestsTable from './components/RequestsTable';
+import RequestDetailModal from './components/RequestDetailModal';
+import SettingsPanel from './components/SettingsPanel';
+import QuickAdd from './components/QuickAdd';
 
-export default function Home() {
+export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [theme, setTheme] = useState(() => {
     if (typeof window === 'undefined') return 'dark';
@@ -20,7 +18,7 @@ export default function Home() {
   const [settingsData, setSettingsData] = useState({});
   const [selectedRequest, setSelectedRequest] = useState(null);
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
-  
+
   // QuickAdd duplicate check state
   const [duplicateError, setDuplicateError] = useState(null);
 
@@ -211,7 +209,7 @@ export default function Home() {
   const handleBulkUpdateStatus = async (ids, status) => {
     try {
       await Promise.all(
-        ids.map(id => 
+        ids.map(id =>
           fetch(`/api/requests/${id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -231,7 +229,7 @@ export default function Home() {
   const handleBulkDelete = async (ids) => {
     try {
       await Promise.all(
-        ids.map(id => 
+        ids.map(id =>
           fetch(`/api/requests/${id}`, { method: 'DELETE' })
         )
       );
@@ -321,8 +319,8 @@ export default function Home() {
   const renderMainView = () => {
     if (activeTab === 'dashboard') {
       return (
-        <Dashboard 
-          statsData={statsData} 
+        <Dashboard
+          statsData={statsData}
           requestsList={requestsList}
           onOpenRequest={setSelectedRequest}
           connectedAccount={settingsData.connectedAccount}
@@ -346,7 +344,7 @@ export default function Home() {
       const activeCategory = activeTab.replace('requests-', '');
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', padding: '24px 0 0 0' }}>
-          
+
           {/* Quick Add - Collapsible */}
           <div style={{ padding: '0 24px' }}>
             {isQuickAddOpen ? (
@@ -389,7 +387,7 @@ export default function Home() {
 
   return (
     <div className="app-container">
-      
+
       {/* LEFT SIDEBAR PANEL */}
       <Sidebar
         activeTab={activeTab}
