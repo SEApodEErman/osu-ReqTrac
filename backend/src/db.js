@@ -61,6 +61,7 @@ async function getDatabase() {
       priority TEXT CHECK(priority IN ('Low', 'Medium', 'High')) DEFAULT 'Low',
       deadline DATE,
       notes TEXT,
+      input_link TEXT,
       discord_link TEXT,
       osu_profile_link TEXT,
       added_date DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -131,6 +132,7 @@ async function getDatabase() {
   await addColumnIfMissing(dbInstance, 'beatmap_cache', 'osu_last_updated', 'TEXT');
   await addColumnIfMissing(dbInstance, 'requests', 'guest_difficulty_target_sr', 'REAL');
   await addColumnIfMissing(dbInstance, 'requests', 'guest_difficulty_name', 'TEXT');
+  await addColumnIfMissing(dbInstance, 'requests', 'input_link', 'TEXT');
   await migrateRequestStatusConstraint(dbInstance);
 
   // Trigger difficulty migration asynchronously to update existing caches
@@ -193,6 +195,7 @@ async function migrateRequestStatusConstraint(db) {
     'priority',
     'deadline',
     'notes',
+    'input_link',
     'discord_link',
     'osu_profile_link',
     'added_date',
@@ -223,6 +226,7 @@ async function migrateRequestStatusConstraint(db) {
         priority TEXT CHECK(priority IN ('Low', 'Medium', 'High')) DEFAULT 'Low',
         deadline DATE,
         notes TEXT,
+        input_link TEXT,
         discord_link TEXT,
         osu_profile_link TEXT,
         added_date DATETIME DEFAULT CURRENT_TIMESTAMP,

@@ -171,7 +171,7 @@ function sheetDate(value) {
 
 function categoryRows(snapshot, category) {
   const layout = CATEGORY_LAYOUTS[category];
-  const headers = ['Artist', 'Title', 'Creator', 'Difficulties', layout.metricHeader, 'Map Status', 'Request Status', 'Priority', 'Deadline', 'Added Date', 'Completed Date', 'osu! Link'];
+  const headers = ['Artist', 'Title', 'Creator', 'Difficulties', layout.metricHeader, 'Map Status', 'Request Status', 'Priority', 'Deadline', 'Added Date', 'Completed Date', 'Notes', 'osu! Link'];
   const rows = snapshot.requests
     .filter((request) => request.categories.includes(category))
     .map((request) => [
@@ -179,7 +179,7 @@ function categoryRows(snapshot, category) {
       request.numDifficulties ? `${request.numDifficulties} ${request.numDifficulties === 1 ? 'diff' : 'diffs'}` : '—',
       layout.metricKey === 'tags' ? (request.tags || []).join(', ') || '—' : (Number(request[layout.metricKey]) ? Number(request[layout.metricKey]).toFixed(2) : '—'),
       request.mapStatus || 'Manual', request.status || '', request.priority || '',
-      sheetDate(request.deadline), sheetDate(request.addedDate), sheetDate(request.completedDate), request.osuUrl || ''
+      sheetDate(request.deadline), sheetDate(request.addedDate), sheetDate(request.completedDate), request.notes || '', request.osuUrl || ''
     ]);
   return [headers, ...rows];
 }
@@ -215,9 +215,75 @@ function columnLetter(index) {
   return value;
 }
 
-function categoryFormatting(sheet, rowCount, theme) {
+// Keep the exported star-rating colors aligned with RequestsTable.jsx. Google
+// Sheets gradient rules only support three stops, so each numeric star cell is
+// formatted with the exact interpolated color used by the app.
+const STAR_DIFFICULTY_SPECTRUM = [
+  { stars: 0.0, color: '#aaaaaa' },
+  { stars: 0.1, color: '#aaaaaa' },
+  { stars: 0.1, color: '#4290fb' },
+  { stars: 1.25, color: '#4fc0ff' },
+  { stars: 2.0, color: '#4fffd5' },
+  { stars: 2.5, color: '#7cff4f' },
+  { stars: 3.3, color: '#f6f05c' },
+  { stars: 4.2, color: '#ff8068' },
+  { stars: 4.9, color: '#ff4e6f' },
+  { stars: 5.8, color: '#c645b8' },
+  { stars: 6.7, color: '#6563de' },
+  { stars: 7.7, color: '#18158e' },
+  { stars: 9.0, color: '#000000' },
+  { stars: 10.0, color: '#000000' }
+];
+
+const STAR_TEXT_SPECTRUM = [
+  { stars: 9.0, color: '#f6f05c' },
+  { stars: 9.9, color: '#ff8068' },
+  { stars: 10.6, color: '#ff4e6f' },
+  { stars: 11.5, color: '#c645b8' },
+  { stars: 12.4, color: '#6563de' }
+];
+
+function interpolateHexColor(color1, color2, ratio) {
+  const hex1 = color1.slice(1);
+  const hex2 = color2.slice(1);
+  const channels = [0, 2, 4].map((offset) => {
+    const first = parseInt(hex1.slice(offset, offset + 2), 16);
+    const second = parseInt(hex2.slice(offset, offset + 2), 16);
+    return Math.round(first + (second - first) * ratio);
+  });
+  return `#${channels.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function starDifficultyColor(stars) {
+  if (stars <= 0) return '#aaaaaa';
+  if (stars >= 10) return '#000000';
+  for (let index = 0; index < STAR_DIFFICULTY_SPECTRUM.length - 1; index += 1) {
+    const current = STAR_DIFFICULTY_SPECTRUM[index];
+    const next = STAR_DIFFICULTY_SPECTRUM[index + 1];
+    if (current.stars === next.stars) continue;
+    if (stars >= current.stars && stars <= next.stars) {
+      return interpolateHexColor(current.color, next.color, (stars - current.stars) / (next.stars - current.stars));
+    }
+  }
+  return '#aaaaaa';
+}
+
+function starTextColor(stars) {
+  if (stars < 6.5) return { red: 0, green: 0, blue: 0, alpha: 0.75 };
+  if (stars < 9.0) return hexColor('#f6f05c');
+  for (let index = 0; index < STAR_TEXT_SPECTRUM.length - 1; index += 1) {
+    const current = STAR_TEXT_SPECTRUM[index];
+    const next = STAR_TEXT_SPECTRUM[index + 1];
+    if (stars >= current.stars && stars <= next.stars) {
+      return hexColor(interpolateHexColor(current.color, next.color, (stars - current.stars) / (next.stars - current.stars)));
+    }
+  }
+  return hexColor('#6563de');
+}
+
+function categoryFormatting(sheet, rowCount, theme, rows, layout) {
   const sheetId = sheet.properties.sheetId;
-  const columnCount = 12;
+  const columnCount = 13;
   const { osuPink, text, background, alternate, white } = sheetTheme(theme);
   const requests = [
     { updateCells: { range: { sheetId, startRowIndex: 0, startColumnIndex: 0 }, fields: 'userEnteredValue' } },
@@ -228,13 +294,13 @@ function categoryFormatting(sheet, rowCount, theme) {
     { setBasicFilter: { filter: { range: { sheetId, startRowIndex: 0, endRowIndex: rowCount, startColumnIndex: 0, endColumnIndex: columnCount } } } }
   ];
 
-  [150, 240, 160, 110, 125, 120, 125, 100, 120, 120, 120, 220].forEach((pixelSize, index) => {
+  [150, 240, 160, 110, 125, 120, 125, 100, 120, 120, 120, 220, 220].forEach((pixelSize, index) => {
     requests.push({ updateDimensionProperties: { range: { sheetId, dimension: 'COLUMNS', startIndex: index, endIndex: index + 1 }, properties: { pixelSize }, fields: 'pixelSize' } });
   });
   [8, 9, 10].forEach((column) => {
     requests.push({ repeatCell: { range: { sheetId, startRowIndex: 1, endRowIndex: rowCount, startColumnIndex: column, endColumnIndex: column + 1 }, cell: { userEnteredFormat: { numberFormat: { type: 'DATE', pattern: 'dd-mmm-yyyy' } } }, fields: 'userEnteredFormat.numberFormat' } });
   });
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex: 1, endRowIndex: rowCount, startColumnIndex: 11, endColumnIndex: 12 }, cell: { userEnteredFormat: { textFormat: { foregroundColor: hexColor('#1155CC'), underline: true } } }, fields: 'userEnteredFormat.textFormat' } });
+  requests.push({ repeatCell: { range: { sheetId, startRowIndex: 1, endRowIndex: rowCount, startColumnIndex: 12, endColumnIndex: 13 }, cell: { userEnteredFormat: { textFormat: { fontFamily: 'JetBrains Mono', foregroundColor: text, underline: true } } }, fields: 'userEnteredFormat.textFormat' } });
 
   (sheet.bandedRanges || []).forEach((bandedRange) => {
     if (bandedRange.bandedRangeId !== undefined) requests.push({ deleteBanding: { bandedRangeId: bandedRange.bandedRangeId } });
@@ -252,6 +318,25 @@ function categoryFormatting(sheet, rowCount, theme) {
       [5, 'ranked', '#e8f2c7', '#5f7d00'], [5, 'loved', '#fde1ee', '#c43f7c'], [5, 'qualified', '#d9f1ff', '#0079b5'], [5, 'pending', '#fff0d7', '#a86600'], [5, 'wip', '#fff0d7', '#a86600'], [5, 'graveyard', '#ededf0', '#6f6d77']
     ];
     colors.forEach(([column, value, background, foreground]) => requests.push(colorRule(sheetId, column, value, background, foreground, rowCount)));
+
+    if (layout.metricKey !== 'tags') {
+      rows.slice(1).forEach((row, index) => {
+        const stars = Number(row[4]);
+        if (!(stars > 0)) return;
+        requests.push({
+          repeatCell: {
+            range: { sheetId, startRowIndex: index + 1, endRowIndex: index + 2, startColumnIndex: 4, endColumnIndex: 5 },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: hexColor(starDifficultyColor(stars)),
+                textFormat: { bold: true, foregroundColor: starTextColor(stars) }
+              }
+            },
+            fields: 'userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold,userEnteredFormat.textFormat.foregroundColor'
+          }
+        });
+      });
+    }
   }
   return requests;
 }
@@ -322,7 +407,7 @@ function dashboardFormatting(sheetId, rowCount, layout, theme) {
   fillRange(8, 10, 0, 4, alternate);
   fillRange(13, layout.requesterSection, 0, 4, background);
   if (layout.requesterSection > 15) fillRange(15, layout.requesterSection, 0, 4, alternate);
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex: 13, endRowIndex: layout.requesterSection, startColumnIndex: 0, endColumnIndex: 1 }, cell: { userEnteredFormat: { textFormat: { fontFamily: 'JetBrains Mono', fontSize: 10, foregroundColor: hexColor('#1155CC'), underline: true } } }, fields: 'userEnteredFormat.textFormat' } });
+  requests.push({ repeatCell: { range: { sheetId, startRowIndex: 13, endRowIndex: layout.requesterSection, startColumnIndex: 0, endColumnIndex: 1 }, cell: { userEnteredFormat: { textFormat: { fontFamily: 'JetBrains Mono', fontSize: 10, foregroundColor: text, underline: true } } }, fields: 'userEnteredFormat.textFormat' } });
   requests.push({ repeatCell: { range: { sheetId, startRowIndex: layout.yearlyHeader + 1, endRowIndex: layout.requesterSection - 1, startColumnIndex: 0, endColumnIndex: 3 }, cell: { userEnteredFormat: { numberFormat: { type: 'NUMBER', pattern: '0' } } }, fields: 'userEnteredFormat.numberFormat' } });
   return requests;
 }
@@ -356,15 +441,19 @@ async function syncSheet(db, stored, snapshot, theme) {
   const dashboardSheet = sheetMap.get('Dashboard');
   const dashboardModel = dashboardRows(snapshot);
   const dashboard = dashboardModel.rows;
+  const categoryData = new Map(CATEGORY_SHEETS.map((category) => [category, categoryRows(snapshot, category)]));
   const formattingRequests = dashboardFormatting(dashboardSheet.properties.sheetId, dashboard.length, dashboardModel.layout, theme);
-  CATEGORY_SHEETS.forEach((category) => formattingRequests.push(...categoryFormatting(sheetMap.get(category), categoryRows(snapshot, category).length, theme)));
+  CATEGORY_SHEETS.forEach((category) => {
+    const rows = categoryData.get(category);
+    formattingRequests.push(...categoryFormatting(sheetMap.get(category), rows.length, theme, rows, CATEGORY_LAYOUTS[category]));
+  });
 
   await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}:batchUpdate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: formattingRequests }) });
   await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}/values/${encodeURIComponent("'Dashboard'!A1:D" + dashboard.length)}?valueInputOption=USER_ENTERED`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ range: `'Dashboard'!A1:D${dashboard.length}`, majorDimension: 'ROWS', values: dashboard }) });
 
   for (const category of CATEGORY_SHEETS) {
-    const rows = categoryRows(snapshot, category);
-    const range = `'${category}'!A1:L${Math.max(rows.length, 1)}`;
+    const rows = categoryData.get(category);
+    const range = `'${category}'!A1:M${Math.max(rows.length, 1)}`;
     await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ range, majorDimension: 'ROWS', values: rows }) });
   }
 
@@ -377,9 +466,15 @@ async function syncSheet(db, stored, snapshot, theme) {
 router.get('/status', async (_req, res, next) => {
   try {
     const db = await getDatabase();
-    const stored = await settings(db, ['google_refresh_token', 'google_sheet_url', 'google_sheet_synced_at']);
+    const stored = await settings(db, ['google_refresh_token', 'google_sheet_url', 'google_sheet_synced_at', 'google_has_connected']);
     const { clientId } = credentials();
-    res.json({ configured: !!clientId, connected: !!stored.google_refresh_token, sheetUrl: stored.google_sheet_url || null, syncedAt: stored.google_sheet_synced_at || null });
+    res.json({
+      configured: !!clientId,
+      connected: !!stored.google_refresh_token,
+      hasConnected: !!stored.google_refresh_token || stored.google_has_connected === '1',
+      sheetUrl: stored.google_sheet_url || null,
+      syncedAt: stored.google_sheet_synced_at || null
+    });
   } catch (error) { next(error); }
 });
 
@@ -419,6 +514,7 @@ router.get('/callback', async (req, res) => {
     const db = await getDatabase();
     await saveToken(db, 'google_access_token', tokenData.access_token || '');
     if (tokenData.refresh_token) await saveToken(db, 'google_refresh_token', tokenData.refresh_token);
+    await save(db, 'google_has_connected', '1');
     // The authorization starts in the user's external browser. Hand control
     // back to the installed app instead of loading the local UI in Chrome.
     res.type('html').send(`<!doctype html>

@@ -5,6 +5,7 @@ import {
   Calendar, 
   AlertCircle, 
   Tag, 
+  Link,
   MessageSquare,
   RefreshCw,
   Plus,
@@ -108,7 +109,8 @@ export default function RequestDetailModal({
   onClose, 
   onUpdateRequest,
   onForceRefreshBeatmap,
-  connectedAccount
+  connectedAccount,
+  onNotify
 }) {
   const [activeRequest, setActiveRequest] = useState(request);
   const [historyLogs, setHistoryLogs] = useState([]);
@@ -187,7 +189,7 @@ export default function RequestDetailModal({
         const resData = await res.json();
         // Trigger parent state refresh
         onForceRefreshBeatmap(request.id);
-        alert('Beatmap metadata updated successfully!');
+        onNotify?.('Beatmap metadata updated successfully!', 'success');
       }
     } catch (e) {
       console.error('Error refreshing beatmap metadata:', e);
@@ -235,6 +237,7 @@ export default function RequestDetailModal({
       .map(c => ({
         category_name: c.name,
         other_text: c.name === 'Others' ? c.otherText : null,
+        status: c.status || 'Pending',
       }));
 
     const guestDiffTargetSR = categories.some(c => c.checked && c.name === 'Guest Difficulties') ? (parseFloat(guestDifficultyTargetSR) || null) : null;
@@ -254,7 +257,7 @@ export default function RequestDetailModal({
         non_osu_title: title.trim(),
         non_osu_creator: creator.trim(),
         non_osu_difficulty: difficultyName.trim() || null,
-        requester_username: requesterUsername.trim() || 'Anonymous'
+         requester_username: requesterUsername.trim() || creator.trim() || 'Anonymous'
       }),
       categories: catsPayload,
       tags
@@ -279,6 +282,9 @@ export default function RequestDetailModal({
     const s = Math.floor(seconds % 60).toString().padStart(2, '0');
     return `${m}:${s}`;
   };
+
+  const requesterProfileUrl = request.osu_profile_link || (request.requester_id ? `https://osu.ppy.sh/users/${request.requester_id}` : null);
+  const RequesterCard = requesterProfileUrl ? 'a' : 'div';
 
   return (
     <div style={{
@@ -561,6 +567,44 @@ export default function RequestDetailModal({
                 Links & Modding Discussion
               </h3>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {!request.is_osu_link && request.input_link && (
+                  <a
+                    href={request.input_link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      fontSize: '13px',
+                      color: 'var(--osu-pink)',
+                      fontWeight: '600'
+                    }}
+                  >
+                    <Link size={14} />
+                    <span>Inputed Link</span>
+                    <ExternalLink size={12} />
+                  </a>
+                )}
+                {request.beatmapset_id && (
+                  <a
+                    href={`https://osu.ppy.sh/beatmapsets/${request.beatmapset_id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      fontSize: '13px',
+                      color: 'var(--osu-pink)',
+                      fontWeight: '600'
+                    }}
+                  >
+                    <Link size={14} />
+                    <span>osu! beatmap page</span>
+                    <ExternalLink size={12} />
+                  </a>
+                )}
                 {request.beatmapset_id && (
                   <a 
                     href={`https://osu.ppy.sh/beatmapsets/${request.beatmapset_id}/discussion`}
@@ -577,23 +621,6 @@ export default function RequestDetailModal({
                   >
                     <MessageSquare size={14} />
                     <span>osu! Modding & Discussion page</span>
-                    <ExternalLink size={12} />
-                  </a>
-                )}
-                {request.osu_profile_link && (
-                  <a 
-                    href={request.osu_profile_link}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                      fontSize: '13px',
-                      color: 'var(--text-main)'
-                    }}
-                  >
-                    <span>Requester Profile Link</span>
                     <ExternalLink size={12} />
                   </a>
                 )}
@@ -622,30 +649,47 @@ export default function RequestDetailModal({
               <h3 style={{ fontSize: '14px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.5px', marginBottom: '12px' }}>
                 Requester Information
               </h3>
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '12px',
+              <RequesterCard
+                {...(requesterProfileUrl ? {
+                  href: requesterProfileUrl,
+                  target: '_blank',
+                  rel: 'noopener noreferrer',
+                  'aria-label': `Open ${request.requester_username || 'requester'}'s osu! profile`
+                } : {})}
+                style={{
+                 display: 'flex',
+                 alignItems: 'center',
+                 gap: '12px',
                 padding: '12px 16px',
                 backgroundColor: 'var(--bg-sidebar)',
                 borderRadius: '8px',
-                border: '1px solid var(--border)'
-              }}>
-                <img
-                  src={request.requester_avatar || '/uploads/covers/default.jpg'} 
-                  alt="avatar" 
-                  width={40}
-                  height={40}
-                  style={{ width: '40px', height: '40px', borderRadius: '50%', objectFit: 'cover', border: '1px solid var(--border)' }}
-                  onError={(e) => {
-                    e.target.src = '/uploads/covers/default.jpg';
-                  }}
-                />
-                <div>
-                  <div style={{ fontWeight: '700', color: 'var(--text-main)', fontSize: '14px' }}>
-                    {request.requester_username || 'Anonymous'}
-                  </div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                 border: '1px solid var(--border)',
+                 color: 'inherit',
+                 textDecoration: 'none',
+                 cursor: requesterProfileUrl ? 'pointer' : 'default'
+               }}>
+                {request.requester_avatar ? (
+                  <img
+                    src={request.requester_avatar}
+                    alt="avatar"
+                    width={40}
+                    height={40}
+                    style={{ width: '40px', height: '40px', borderRadius: '50%', objectFit: 'cover', border: '1px solid var(--border)' }}
+                    onError={(e) => {
+                      e.currentTarget.style.visibility = 'hidden';
+                    }}
+                  />
+                ) : (
+                  <div
+                    aria-hidden="true"
+                    style={{ width: '40px', height: '40px', borderRadius: '50%', border: '1px solid var(--border)', backgroundColor: 'transparent' }}
+                  />
+                )}
+                 <div>
+                   <div style={{ fontWeight: '700', color: 'var(--text-main)', fontSize: '14px' }}>
+                     {request.requester_username || 'Anonymous'}
+                   </div>
+                   <div style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
                     {request.requester_country && (
                       <span
                         title={request.requester_country.toUpperCase()}
@@ -656,10 +700,10 @@ export default function RequestDetailModal({
                       </span>
                     )}
                     <span>{request.requester_is_creator ? 'Mapper (auto)' : (request.requester_id ? 'osu! ID Cached' : 'Manual Entry')}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
+                   </div>
+                 </div>
+               </RequesterCard>
+             </div>
 
           </div>
 

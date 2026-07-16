@@ -63,6 +63,23 @@ const STAR_TEXT_SPECTRUM = [
   { stars: 12.4, color: '#6563de' },
 ];
 
+const BEATMAP_STATUS_ORDER = ['Manual', 'WIP', 'Pending', 'Qualified', 'Loved', 'Ranked'];
+const REQUEST_STATUS_ORDER = ['Working', 'Accepted', 'Considering', 'Completed', 'Cancelled'];
+const PRIORITY_ORDER = ['High', 'Medium', 'Low'];
+const RANKED_SORT_FIELDS = new Set(['ranked_status', 'request_status', 'priority']);
+
+function getOrderedValue(value, order) {
+  const normalizedValue = (value || '').toString().toLowerCase();
+  const index = order.findIndex(item => item.toLowerCase() === normalizedValue);
+  return index === -1 ? order.length : index;
+}
+
+function truncateNote(note, maxLength = 18) {
+  if (!note) return '';
+  if (note.length <= maxLength) return note;
+  return `${note.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
 function getStarDifficultyTextColor(stars) {
   if (stars < STAR_TEXT_CUTOFF) return 'rgba(0,0,0,0.75)';
   if (stars < STAR_TEXT_GRADIENT_CUTOFF) return '#f6f05c';
@@ -102,6 +119,52 @@ function interpolateColor(color1, color2, ratio) {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
+function StarRatingBadge({ stars }) {
+  if (!(stars > 0)) return null;
+
+  const color = getStarDifficultyColor(stars);
+  const textColor = getStarDifficultyTextColor(stars);
+  const [r, g, b] = [
+    parseInt(color.slice(1, 3), 16),
+    parseInt(color.slice(3, 5), 16),
+    parseInt(color.slice(5, 7), 16),
+  ];
+
+  return (
+    <span
+      title="Highest star rating"
+      aria-label={`Highest star rating: ${stars.toFixed(2)}`}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        padding: '2px 7px',
+        borderRadius: '12px',
+        fontSize: '10px',
+        lineHeight: 1.2,
+        fontWeight: '700',
+        background: `rgba(${r}, ${g}, ${b}, 0.7)`,
+        color: textColor,
+        border: `1px solid rgba(${r}, ${g}, ${b}, 1.0)`,
+        whiteSpace: 'nowrap',
+        flexShrink: 0,
+      }}
+    >
+      {'\u2605'} {stars.toFixed(2)}
+    </span>
+  );
+}
+
+function SortableHeader({ label, onSort, style }) {
+  return (
+    <th onClick={onSort} className="sortable-header" style={{ cursor: 'pointer', ...style }}>
+      <span className="sortable-header-content">
+        <span>{label}</span>
+        <ArrowUpDown size={12} />
+      </span>
+    </th>
+  );
+}
+
 export default function RequestsTable({ 
   requestsList, 
   onOpenRequest, 
@@ -109,6 +172,7 @@ export default function RequestsTable({
   onUpdateRequest,
   onBulkUpdateStatus,
   onBulkUpdatePriority,
+  onBulkUpdateCategory,
   onBulkDelete,
   activeCategory
 }) {
@@ -127,7 +191,7 @@ export default function RequestsTable({
       setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
     } else {
       setSortBy(field);
-      setSortOrder('desc'); // default to descending for new field
+      setSortOrder(RANKED_SORT_FIELDS.has(field) ? 'asc' : 'desc');
     }
   };
 
@@ -211,10 +275,16 @@ export default function RequestsTable({
       let valA = a[sortBy];
       let valB = b[sortBy];
 
-      // Handle custom sorting fields
-      if (sortBy === 'highest_stars') {
-        valA = a.highest_stars || 0;
-        valB = b.highest_stars || 0;
+      // Handle custom ordering fields
+      if (sortBy === 'ranked_status') {
+        valA = getOrderedValue(a.ranked_status || 'Manual', BEATMAP_STATUS_ORDER);
+        valB = getOrderedValue(b.ranked_status || 'Manual', BEATMAP_STATUS_ORDER);
+      } else if (sortBy === 'request_status') {
+        valA = getOrderedValue(a.request_status, REQUEST_STATUS_ORDER);
+        valB = getOrderedValue(b.request_status, REQUEST_STATUS_ORDER);
+      } else if (sortBy === 'priority') {
+        valA = getOrderedValue(a.priority, PRIORITY_ORDER);
+        valB = getOrderedValue(b.priority, PRIORITY_ORDER);
       } else if (sortBy === 'added_date' || sortBy === 'deadline' || sortBy === 'last_updated') {
         valA = valA ? new Date(valA) : (sortOrder === 'asc' ? new Date(9999, 11) : new Date(0));
         valB = valB ? new Date(valB) : (sortOrder === 'asc' ? new Date(9999, 11) : new Date(0));
@@ -256,20 +326,27 @@ export default function RequestsTable({
     setTagFilter('');
   };
 
+  const handleBulkCategoryAction = (event, mode) => {
+    if (!event.target.value) return;
+    onBulkUpdateCategory(selectedIds, event.target.value, mode);
+    setSelectedIds([]);
+    event.target.value = '';
+  };
+
   // Helper to determine which columns to show based on active category
   const getCategoryColumns = () => {
     switch (activeCategory) {
       case 'Guest Difficulties':
-        return { showStars: false, showGuestDiff: true, showTags: false };
+        return { showTags: false };
       case 'Storyboards':
       case 'Others':
-        return { showStars: false, showGuestDiff: false, showTags: true };
+        return { showTags: true };
       default: // All Requests, Hitsounds
-        return { showStars: true, showGuestDiff: false, showTags: false };
+        return { showTags: false };
     }
   };
 
-  const { showStars, showGuestDiff, showTags } = getCategoryColumns();
+  const { showTags } = getCategoryColumns();
 
   return (
     <div style={{ padding: '0 24px 24px 24px', display: 'flex', flexDirection: 'column', gap: '16px', position: 'relative' }}>
@@ -371,7 +448,7 @@ export default function RequestsTable({
             No requests match your current filters.
           </div>
         ) : (
-          <table className="compact-table">
+          <table className="compact-table requests-table">
             <thead>
               <tr>
                 <th style={{ width: '36px', textAlign: 'center' }}>
@@ -383,31 +460,16 @@ export default function RequestsTable({
                   />
                 </th>
                 <th style={{ width: '70px' }}>Cover</th>
-                <th onClick={() => toggleSort('title')} style={{ cursor: 'pointer' }}>
-                  Song / Artist <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
-                </th>
-                {showStars && (
-                  <th onClick={() => toggleSort('highest_stars')} style={{ cursor: 'pointer' }}>
-                    Highest Stars <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
-                  </th>
-                )}
-                {showGuestDiff && (
-                  <th onClick={() => toggleSort('highest_stars')} style={{ cursor: 'pointer' }}>
-                    GD star rating <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
-                  </th>
-                )}
+                <SortableHeader label="Song / Artist" onSort={() => toggleSort('title')} style={{ width: '360px' }} />
                 {showTags && (
-                  <th>Tags</th>
+                  <th style={{ width: '130px' }}>Tags</th>
                 )}
-                <th>Beatmap Status</th>
-                <th>Request Status</th>
-                <th>Priority</th>
-                <th onClick={() => toggleSort('deadline')} style={{ cursor: 'pointer' }}>
-                  Deadline <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
-                </th>
-                <th onClick={() => toggleSort('added_date')} style={{ cursor: 'pointer' }}>
-                  Added <ArrowUpDown size={12} style={{ marginLeft: '4px', display: 'inline' }} />
-                </th>
+                <SortableHeader label="Beatmap Status" onSort={() => toggleSort('ranked_status')} style={{ width: '140px' }} />
+                <SortableHeader label="Request Status" onSort={() => toggleSort('request_status')} style={{ width: '150px' }} />
+                <SortableHeader label="Priority" onSort={() => toggleSort('priority')} style={{ width: '100px' }} />
+                <SortableHeader label="Deadline" onSort={() => toggleSort('deadline')} style={{ width: '120px' }} />
+                <th style={{ width: '120px' }}>Notes</th>
+                <SortableHeader label="Added" onSort={() => toggleSort('added_date')} style={{ width: '90px' }} />
                 <th style={{ width: '60px', textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
@@ -451,14 +513,27 @@ export default function RequestsTable({
                     {/* Metadata (Title + Artist + Creator) */}
                     <td>
                       <div>
-                        <div style={{ fontWeight: '600', color: 'var(--text-main)', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          {req.title}
+                        <div style={{ fontWeight: '600', color: 'var(--text-main)', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, width: '100%', whiteSpace: 'nowrap' }}>
+                          <span
+                            title={req.title}
+                            style={{
+                              minWidth: 0,
+                              flex: '0 1 auto',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {req.title}
+                          </span>
+                          <StarRatingBadge stars={req.highest_stars} />
                           {req.priority === 'High' && (
                             <span style={{ 
                               width: '6px', 
                               height: '6px', 
                               borderRadius: '50%', 
-                              backgroundColor: 'var(--priority-high)' 
+                              backgroundColor: 'var(--priority-high)',
+                              flexShrink: 0,
                             }} title="High Priority" />
                           )}
                         </div>
@@ -467,66 +542,6 @@ export default function RequestsTable({
                         </div>
                       </div>
                     </td>
-
-                    {/* Stars */}
-                    {showStars && (
-                      <td>
-                        {req.highest_stars > 0 ? (
-                          (() => {
-                            const color = getStarDifficultyColor(req.highest_stars);
-                            const textColor = getStarDifficultyTextColor(req.highest_stars);
-                            const [r, g, b] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
-                            return (
-                              <span style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                padding: '4px 10px',
-                                borderRadius: '20px',
-                                fontSize: '12px',
-                                fontWeight: '600',
-                                background: `rgba(${r}, ${g}, ${b}, 0.7)`,
-                                color: textColor,
-                                border: `1px solid rgba(${r}, ${g}, ${b}, 1.0)`,
-                              }}>
-                                ★ {req.highest_stars.toFixed(2)}
-                              </span>
-                            );
-                          })()
-                        ) : (
-                          <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>—</span>
-                        )}
-                      </td>
-                    )}
-
-                    {/* Connected user's guest-difficulty star rating */}
-                    {showGuestDiff && (
-                      <td>
-                        {req.highest_stars > 0 ? (
-                          (() => {
-                            const color = getStarDifficultyColor(req.highest_stars);
-                            const textColor = getStarDifficultyTextColor(req.highest_stars);
-                            const [r, g, b] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
-                            return (
-                              <span style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                padding: '4px 10px',
-                                borderRadius: '20px',
-                                fontSize: '12px',
-                                fontWeight: '600',
-                                background: `rgba(${r}, ${g}, ${b}, 0.7)`,
-                                color: textColor,
-                                border: `1px solid rgba(${r}, ${g}, ${b}, 1.0)`,
-                              }}>
-                                ★ {req.highest_stars.toFixed(2)}
-                              </span>
-                            );
-                          })()
-                        ) : (
-                          <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>—</span>
-                        )}
-                      </td>
-                    )}
 
                     {/* Tags */}
                     {showTags && (
@@ -568,7 +583,7 @@ export default function RequestsTable({
                     {/* Beatmap Status */}
                     <td>
                       <span className={`badge badge-${(req.ranked_status || 'Manual').toLowerCase()}`}>
-                        {req.ranked_status}
+                        {req.ranked_status || 'Manual'}
                       </span>
                     </td>
 
@@ -674,6 +689,28 @@ export default function RequestsTable({
                       )}
                     </td>
 
+                    {/* Notes */}
+                    <td
+                      title={req.notes || undefined}
+                      style={{
+                        width: '120px',
+                        maxWidth: '120px',
+                        color: req.notes ? 'var(--text-main)' : 'var(--text-muted)',
+                        fontSize: '11px',
+                      }}
+                    >
+                      <span style={{
+                        display: 'block',
+                        width: '100%',
+                        maxWidth: '100%',
+                        overflow: 'hidden',
+                        whiteSpace: 'nowrap',
+                        textOverflow: "'...'",
+                      }}>
+                        {req.notes ? truncateNote(req.notes) : '—'}
+                      </span>
+                    </td>
+
                     {/* Added Date */}
                     <td style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
                       {req.added_date ? new Date(req.added_date).toLocaleDateString() : '—'}
@@ -730,13 +767,16 @@ export default function RequestsTable({
           border: '1px solid var(--osu-pink)',
           boxShadow: 'var(--shadow-lg)',
           borderRadius: '12px',
-          padding: '12px 24px',
+          padding: '10px 16px',
           display: 'flex',
           alignItems: 'center',
-          gap: '16px',
+          gap: '10px',
+          flexWrap: 'nowrap',
+          maxWidth: 'calc(100vw - 48px)',
+          whiteSpace: 'nowrap',
+          overflowX: 'auto',
           zIndex: 100,
-          animation: 'fadeIn 0.2s ease-out'
-        }}>
+        }} className="bulk-action-bar">
           <span style={{ fontSize: '13px', fontWeight: '600' }}>
             {selectedIds.length} requests selected
           </span>
@@ -744,7 +784,7 @@ export default function RequestsTable({
           <div style={{ width: '1px', height: '24px', backgroundColor: 'var(--border)' }} />
 
           {/* Change Status Dropdown */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
             <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Status:</span>
             <select
               onChange={(e) => {
@@ -755,7 +795,7 @@ export default function RequestsTable({
                 }
               }}
               className="input-text"
-              style={{ padding: '4px 8px', fontSize: '12px', width: '120px' }}
+              style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
             >
               <option value="">Change Status...</option>
               <option value="Accepted">Accepted</option>
@@ -767,7 +807,7 @@ export default function RequestsTable({
           </div>
 
           {/* Change Priority Dropdown */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
             <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Priority:</span>
             <select
               onChange={(e) => {
@@ -778,12 +818,39 @@ export default function RequestsTable({
                 }
               }}
               className="input-text"
-              style={{ padding: '4px 8px', fontSize: '12px', width: '125px' }}
+              style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
             >
               <option value="">Change Priority...</option>
               <option value="Low">Low</option>
               <option value="Medium">Medium</option>
               <option value="High">High</option>
+            </select>
+          </div>
+
+          {/* Change Request Type */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Type:</span>
+            <select
+              onChange={(e) => handleBulkCategoryAction(e, 'move')}
+              className="input-text"
+              style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
+            >
+              <option value="">Move to...</option>
+              <option value="Hitsounds">Hitsounds</option>
+              <option value="Guest Difficulties">Guest Difficulties</option>
+              <option value="Storyboards">Storyboards</option>
+              <option value="Others">Others</option>
+            </select>
+            <select
+              onChange={(e) => handleBulkCategoryAction(e, 'add')}
+              className="input-text"
+              style={{ padding: '4px 8px', fontSize: '12px', width: '105px' }}
+            >
+              <option value="">Add to...</option>
+              <option value="Hitsounds">Hitsounds</option>
+              <option value="Guest Difficulties">Guest Difficulties</option>
+              <option value="Storyboards">Storyboards</option>
+              <option value="Others">Others</option>
             </select>
           </div>
 
@@ -796,8 +863,9 @@ export default function RequestsTable({
             }}
             className="btn-secondary"
             style={{ 
-              padding: '6px 12px', 
+              padding: '6px 10px',
               fontSize: '12px', 
+              flexShrink: 0,
               color: 'var(--priority-high)',
               borderColor: 'rgba(231, 76, 60, 0.3)',
               backgroundColor: 'rgba(231, 76, 60, 0.05)'
@@ -809,7 +877,7 @@ export default function RequestsTable({
 
           <button
             onClick={() => setSelectedIds([])}
-            style={{ color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+            style={{ color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', flexShrink: 0 }}
           >
             <X size={16} />
           </button>

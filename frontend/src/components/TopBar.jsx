@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, ChevronRight, Minus, Square, X } from 'lucide-react';
+import { Activity, ChevronRight, Menu, Minus, Square, X } from 'lucide-react';
 
 function getSectionName(activeTab) {
   if (activeTab === 'dashboard') return 'Dashboard';
@@ -11,7 +11,7 @@ function getSectionName(activeTab) {
   return 'Workspace';
 }
 
-export default function TopBar({ activeTab, connectedAccount }) {
+export default function TopBar({ activeTab, connectedAccount, isSidebarOpen, onToggleSidebar }) {
   const sectionName = getSectionName(activeTab);
   const controls = window.electronAPI?.windowControls;
 
@@ -21,6 +21,19 @@ export default function TopBar({ activeTab, connectedAccount }) {
 
   return (
     <header className="app-topbar">
+      <div className="app-topbar-leading no-drag">
+        <button
+          type="button"
+          className="app-sidebar-toggle"
+          onClick={onToggleSidebar}
+          title={isSidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
+          aria-label={isSidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
+          aria-expanded={isSidebarOpen}
+        >
+          <Menu size={17} />
+        </button>
+      </div>
+
       <div className="app-topbar-drag-region" onDoubleClick={toggleMaximize}>
         <div className="app-topbar-title">
           <div className="app-topbar-brand">R</div>

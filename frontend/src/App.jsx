@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Plus } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
@@ -6,8 +6,9 @@ import RequestsTable from './components/RequestsTable';
 import RequestDetailModal from './components/RequestDetailModal';
 import SettingsPanel from './components/SettingsPanel';
 import QuickAdd from './components/QuickAdd';
+import MultipleRequestsImport from './components/MultipleRequestsImport';
 import TopBar from './components/TopBar';
-import OsuApiToast from './components/OsuApiToast';
+import Toast from './components/Toast';
 
 function getResolvedTheme(preference) {
   if (preference !== 'system') return preference;
@@ -25,6 +26,7 @@ function fetchWithTimeout(input, init = {}, timeoutMs = API_REQUEST_TIMEOUT_MS) 
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [theme, setTheme] = useState(() => {
     if (typeof window === 'undefined') return 'dark';
     return localStorage.getItem('theme') || 'system';
@@ -34,26 +36,33 @@ export default function App() {
   const [settingsData, setSettingsData] = useState({});
   const [selectedRequest, setSelectedRequest] = useState(null);
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
+  const [isMultipleImportOpen, setIsMultipleImportOpen] = useState(false);
   const [showFirstLaunchSetup, setShowFirstLaunchSetup] = useState(false);
   const [osuApiStatus, setOsuApiStatus] = useState(null);
   const [toastNotice, setToastNotice] = useState(null);
-  const toastTimerRef = useRef(null);
+  const toastIdRef = useRef(0);
 
   // QuickAdd duplicate check state
   const [duplicateError, setDuplicateError] = useState(null);
 
-  const showToast = (message, type = 'info') => {
-    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    setToastNotice({ message, type });
-    toastTimerRef.current = window.setTimeout(() => {
-      setToastNotice(null);
-      toastTimerRef.current = null;
-    }, 6000);
-  };
-
-  useEffect(() => () => {
-    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+  const showToast = useCallback((message, type = 'info', action = null) => {
+    setToastNotice({ id: ++toastIdRef.current, message, type, action });
+    if ((type === 'error' || type === 'warning') && window.electronAPI?.windowControls?.flashFrame) {
+      void window.electronAPI.windowControls.flashFrame();
+    }
   }, []);
+
+  const dismissToast = useCallback(() => setToastNotice(null), []);
+
+  useEffect(() => {
+    const removeUpdateListener = window.electronAPI?.onUpdateDownloaded?.(({ version }) => {
+      showToast(`Version ${version} is ready to install.`, 'info', {
+        label: 'Restart now',
+        onClick: () => void window.electronAPI.installUpdate?.(),
+      });
+    });
+    return () => removeUpdateListener?.();
+  }, [showToast]);
 
   const fetchData = async () => {
     try {
@@ -203,11 +212,11 @@ export default function App() {
         if (callback) callback();
       } else {
         const errData = await res.json();
-        alert(`Failed to add request: ${errData.error || 'Server Error'}`);
+        showToast(`Failed to add request: ${errData.error || 'Server Error'}`, 'error');
       }
     } catch (e) {
       console.error(e);
-      alert('Network Error. Failed to add request.');
+      showToast('Network Error. Failed to add request.', 'error');
     }
   };
 
@@ -227,14 +236,14 @@ export default function App() {
       if (res.ok) {
         await Promise.all([fetchRequests(), fetchStats()]);
         if (callback) callback();
-        alert('Categories successfully added to the existing request!');
+        showToast('Categories successfully added to the existing request!', 'success');
       } else {
         const errData = await res.json();
-        alert(`Failed to resolve duplicate: ${errData.error}`);
+        showToast(`Failed to resolve duplicate: ${errData.error}`, 'error');
       }
     } catch (e) {
       console.error(e);
-      alert('Network Error.');
+      showToast('Network Error.', 'error');
     }
   };
 
@@ -286,11 +295,11 @@ export default function App() {
         await Promise.all([fetchRequests(), fetchStats()]);
       } else {
         const errData = await res.json();
-        alert(`Failed to delete request: ${errData.error}`);
+        showToast(`Failed to delete request: ${errData.error}`, 'error');
       }
     } catch (e) {
       console.error(e);
-      alert('Network Error.');
+      showToast('Network Error.', 'error');
     }
   };
 
@@ -307,10 +316,10 @@ export default function App() {
         )
       );
       await Promise.all([fetchRequests(), fetchStats()]);
-      alert(`Successfully updated status to "${status}" for ${ids.length} requests.`);
+      showToast(`Successfully updated status to "${status}" for ${ids.length} requests.`, 'success');
     } catch (e) {
       console.error(e);
-      alert('Failed to update status for some requests.');
+      showToast('Failed to update status for some requests.', 'error');
     }
   };
 
@@ -327,10 +336,44 @@ export default function App() {
         )
       );
       await Promise.all([fetchRequests(), fetchStats()]);
-      alert(`Successfully updated priority to "${priority}" for ${ids.length} requests.`);
+      showToast(`Successfully updated priority to "${priority}" for ${ids.length} requests.`, 'success');
     } catch (e) {
       console.error(e);
-      alert('Failed to update priority for some requests.');
+      showToast('Failed to update priority for some requests.', 'error');
+    }
+  };
+
+  // Bulk category/type update
+  const handleBulkUpdateCategory = async (ids, categoryName, mode) => {
+    try {
+      const requestsById = new Map(requestsList.map(request => [request.id, request]));
+      const responses = await Promise.all(ids.map(id => {
+        const request = requestsById.get(id);
+        if (!request) throw new Error(`Request ${id} was not found`);
+
+        const currentCategories = Array.isArray(request.categories) ? request.categories : [];
+        const nextCategories = mode === 'move'
+          ? [{ category_name: categoryName, status: 'Pending' }]
+          : currentCategories.some(category => category.category_name === categoryName)
+            ? currentCategories
+            : [...currentCategories, { category_name: categoryName, status: 'Pending' }];
+
+        return fetch(`/api/requests/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ categories: nextCategories })
+        });
+      }));
+
+      if (responses.some(response => !response.ok)) {
+        throw new Error('One or more category updates failed');
+      }
+
+      await Promise.all([fetchRequests(), fetchStats()]);
+      showToast(`${mode === 'move' ? 'Moved' : 'Added'} ${ids.length} requests ${mode === 'move' ? 'to' : 'into'} "${categoryName}".`, 'success');
+    } catch (e) {
+      console.error(e);
+      showToast('Failed to update request types for some requests.', 'error');
     }
   };
 
@@ -343,10 +386,10 @@ export default function App() {
         )
       );
       await Promise.all([fetchRequests(), fetchStats()]);
-      alert(`Successfully deleted ${ids.length} requests.`);
+      showToast(`Successfully deleted ${ids.length} requests.`, 'success');
     } catch (e) {
       console.error(e);
-      alert('Failed to delete some requests.');
+      showToast('Failed to delete some requests.', 'error');
     }
   };
 
@@ -386,15 +429,15 @@ export default function App() {
       const data = await res.json();
       if (res.ok) {
         await Promise.all([fetchRequests(), fetchStats()]);
-        alert(data.message);
+        showToast(data.message, 'success');
         return true;
       } else {
-        alert(`Beatmap Link Import Failed: ${data.error}`);
+        showToast(`Beatmap Link Import Failed: ${data.error}`, 'error');
         return false;
       }
     } catch (e) {
       console.error(e);
-      alert('Beatmap Link Import Network Error.');
+      showToast('Beatmap Link Import Network Error.', 'error');
       return false;
     }
   };
@@ -410,16 +453,16 @@ export default function App() {
 
       const data = await res.json();
       if (res.ok) {
-        alert('Backup database successfully restored!');
+        showToast('Backup database successfully restored!', 'success');
         await fetchData();
         return true;
       } else {
-        alert(`Database Restore Failed: ${data.error}`);
+        showToast(`Database Restore Failed: ${data.error}`, 'error');
         return false;
       }
     } catch (e) {
       console.error(e);
-      alert('Database Restore Network Error.');
+      showToast('Database Restore Network Error.', 'error');
       return false;
     }
   };
@@ -447,8 +490,8 @@ export default function App() {
           onDismissFirstLaunchSetup={() => setShowFirstLaunchSetup(false)}
           onSaveCredentials={handleSaveCredentials}
           onDisconnect={handleDisconnect}
-          onImportBeatmapLinks={handleImportBeatmapLinks}
-          onImportJson={handleImportJson}
+           onImportJson={handleImportJson}
+          onNotify={showToast}
         />
       );
     }
@@ -458,9 +501,36 @@ export default function App() {
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', padding: '24px 0 0 0' }}>
 
-          {/* Add - Collapsible */}
-          <div style={{ padding: '0 24px' }}>
-            {isQuickAddOpen ? (
+          {/* Add and multi-import actions */}
+          <div style={{ padding: '0 24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsQuickAddOpen((current) => !current);
+                  setIsMultipleImportOpen(false);
+                }}
+                className="btn-primary"
+                style={{ width: 'fit-content', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+              >
+                <Plus size={18} style={{ color: '#fff' }} />
+                <span style={{ fontWeight: '600', lineHeight: '1' }}>{isQuickAddOpen ? 'Close Add Request' : 'Add Request'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsMultipleImportOpen((current) => !current);
+                  setIsQuickAddOpen(false);
+                }}
+                className="btn-secondary"
+                style={{ width: 'fit-content', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+              >
+                <Plus size={18} />
+                <span style={{ fontWeight: '600', lineHeight: '1' }}>{isMultipleImportOpen ? 'Close Add Multiple Requests' : 'Add Multiple Requests'}</span>
+              </button>
+            </div>
+
+            {isQuickAddOpen && (
               <QuickAdd
                 onAddRequest={handleAddRequest}
                 duplicateError={duplicateError}
@@ -469,16 +539,16 @@ export default function App() {
                 isOpen={isQuickAddOpen}
                 onToggle={() => setIsQuickAddOpen(false)}
                 defaultCategory={activeCategory}
+                onNotify={showToast}
               />
-            ) : (
-              <button
-                onClick={() => setIsQuickAddOpen(true)}
-                className="btn-primary"
-                style={{ width: 'fit-content', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
-              >
-                <Plus size={18} style={{ color: '#fff' }} />
-                <span style={{ fontWeight: '600', lineHeight: '1' }}>Add Request</span>
-              </button>
+            )}
+            {isMultipleImportOpen && (
+              <MultipleRequestsImport
+                onImportBeatmapLinks={handleImportBeatmapLinks}
+                onNotify={showToast}
+                onToggle={() => setIsMultipleImportOpen(false)}
+                defaultCategory={activeCategory}
+              />
             )}
           </div>
 
@@ -490,6 +560,7 @@ export default function App() {
             onUpdateRequest={handleUpdateRequest}
             onBulkUpdateStatus={handleBulkUpdateStatus}
             onBulkUpdatePriority={handleBulkUpdatePriority}
+            onBulkUpdateCategory={handleBulkUpdateCategory}
             onBulkDelete={handleBulkDelete}
             activeCategory={activeCategory}
           />
@@ -502,7 +573,12 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <TopBar activeTab={activeTab} connectedAccount={settingsData.connectedAccount} />
+      <TopBar
+        activeTab={activeTab}
+        connectedAccount={settingsData.connectedAccount}
+        isSidebarOpen={isSidebarOpen}
+        onToggleSidebar={() => setIsSidebarOpen(open => !open)}
+      />
       <div className="app-container">
 
         {/* LEFT SIDEBAR PANEL */}
@@ -511,6 +587,7 @@ export default function App() {
           setActiveTab={setActiveTab}
           connectedAccount={settingsData.connectedAccount}
           onDisconnect={handleDisconnect}
+          isSidebarOpen={isSidebarOpen}
         />
 
         {/* RIGHT MAIN LAYOUT */}
@@ -529,10 +606,11 @@ export default function App() {
           onUpdateRequest={handleUpdateRequest}
           onForceRefreshBeatmap={fetchRequests}
           connectedAccount={settingsData.connectedAccount}
+          onNotify={showToast}
         />
       )}
 
-      <OsuApiToast status={osuApiStatus} notification={toastNotice} />
+      <Toast status={osuApiStatus} notification={toastNotice} onDismiss={dismissToast} />
 
     </div>
   );

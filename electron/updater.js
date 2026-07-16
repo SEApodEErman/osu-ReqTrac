@@ -1,5 +1,4 @@
 const { autoUpdater } = require('electron-updater');
-const { dialog } = require('electron');
 
 // Wires up auto-updates against the GitHub Releases published by electron-builder.
 // Safe to call once the main window exists. No-ops in dev / unpackaged runs.
@@ -19,19 +18,8 @@ function initAutoUpdater(mainWindow) {
     console.log('No updates available.');
   });
 
-  autoUpdater.on('update-downloaded', async (info) => {
-    const result = await dialog.showMessageBox(mainWindow, {
-      type: 'info',
-      buttons: ['Restart now', 'Later'],
-      defaultId: 0,
-      cancelId: 1,
-      title: 'Update ready',
-      message: `Version ${info.version} has been downloaded.`,
-      detail: 'Restart the app to apply the update.',
-    });
-    if (result.response === 0) {
-      autoUpdater.quitAndInstall();
-    }
+  autoUpdater.on('update-downloaded', (info) => {
+    mainWindow.webContents.send('update-downloaded', { version: info.version });
   });
 
   // Check on startup; electron-updater safely skips when not packaged.
@@ -40,4 +28,8 @@ function initAutoUpdater(mainWindow) {
   });
 }
 
-module.exports = { initAutoUpdater };
+function installUpdate() {
+  autoUpdater.quitAndInstall();
+}
+
+module.exports = { initAutoUpdater, installUpdate };

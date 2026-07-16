@@ -1,6 +1,8 @@
 import React, { useState, useRef } from 'react';
 import { Plus, Link, AlertCircle, X, Loader2, UserCheck } from 'lucide-react';
 
+const OSU_BEATMAP_LINK_PATTERN = /osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i;
+
 export default function QuickAdd({ 
   onAddRequest, 
   duplicateError, 
@@ -8,10 +10,10 @@ export default function QuickAdd({
   onCancelDuplicate,
   isOpen,
   onToggle,
-  defaultCategory = 'All'
+  defaultCategory = 'All',
+  onNotify
 }) {
   const [inputVal, setInputVal] = useState('');
-  const [isManual, setIsManual] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isFetchingInfo, setIsFetchingInfo] = useState(false);
   const formRef = useRef(null);
@@ -22,8 +24,6 @@ export default function QuickAdd({
   const [creator, setCreator] = useState('');
   const [difficulty, setDifficulty] = useState('');
   const [requester, setRequester] = useState('');
-  const [profileLink, setProfileLink] = useState('');
-  const [discordLink, setDiscordLink] = useState('');
   const [notes, setNotes] = useState('');
   const [priority, setPriority] = useState('Low');
   const [deadline, setDeadline] = useState('');
@@ -38,24 +38,21 @@ export default function QuickAdd({
   };
   const [categories, setCategories] = useState(getDefaultCategories);
   const [otherText, setOtherText] = useState('');
+  const isOsuBeatmapLink = OSU_BEATMAP_LINK_PATTERN.test(inputVal);
 
   // Fetch beatmap info from osu! API
   const fetchBeatmapInfo = async (link) => {
-    const isOsu = /osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i.test(link);
-    if (!isOsu) return;
+    if (!OSU_BEATMAP_LINK_PATTERN.test(link)) return;
 
     setIsFetchingInfo(true);
     try {
       const res = await fetch(`/api/requests/beatmap-info?link=${encodeURIComponent(link)}`);
       if (res.ok) {
         const data = await res.json();
-        // Auto-populate requester fields with beatmap creator info
-        if (data.creatorUsername) {
-          setRequester(data.creatorUsername);
-        }
-        if (data.creatorProfileUrl) {
-          setProfileLink(data.creatorProfileUrl);
-        }
+        setArtist(data.artist || '');
+        setTitle(data.title || '');
+        setCreator(data.creator || '');
+        setRequester(data.creatorUsername || '');
       }
     } catch (e) {
       console.error('Failed to fetch beatmap info:', e);
@@ -68,12 +65,8 @@ export default function QuickAdd({
     const value = event.target.value;
     setInputVal(value);
 
-    const isOsu = /osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i.test(value);
-    if (isOsu) {
-      setIsManual(false);
+    if (OSU_BEATMAP_LINK_PATTERN.test(value)) {
       void fetchBeatmapInfo(value);
-    } else if (/^https?:\/\//i.test(value)) {
-      setIsManual(true);
     }
   };
 
@@ -88,8 +81,6 @@ export default function QuickAdd({
     setCreator('');
     setDifficulty('');
     setRequester('');
-    setProfileLink('');
-    setDiscordLink('');
     setNotes('');
     setPriority('Low');
     setDeadline('');
@@ -97,12 +88,10 @@ export default function QuickAdd({
     localStorage.setItem('lastRequestCategories', JSON.stringify(categories));
     setCategories(getDefaultCategories());
     setOtherText('');
-    setIsManual(false);
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!inputVal.trim() && !isManual) return;
     if (isSubmitting) return;
 
     // Build categories payload
@@ -115,7 +104,7 @@ export default function QuickAdd({
       }));
 
     if (catsPayload.length === 0) {
-      alert('Please select at least one request category.');
+      onNotify?.('Please select at least one request category.', 'warning');
       return;
     }
 
@@ -124,15 +113,12 @@ export default function QuickAdd({
       priority,
       deadline: deadline || null,
       notes: notes || null,
-      discord_link: discordLink || null,
       tags: tags ? tags.split(',').map(t => t.trim()).filter(Boolean) : []
     };
 
-    const isOsu = /osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i.test(inputVal);
-    if (isOsu) {
+    if (isOsuBeatmapLink) {
       payload.link = inputVal.trim();
-      payload.requester_username = requester || null;
-      payload.osu_profile_link = profileLink || null;
+      payload.requester_username = requester.trim() || null;
     } else {
       // Manual entry
       payload.link = inputVal.trim() || null;
@@ -140,11 +126,10 @@ export default function QuickAdd({
       payload.title = title.trim();
       payload.creator = creator.trim();
       payload.difficulty = difficulty.trim() || null;
-      payload.requester_username = requester.trim() || 'Anonymous';
-      payload.osu_profile_link = profileLink.trim() || null;
+      payload.requester_username = requester.trim() || creator.trim() || 'Anonymous';
 
       if (!payload.artist || !payload.title || !payload.creator) {
-        alert('Please fill out Artist, Title, and Creator for manual entries.');
+        onNotify?.('Please fill out Artist, Title, and Creator for manual entries.', 'warning');
         return;
       }
     }
@@ -250,20 +235,24 @@ export default function QuickAdd({
                         other_text: name === 'Others' ? otherText : null,
                         status: 'Pending'
                       }));
-                    const isOsu = /osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i.test(inputVal);
                     const payload = {
                       categories: catsPayload,
                       priority,
                       deadline: deadline || null,
                       notes: notes || null,
-                      discord_link: discordLink || null,
                       tags: tags ? tags.split(',').map(t => t.trim()).filter(Boolean) : [],
                       force: true
                     };
-                    if (isOsu) {
+                    if (isOsuBeatmapLink) {
                       payload.link = inputVal.trim();
-                      payload.requester_username = requester || null;
-                      payload.osu_profile_link = profileLink || null;
+                      payload.requester_username = requester.trim() || null;
+                    } else {
+                      payload.link = inputVal.trim() || null;
+                      payload.artist = artist.trim();
+                      payload.title = title.trim();
+                      payload.creator = creator.trim();
+                      payload.difficulty = difficulty.trim() || null;
+                      payload.requester_username = requester.trim() || creator.trim() || 'Anonymous';
                     }
                     onAddRequest(payload, resetForm);
                   }}
@@ -294,19 +283,13 @@ export default function QuickAdd({
                 <input
                   type="text"
                   className="input-text"
-                  placeholder="Paste osu! beatmap link (e.g., https://osu.ppy.sh/beatmapsets/123456)..."
+                  placeholder="Paste osu! beatmap link or any other relevant links."
                   value={inputVal}
                   onChange={handleInputChange}
                   style={{ paddingLeft: '36px' }}
                   autoFocus
                 />
               </div>
-              {!isManual && (
-                <button type="submit" className="btn-primary" disabled={isSubmitting}>
-                  <Plus size={16} />
-                  <span>{isSubmitting ? 'Adding...' : 'Add'}</span>
-                </button>
-              )}
             </div>
 
             {/* Fetching indicator */}
@@ -325,39 +308,6 @@ export default function QuickAdd({
                 <Loader2 size={16} className="spin" style={{ color: 'var(--osu-pink)' }} />
                 <span>Fetching beatmap info...</span>
                 <UserCheck size={14} style={{ color: 'var(--req-completed)' }} />
-              </div>
-            )}
-
-            {/* Auto-populated requester info for osu! links */}
-            {!isManual && inputVal && /osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i.test(inputVal) && requester && (
-              <div style={{ 
-                display: 'flex', 
-                alignItems: 'center', 
-                gap: '8px', 
-                fontSize: '12px', 
-                color: 'var(--text-muted)',
-                padding: '8px 12px',
-                backgroundColor: 'rgba(255, 102, 170, 0.1)',
-                borderRadius: '6px',
-                border: '1px solid rgba(255, 102, 170, 0.2)'
-              }}>
-                <UserCheck size={14} style={{ color: 'var(--req-completed)' }} />
-                <span>Requester auto-populated from beatmap creator: <strong>{requester}</strong></span>
-                <button
-                  type="button"
-                  onClick={() => { setRequester(''); setProfileLink(''); }}
-                  style={{ 
-                    marginLeft: 'auto',
-                    color: 'var(--text-muted)',
-                    cursor: 'pointer',
-                    background: 'none',
-                    border: 'none',
-                    fontSize: '10px',
-                    textDecoration: 'underline'
-                  }}
-                >
-                  Clear
-                </button>
               </div>
             )}
 
@@ -393,8 +343,7 @@ export default function QuickAdd({
             </div>
 
             {/* Dynamic manual fields expanded */}
-            {isManual && (
-              <div className="fade-in" style={{ 
+            <div className="fade-in" style={{
                 display: 'grid', 
                 gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', 
                 gap: '12px',
@@ -406,19 +355,19 @@ export default function QuickAdd({
                 {/* Artist */}
                 <div>
                   <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>Artist *</label>
-                  <input type="text" className="input-text" value={artist} onChange={(e) => setArtist(e.target.value)} placeholder="e.g. Camellia" />
+                  <input type="text" className="input-text" value={artist} onChange={(e) => setArtist(e.target.value)} placeholder="e.g. Camellia" disabled={isOsuBeatmapLink} style={{ opacity: isOsuBeatmapLink ? 0.6 : 1 }} />
                 </div>
                 
                 {/* Title */}
                 <div>
                   <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>Song Title *</label>
-                  <input type="text" className="input-text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Exit This Earth's Atomosphere" />
+                  <input type="text" className="input-text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Exit This Earth's Atomosphere" disabled={isOsuBeatmapLink} style={{ opacity: isOsuBeatmapLink ? 0.6 : 1 }} />
                 </div>
 
                 {/* Creator */}
                 <div>
                   <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>Creator / Mapper *</label>
-                  <input type="text" className="input-text" value={creator} onChange={(e) => setCreator(e.target.value)} placeholder="e.g. ProfessionalMapper" />
+                  <input type="text" className="input-text" value={creator} onChange={(e) => setCreator(e.target.value)} placeholder="e.g. ProfessionalMapper" disabled={isOsuBeatmapLink} style={{ opacity: isOsuBeatmapLink ? 0.6 : 1 }} />
                 </div>
 
                 {/* Difficulty */}
@@ -430,19 +379,7 @@ export default function QuickAdd({
                 {/* Requester Username */}
                 <div>
                   <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>Requester Username</label>
-                  <input type="text" className="input-text" value={requester} onChange={(e) => setRequester(e.target.value)} placeholder="e.g. Peppy" />
-                </div>
-
-                {/* Requester Profile Link */}
-                <div>
-                  <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>Requester osu! Link</label>
-                  <input type="text" className="input-text" value={profileLink} onChange={(e) => setProfileLink(e.target.value)} placeholder="https://osu.ppy.sh/users/2" />
-                </div>
-
-                {/* Discord discussion link */}
-                <div>
-                  <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>Discord / Contact Link</label>
-                  <input type="text" className="input-text" value={discordLink} onChange={(e) => setDiscordLink(e.target.value)} placeholder="https://discord.gg/invite" />
+                  <input type="text" className="input-text" value={requester} onChange={(e) => setRequester(e.target.value)} placeholder="e.g. Peppy" disabled={isOsuBeatmapLink} style={{ opacity: isOsuBeatmapLink ? 0.6 : 1 }} />
                 </div>
 
                 {/* Priority */}
@@ -491,7 +428,6 @@ export default function QuickAdd({
                 </div>
 
               </div>
-            )}
 
           </form>
         </>

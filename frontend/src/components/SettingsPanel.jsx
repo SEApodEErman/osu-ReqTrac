@@ -14,8 +14,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 
-const IMPORT_CATEGORY_NAMES = ['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others'];
-const APP_VERSION = '2.1.1';
+const APP_VERSION = '1.0.0';
 
 export default function SettingsPanel({ 
   settingsData, 
@@ -23,8 +22,8 @@ export default function SettingsPanel({
   onThemeChange,
   onSaveCredentials, 
   onDisconnect, 
-  onImportBeatmapLinks,
   onImportJson,
+  onNotify = () => {},
   showFirstLaunchSetup = false,
   onDismissFirstLaunchSetup
 }) {
@@ -69,17 +68,7 @@ export default function SettingsPanel({
   const [connectedUserId, setConnectedUserId] = useState('');
   const [isSavingCreds, setIsSavingCreds] = useState(false);
 
-  // Beatmap link import state
-  const [linksText, setLinksText] = useState('');
-  const [isImportingLinks, setIsImportingLinks] = useState(false);
-  const [importCategories, setImportCategories] = useState({
-    Hitsounds: true,
-    'Guest Difficulties': false,
-    Storyboards: false,
-    Others: false
-  });
-
-  // Refresh added dates state
+  // Refresh request dates state
   const [isRefreshingDates, setIsRefreshingDates] = useState(false);
 
   // Google Sheets publishing state
@@ -118,9 +107,9 @@ export default function SettingsPanel({
       } else {
         window.open(data.url, '_blank', 'noopener,noreferrer');
       }
-      alert('Complete Google authorization in your browser, then return to ReqTrac and refresh this page.');
+      onNotify('Complete Google authorization in your browser, then return to ReqTrac and refresh this page.', 'info');
     } catch (e) {
-      alert(e.message);
+      onNotify(e.message, 'error');
     } finally {
       setIsGoogleBusy(false);
     }
@@ -140,9 +129,9 @@ export default function SettingsPanel({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Google Sheets sync failed.');
       setGoogleStatus((current) => ({ ...current, connected: true, sheetUrl: data.url, syncedAt: data.syncedAt }));
-      alert('Google Sheet updated and set to read-only link sharing.');
+      onNotify('Google Sheet updated and set to read-only link sharing.', 'success');
     } catch (e) {
-      alert(e.message);
+      onNotify(e.message, 'error');
     } finally {
       setIsGoogleBusy(false);
     }
@@ -156,14 +145,14 @@ export default function SettingsPanel({
       if (!res.ok) throw new Error('Failed to disconnect Google Sheets.');
       setGoogleStatus((current) => ({ ...current, connected: false, sheetUrl: null, syncedAt: null }));
     } catch (e) {
-      alert(e.message);
+      onNotify(e.message, 'error');
     } finally {
       setIsGoogleBusy(false);
     }
   };
 
   const handleRefreshDates = async () => {
-    const confirmRefresh = confirm('This will overwrite the "Date Added" of all osu! link requests with each map\'s upload date from osu!. Continue?');
+    const confirmRefresh = confirm('This will overwrite the "Date Added" of all osu! link requests with each map\'s ranked/loved date, or its last updated date when it is not Ranked or Loved. Continue?');
     if (!confirmRefresh) return;
 
     setIsRefreshingDates(true);
@@ -171,13 +160,13 @@ export default function SettingsPanel({
       const res = await fetch('/api/requests/refresh-dates', { method: 'POST' });
       const data = await res.json();
       if (res.ok) {
-        alert(data.message);
+        onNotify(data.message, 'success');
       } else {
-        alert(`Failed to refresh dates: ${data.error || 'Server Error'}`);
+        onNotify(`Failed to refresh dates: ${data.error || 'Server Error'}`, 'error');
       }
     } catch (e) {
       console.error(e);
-      alert('Network error while refreshing dates.');
+      onNotify('Network error while refreshing dates.', 'error');
     } finally {
       setIsRefreshingDates(false);
     }
@@ -201,36 +190,13 @@ export default function SettingsPanel({
       setClientId('');
       setClientSecret('');
       setConnectedUserId('');
-      alert('osu! API settings saved successfully.');
+      onNotify('osu! API settings saved successfully.', 'success');
       setTimeout(validateOauthConfig, 500);
     } catch (e) {
       console.error(e);
-      alert('Failed to save credentials.');
+      onNotify('Failed to save credentials.', 'error');
     } finally {
       setIsSavingCreds(false);
-    }
-  };
-
-  const handleBeatmapLinksImport = async (e) => {
-    e.preventDefault();
-    if (!linksText.trim()) return;
-
-    const selectedCategories = IMPORT_CATEGORY_NAMES.filter((category) => importCategories[category]);
-    if (selectedCategories.length === 0) {
-      alert('Please select at least one request category.');
-      return;
-    }
-
-    setIsImportingLinks(true);
-    try {
-      const success = await onImportBeatmapLinks(linksText, selectedCategories);
-      if (success) {
-        setLinksText('');
-      }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsImportingLinks(false);
     }
   };
 
@@ -253,7 +219,7 @@ export default function SettingsPanel({
             e.target.reset();
           }
         } catch (err) {
-          alert('Invalid backup JSON structure. Make sure you upload a valid backup.json file.');
+          onNotify('Invalid backup JSON structure. Make sure you upload a valid backup.json file.', 'error');
         }
       };
       reader.readAsText(jsonFile);
@@ -272,7 +238,7 @@ export default function SettingsPanel({
           Settings
         </h1>
         <p style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
-            Manage your osu! API integration, import beatmap links, or backup/restore requests database.
+          Manage your osu! API integration or backup/restore your requests database.
         </p>
       </div>
 
@@ -404,6 +370,15 @@ export default function SettingsPanel({
             </div>
           )}
 
+          {googleStatus?.configured && !googleStatus?.hasConnected && (
+            <div style={{ padding: '12px', borderRadius: '8px', backgroundColor: 'rgba(243, 156, 18, 0.1)', border: '1px solid rgba(243, 156, 18, 0.25)', color: 'var(--text-muted)', fontSize: '12px', display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+              <AlertCircle size={16} style={{ color: 'var(--priority-medium)', flexShrink: 0, marginTop: '1px' }} />
+              <span>
+                Google may show an “unverified app” warning during authorization. This is temporary while this new application completes Google’s verification process. Your export data is sent directly to your Google Sheet through the Google Sheets API and is never sent anywhere else.
+              </span>
+            </div>
+          )}
+
           {googleStatus?.connected && googleStatus.sheetUrl && (
             <div style={{ padding: '12px', borderRadius: '8px', backgroundColor: 'rgba(46, 204, 113, 0.1)', border: '1px solid rgba(46, 204, 113, 0.3)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
               <span style={{ fontSize: '12px', fontWeight: '600' }}>Published sheet</span>
@@ -428,74 +403,21 @@ export default function SettingsPanel({
           </div>
         </div>
 
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <FileSpreadsheet size={18} style={{ color: 'var(--req-working)' }} />
-            Import Beatmap Links
-          </h3>
-          <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
-            Paste one osu! beatmap link per line to import multiple requests at once. Imported requests intentionally have no added date.
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <h4 style={{ fontSize: '13px', fontWeight: '600' }}>Refresh Added Dates</h4>
+          <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+            Set the &quot;Date Added&quot; of each osu! link request to the map&apos;s ranked/loved date, or its last updated date when it is not Ranked or Loved. Useful after importing from a spreadsheet. Runs in the background and may take a while due to API rate limiting.
           </p>
-
-          <form onSubmit={handleBeatmapLinksImport} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            <div>
-              <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>
-                Paste beatmap links (one per line)
-              </label>
-              <textarea 
-                className="input-text" 
-                placeholder={'https://osu.ppy.sh/beatmapsets/123456\nhttps://osu.ppy.sh/beatmaps/789012'}
-                value={linksText}
-                onChange={(e) => setLinksText(e.target.value)}
-                style={{ minHeight: '120px', fontFamily: 'monospace', fontSize: '12px', resize: 'vertical' }}
-              />
-            </div>
-            <div>
-              <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', marginBottom: '8px', display: 'block' }}>
-                Request Categories
-              </span>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px' }}>
-                {IMPORT_CATEGORY_NAMES.map((category) => (
-                  <label key={category} className="checkbox-container">
-                    <input
-                      type="checkbox"
-                      checked={importCategories[category]}
-                      onChange={() => setImportCategories((current) => ({
-                        ...current,
-                        [category]: !current[category]
-                      }))}
-                    />
-                    <span className="checkmark" />
-                    <span style={{ fontSize: '13px' }}>{category}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div>
-              <button type="submit" className="btn-primary" disabled={isImportingLinks || !linksText.trim()}>
-                {isImportingLinks ? 'Importing & Syncing...' : 'Import Requests'}
-              </button>
-            </div>
-          </form>
-
-          <div style={{ height: '1px', backgroundColor: 'var(--border)', margin: '4px 0' }} />
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <h4 style={{ fontSize: '13px', fontWeight: '600' }}>Refresh Added Dates</h4>
-            <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-              Set the &quot;Date Added&quot; of each osu! link request to the map&apos;s actual upload date from osu!. Useful after importing from a spreadsheet. Runs in the background and may take a while due to API rate limiting.
-            </p>
-            <button 
-              type="button" 
-              onClick={handleRefreshDates} 
-              className="btn-secondary" 
-              disabled={isRefreshingDates}
-              style={{ width: 'fit-content' }}
-            >
-              <RefreshCw size={14} className={isRefreshingDates ? 'spin' : ''} />
-              <span>{isRefreshingDates ? 'Starting...' : 'Refresh Added Dates from osu!'}</span>
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={handleRefreshDates}
+            className="btn-secondary"
+            disabled={isRefreshingDates}
+            style={{ width: 'fit-content' }}
+          >
+            <RefreshCw size={14} className={isRefreshingDates ? 'spin' : ''} />
+            <span>{isRefreshingDates ? 'Starting...' : 'Refresh Added Dates from osu!'}</span>
+          </button>
         </div>
 
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>

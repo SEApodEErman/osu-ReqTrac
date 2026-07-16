@@ -72,9 +72,9 @@ router.post('/import-json', async (req, res, next) => {
     // Insert requests
     for (const r of backup.requests || []) {
       await db.run(`
-        INSERT INTO requests (id, beatmapset_id, is_osu_link, non_osu_artist, non_osu_title, non_osu_creator, non_osu_difficulty, requester_id, requester_username, request_status, priority, deadline, notes, discord_link, osu_profile_link, added_date, completed_date, last_updated)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [r.id, r.beatmapset_id, r.is_osu_link, r.non_osu_artist, r.non_osu_title, r.non_osu_creator, r.non_osu_difficulty, r.requester_id, r.requester_username, r.request_status, r.priority, r.deadline, r.notes, r.discord_link, r.osu_profile_link, r.added_date, r.completed_date, r.last_updated]);
+        INSERT INTO requests (id, beatmapset_id, is_osu_link, non_osu_artist, non_osu_title, non_osu_creator, non_osu_difficulty, requester_id, requester_username, request_status, priority, deadline, notes, input_link, discord_link, osu_profile_link, added_date, completed_date, last_updated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [r.id, r.beatmapset_id, r.is_osu_link, r.non_osu_artist, r.non_osu_title, r.non_osu_creator, r.non_osu_difficulty, r.requester_id, r.requester_username, r.request_status, r.priority, r.deadline, r.notes, r.input_link || null, r.discord_link, r.osu_profile_link, r.added_date, r.completed_date, r.last_updated]);
     }
 
     // Insert request_categories

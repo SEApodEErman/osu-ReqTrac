@@ -69,6 +69,7 @@ async function buildPublicSnapshot() {
       status: row.request_status,
       priority: row.priority,
       deadline: row.deadline,
+      notes: row.notes || '',
       categories: categoryMap.get(row.id) || [],
       tags: tagMap.get(row.id) || [],
       mapStatus: row.ranked_status,

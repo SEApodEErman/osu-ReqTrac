@@ -15,7 +15,8 @@ export default function Sidebar({
   activeTab, 
   setActiveTab, 
   connectedAccount,
-  onDisconnect
+  onDisconnect,
+  isSidebarOpen = true
 }) {
   const openConnectedProfile = async () => {
     if (!connectedAccount?.id) return;
@@ -36,7 +37,8 @@ export default function Sidebar({
   ];
 
   return (
-    <aside className="sidebar" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <aside className={`sidebar ${isSidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
+      <div className="sidebar-panel">
       {/* Brand Header */}
       <div style={{ 
         padding: '24px 20px', 
@@ -78,14 +80,10 @@ export default function Sidebar({
             width: '100%',
             padding: '10px 12px',
             borderRadius: '8px',
-            backgroundColor: activeTab === 'dashboard' ? 'var(--hover-bg)' : 'transparent',
-            color: activeTab === 'dashboard' ? 'var(--osu-pink)' : 'var(--text-main)',
-            fontWeight: activeTab === 'dashboard' ? '600' : '500',
             cursor: 'pointer',
-            textAlign: 'left',
-            transition: 'all 0.2s'
+            textAlign: 'left'
           }}
-          className="nav-item"
+          className={`nav-item ${activeTab === 'dashboard' ? 'nav-item-active' : ''}`}
         >
           <LayoutDashboard size={18} />
           <span>Dashboard</span>
@@ -121,14 +119,10 @@ export default function Sidebar({
                 width: '100%',
                 padding: '10px 12px',
                 borderRadius: '8px',
-                backgroundColor: isSelected ? 'var(--hover-bg)' : 'transparent',
-                color: isSelected ? 'var(--osu-pink)' : 'var(--text-main)',
-                fontWeight: isSelected ? '600' : '500',
                 cursor: 'pointer',
-                textAlign: 'left',
-                transition: 'all 0.2s'
+                textAlign: 'left'
               }}
-              className="nav-item"
+              className={`nav-item ${isSelected ? 'nav-item-active' : ''}`}
             >
               <Icon size={18} />
               <span>{cat.name}</span>
@@ -148,14 +142,10 @@ export default function Sidebar({
             width: '100%',
             padding: '10px 12px',
             borderRadius: '8px',
-            backgroundColor: activeTab === 'settings' ? 'var(--hover-bg)' : 'transparent',
-            color: activeTab === 'settings' ? 'var(--osu-pink)' : 'var(--text-main)',
-            fontWeight: activeTab === 'settings' ? '600' : '500',
             cursor: 'pointer',
-            textAlign: 'left',
-            transition: 'all 0.2s'
+            textAlign: 'left'
           }}
-          className="nav-item"
+          className={`nav-item ${activeTab === 'settings' ? 'nav-item-active' : ''}`}
         >
           <Settings size={18} />
           <span>Settings</span>
@@ -224,6 +214,7 @@ export default function Sidebar({
             osu! API disconnected
           </div>
         )}
+      </div>
       </div>
     </aside>
   );

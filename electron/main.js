@@ -20,7 +20,7 @@ if (!isDev) {
 
 // Import (do not auto-start) the backend; we start it and read the port.
 const { startServer } = require('../backend/src/index');
-const { initAutoUpdater } = require('./updater');
+const { initAutoUpdater, installUpdate } = require('./updater');
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -30,6 +30,7 @@ if (!gotSingleInstanceLock) {
 
 let mainWindow;
 let backendPort;
+let flashFrameTimer;
 
 function focusMainWindow() {
   if (!mainWindow) return;
@@ -63,6 +64,17 @@ ipcMain.handle('window:toggle-maximize', () => {
   return mainWindow.isMaximized();
 });
 ipcMain.handle('window:close', () => mainWindow?.close());
+ipcMain.handle('window:flash-frame', () => {
+  if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed() || mainWindow.isFocused()) return false;
+  mainWindow.flashFrame(true);
+  if (flashFrameTimer) clearTimeout(flashFrameTimer);
+  flashFrameTimer = setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.flashFrame(false);
+    flashFrameTimer = null;
+  }, 5000);
+  return true;
+});
+ipcMain.handle('update:install', () => installUpdate());
 ipcMain.handle('open-external', (_event, url) => {
   if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
     throw new Error('Only HTTP(S) URLs can be opened externally.');

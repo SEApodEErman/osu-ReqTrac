@@ -159,6 +159,11 @@ router.get('/', async (req, res, next) => {
         requesterAvatar = creatorCache ? creatorCache.avatar_url : null;
         requesterCountry = creatorCache ? creatorCache.country_code : null;
         requesterIsCreator = true;
+      } else if (!hasExplicitRequester && !reqRow.is_osu_link && reqRow.non_osu_creator) {
+        requesterId = null;
+        requesterUsername = reqRow.non_osu_creator;
+        requesterAvatar = null;
+        requesterCountry = null;
       }
 
       return {
@@ -182,6 +187,7 @@ router.get('/', async (req, res, next) => {
         priority: reqRow.priority,
         deadline: reqRow.deadline,
         notes: reqRow.notes,
+        input_link: reqRow.input_link,
         discord_link: reqRow.discord_link,
         osu_profile_link: reqRow.osu_profile_link,
         added_date: reqRow.added_date,
@@ -289,6 +295,7 @@ router.post('/', async (req, res, next) => {
       non_osu_creator,
       non_osu_difficulty,
       osu_profile_link,
+      input_link,
       discord_link,
       tags = [],
       force = false,
@@ -366,23 +373,38 @@ router.post('/', async (req, res, next) => {
       }
     }
 
-    // Resolve requester ID and cache profile if profile link exists
+    // Resolve the requester from the username. The profile link is retained as
+    // a derived database value for existing UI integrations, not as a form input.
     let requesterId = null;
-    let finalRequesterUsername = requester_username || 'Anonymous';
+    const requestedUsername = String(requester_username || '').trim();
+    const isAnonymousRequester = !isOsuLink && (!requestedUsername || requestedUsername.toLowerCase() === 'anonymous');
+    let finalRequesterUsername = !isOsuLink && isAnonymousRequester
+      ? (String(creator || '').trim() || 'Anonymous')
+      : (requestedUsername || 'Anonymous');
+    let finalOsuProfileLink = osu_profile_link || null;
     
-    const parsedUserLink = parseOsuUserLink(osu_profile_link);
+    const parsedUserLink = !isAnonymousRequester ? parseOsuUserLink(osu_profile_link) : null;
     if (parsedUserLink) {
       requesterId = parsedUserLink;
       const cachedUser = await fetchAndCacheUser(db, requesterId);
       if (cachedUser) {
         finalRequesterUsername = cachedUser.username;
+        finalOsuProfileLink = `https://osu.ppy.sh/users/${cachedUser.id}`;
       }
-    } else if (requester_username && /^\d+$/.test(requester_username)) {
+    } else if (!isAnonymousRequester && /^\d+$/.test(requestedUsername)) {
       // Username is a numeric ID
-      requesterId = parseInt(requester_username, 10);
+      requesterId = parseInt(requestedUsername, 10);
       const cachedUser = await fetchAndCacheUser(db, requesterId);
       if (cachedUser) {
         finalRequesterUsername = cachedUser.username;
+        finalOsuProfileLink = `https://osu.ppy.sh/users/${cachedUser.id}`;
+      }
+    } else if (!isAnonymousRequester && requestedUsername) {
+      const cachedUser = await fetchAndCacheUser(db, requestedUsername);
+      if (cachedUser) {
+        requesterId = cachedUser.id;
+        finalRequesterUsername = cachedUser.username;
+        finalOsuProfileLink = `https://osu.ppy.sh/users/${cachedUser.id}`;
       }
     }
 
@@ -390,9 +412,9 @@ router.post('/', async (req, res, next) => {
     const result = await db.run(`
       INSERT INTO requests (
         beatmapset_id, is_osu_link, non_osu_artist, non_osu_title, non_osu_creator, non_osu_difficulty,
-        requester_id, requester_username, request_status, priority, deadline, notes, discord_link, osu_profile_link,
+        requester_id, requester_username, request_status, priority, deadline, notes, input_link, discord_link, osu_profile_link,
         guest_difficulty_target_sr
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       beatmapsetId,
       isOsuLink ? 1 : 0,
@@ -406,8 +428,9 @@ router.post('/', async (req, res, next) => {
       priority,
       deadline || null,
       notes || null,
+      isOsuLink ? null : (input_link || link || null),
       discord_link || null,
-      osu_profile_link || null,
+      finalOsuProfileLink,
       guest_difficulty_target_sr || null
     ]);
 
@@ -604,14 +627,15 @@ router.patch('/:id', async (req, res, next) => {
       for (const cat of categories) {
         const matched = oldCats.find(c => c.category_name === cat.category_name);
         if (matched) {
-          if (matched.status !== cat.status || matched.other_text !== cat.other_text) {
+          const nextStatus = cat.status || matched.status || 'Pending';
+          if (matched.status !== nextStatus || matched.other_text !== cat.other_text) {
             historyLogs.push({
               action: 'category_status_change',
-              details: `${cat.category_name} status: ${matched.status} -> ${cat.status}`
+              details: `${cat.category_name} status: ${matched.status} -> ${nextStatus}`
             });
             await db.run(
               'UPDATE request_categories SET status = ?, other_text = ? WHERE id = ?',
-              cat.status, cat.other_text || null, matched.id
+              nextStatus, cat.other_text || null, matched.id
             );
           }
         } else {
@@ -759,7 +783,18 @@ router.get('/beatmap-info', async (req, res, next) => {
   }
 });
 
-// POST /api/requests/refresh-dates - Update added_date from each beatmapset's upload date
+// Prefer the date that best represents a beatmap's lifecycle for request
+// history: ranked/loved date for those statuses, otherwise the last-updated
+// date, with the original submission date as a compatibility fallback.
+function getEffectiveBeatmapDate(cacheEntry) {
+  const status = (cacheEntry?.ranked_status || '').toLowerCase();
+  if ((status === 'ranked' || status === 'loved') && cacheEntry.ranked_date) {
+    return cacheEntry.ranked_date;
+  }
+  return cacheEntry?.osu_last_updated || cacheEntry?.ranked_date || cacheEntry?.submitted_date || null;
+}
+
+// POST /api/requests/refresh-dates - Update added_date from each beatmapset's lifecycle date
 router.post('/refresh-dates', async (req, res, next) => {
   try {
     const db = await getDatabase();
@@ -769,12 +804,12 @@ router.post('/refresh-dates', async (req, res, next) => {
       return res.json({ success: true, message: 'No osu! link requests found to update.' });
     }
 
-    const apiJobId = createApiJob('Refreshing added dates', rows.length * 2);
+    const apiJobId = createApiJob('Refreshing request dates', rows.length * 2);
 
     // Respond immediately; process in the background (throttled osu! API calls)
     res.json({
       success: true,
-      message: `Refreshing added dates for ${rows.length} requests in the background. This may take a while due to API rate limiting.`
+      message: `Refreshing request dates for ${rows.length} requests in the background. This may take a while due to API rate limiting.`
     });
 
     (async () => {
@@ -784,21 +819,22 @@ router.post('/refresh-dates', async (req, res, next) => {
           try {
             // Full refresh also caches the creator profile and osu! dates
             const cacheEntry = await refreshAndCacheBeatmapset(db, row.beatmapset_id, apiJobId);
-            if (cacheEntry && cacheEntry.submitted_date) {
+            const effectiveDate = getEffectiveBeatmapDate(cacheEntry);
+            if (effectiveDate) {
               await db.run(
                 'UPDATE requests SET added_date = ? WHERE id = ?',
-                [cacheEntry.submitted_date, row.id]
+                [effectiveDate, row.id]
               );
               updated++;
             }
           } catch (err) {
-            console.error(`Failed to refresh added_date for request ${row.id} (beatmapset ${row.beatmapset_id}):`, err.message);
+            console.error(`Failed to refresh request date for request ${row.id} (beatmapset ${row.beatmapset_id}):`, err.message);
           }
         }
       } finally {
         finishApiJob(apiJobId);
       }
-      console.log(`[refresh-dates] Updated added_date for ${updated}/${rows.length} requests.`);
+      console.log(`[refresh-dates] Updated request dates for ${updated}/${rows.length} requests.`);
     })();
   } catch (error) {
     next(error);
