@@ -13,6 +13,18 @@ let nextApiJobId = 1;
 const apiJobs = new Map();
 const RATE_LIMIT_WAIT = 30000;
 const MIN_REQUEST_INTERVAL = 2000;
+const NETWORK_TIMEOUT_MS = 30000;
+const MAX_RATE_LIMIT_RETRIES = 2;
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = NETWORK_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -52,7 +64,7 @@ async function getCredentials() {
 }
 
 // Fetch a new access token using client credentials
-async function getAccessToken() {
+async function getAccessToken(rateLimitRetries = 0) {
   if (accessToken && tokenExpiresAt && Date.now() < tokenExpiresAt) {
     return accessToken;
   }
@@ -66,7 +78,7 @@ async function getAccessToken() {
   await waitIfRateLimited();
   await throttle();
 
-  const response = await fetch('https://osu.ppy.sh/oauth/token', {
+  const response = await fetchWithTimeout('https://osu.ppy.sh/oauth/token', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -83,9 +95,12 @@ async function getAccessToken() {
   lastRequestTime = Date.now();
 
   if (response.status === 429) {
+    if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
+      throw new Error('osu! API rate limit persisted after several retries.');
+    }
     setRateLimited();
     await waitIfRateLimited();
-    return getAccessToken();
+    return getAccessToken(rateLimitRetries + 1);
   }
 
   if (!response.ok) {
@@ -101,7 +116,7 @@ async function getAccessToken() {
 }
 
 // Helper to make authenticated requests to osu! API
-async function apiFetch(endpoint) {
+async function apiFetch(endpoint, rateLimitRetries = 0) {
   pendingApiRequests++;
   try {
     await waitIfRateLimited();
@@ -110,7 +125,7 @@ async function apiFetch(endpoint) {
     const token = await getAccessToken();
     const url = endpoint.startsWith('http') ? endpoint : `https://osu.ppy.sh/api/v2/${endpoint.replace(/^\//, '')}`;
 
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
       headers: {
         'Authorization': `Bearer ${token}`,
         'Accept': 'application/json',
@@ -121,9 +136,12 @@ async function apiFetch(endpoint) {
     lastRequestTime = Date.now();
 
     if (response.status === 429) {
+      if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
+        throw new Error('osu! API rate limit persisted after several retries.');
+      }
       setRateLimited();
       await waitIfRateLimited();
-      return apiFetch(endpoint);
+      return apiFetch(endpoint, rateLimitRetries + 1);
     }
 
     if (!response.ok) {
@@ -213,7 +231,7 @@ async function downloadCover(beatmapsetId, coverUrl) {
     // Default cover fallback if not provided
     const url = coverUrl || `https://assets.ppy.sh/beatmaps/${beatmapsetId}/covers/cover.jpg`;
 
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url);
     if (!res.ok) {
       // Try fallback URL if the provided one failed
       if (url !== `https://assets.ppy.sh/beatmaps/${beatmapsetId}/covers/cover.jpg`) {

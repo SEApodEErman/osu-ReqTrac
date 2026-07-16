@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 
 const IMPORT_CATEGORY_NAMES = ['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others'];
+const APP_VERSION = '2.1.1';
 
 export default function SettingsPanel({ 
   settingsData, 
@@ -637,6 +638,30 @@ export default function SettingsPanel({
         </div>
 
       </div>
+
+      <footer style={{
+        borderTop: '1px solid var(--border)',
+        paddingTop: '16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '6px',
+        color: 'var(--text-muted)',
+        fontSize: '11px'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          <span>osu!ReqTrac v{APP_VERSION}</span>
+          <span aria-hidden="true">|</span>
+          <a
+            href="https://github.com/seapodeerman/osu-ReqTrac"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: 'var(--osu-pink)', textDecoration: 'underline' }}
+          >
+            GitHub repository
+          </a>
+        </div>
+        <span>osu! and related marks are trademarks of ppy Pty Ltd. This project is not affiliated with or endorsed by ppy Pty Ltd.</span>
+      </footer>
 
     </div>
   );
