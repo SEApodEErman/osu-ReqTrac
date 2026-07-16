@@ -3,6 +3,7 @@ const router = express.Router();
 const { getDatabase } = require('../db');
 const { fetchBeatmap, fetchBeatmapset, fetchUser, downloadCover } = require('../osuApi');
 const { refreshAndCacheBeatmapset } = require('./beatmaps');
+const { createApiJob, updateApiJob, finishApiJob } = require('../osuApi');
 const { findUserDifficulty, parseOsuLink, parseOsuUserLink } = require('../utils/requestUtils');
 
 // Helper to update or cache a user profile
@@ -283,6 +284,10 @@ router.post('/', async (req, res, next) => {
       priority = 'Medium',
       deadline,
       requester_username,
+      non_osu_artist,
+      non_osu_title,
+      non_osu_creator,
+      non_osu_difficulty,
       osu_profile_link,
       discord_link,
       tags = [],
@@ -462,6 +467,11 @@ router.patch('/:id', async (req, res, next) => {
       notes,
       discord_link,
       osu_profile_link,
+      requester_username,
+      non_osu_artist,
+      non_osu_title,
+      non_osu_creator,
+      non_osu_difficulty,
       categories, // Array of category objects to overwrite/update
       tags // Array of tags to replace existing tags
     } = req.body;
@@ -515,15 +525,18 @@ router.patch('/:id', async (req, res, next) => {
       await db.run('UPDATE requests SET priority = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', priority, requestId);
     }
 
+    const normalizedDeadline = deadline === undefined || deadline === null || deadline === '' || deadline === 0 || deadline === '0' ? null : deadline;
+    const normalizedAddedDate = added_date === undefined || added_date === null || added_date === '' || added_date === 0 || added_date === '0' ? null : added_date;
+
     // Check deadline change
-    if (deadline !== undefined && deadline !== oldRequest.deadline) {
+    if (deadline !== undefined && normalizedDeadline !== oldRequest.deadline) {
       const oldDeadlineStr = oldRequest.deadline ? oldRequest.deadline : 'None';
-      const newDeadlineStr = deadline ? deadline : 'None';
+      const newDeadlineStr = normalizedDeadline ? normalizedDeadline : 'None';
       historyLogs.push({
         action: 'deadline_change',
         details: `Deadline updated: ${oldDeadlineStr} -> ${newDeadlineStr}`
       });
-      await db.run('UPDATE requests SET deadline = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', deadline, requestId);
+      await db.run('UPDATE requests SET deadline = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', normalizedDeadline, requestId);
     }
 
     // Update notes
@@ -551,14 +564,18 @@ router.patch('/:id', async (req, res, next) => {
     }
 
     // Update added_date
-    if (added_date !== undefined && added_date !== oldRequest.added_date) {
+    if (added_date !== undefined && normalizedAddedDate !== oldRequest.added_date) {
       const oldDate = oldRequest.added_date ? new Date(oldRequest.added_date).toLocaleDateString() : 'None';
-      const newDate = added_date ? new Date(added_date).toLocaleDateString() : 'None';
+      const newDate = normalizedAddedDate ? new Date(normalizedAddedDate).toLocaleDateString() : 'None';
       historyLogs.push({
         action: 'added_date_change',
         details: `Added date updated: ${oldDate} -> ${newDate}`
       });
-      await db.run('UPDATE requests SET added_date = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', added_date, requestId);
+      await db.run('UPDATE requests SET added_date = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', normalizedAddedDate, requestId);
+    }
+
+    if (non_osu_artist !== undefined || non_osu_title !== undefined || non_osu_creator !== undefined || non_osu_difficulty !== undefined || requester_username !== undefined) {
+      await db.run(`UPDATE requests SET non_osu_artist = COALESCE(?, non_osu_artist), non_osu_title = COALESCE(?, non_osu_title), non_osu_creator = COALESCE(?, non_osu_creator), non_osu_difficulty = ?, requester_username = COALESCE(?, requester_username), last_updated = CURRENT_TIMESTAMP WHERE id = ?`, non_osu_artist, non_osu_title, non_osu_creator, non_osu_difficulty ?? null, requester_username, requestId);
     }
 
     // Update guest_difficulty_target_sr
@@ -752,6 +769,8 @@ router.post('/refresh-dates', async (req, res, next) => {
       return res.json({ success: true, message: 'No osu! link requests found to update.' });
     }
 
+    const apiJobId = createApiJob('Refreshing added dates', rows.length * 2);
+
     // Respond immediately; process in the background (throttled osu! API calls)
     res.json({
       success: true,
@@ -760,20 +779,24 @@ router.post('/refresh-dates', async (req, res, next) => {
 
     (async () => {
       let updated = 0;
-      for (const row of rows) {
-        try {
-          // Full refresh also caches the creator profile and osu! dates
-          const cacheEntry = await refreshAndCacheBeatmapset(db, row.beatmapset_id);
-          if (cacheEntry && cacheEntry.submitted_date) {
-            await db.run(
-              'UPDATE requests SET added_date = ? WHERE id = ?',
-              [cacheEntry.submitted_date, row.id]
-            );
-            updated++;
+      try {
+        for (const row of rows) {
+          try {
+            // Full refresh also caches the creator profile and osu! dates
+            const cacheEntry = await refreshAndCacheBeatmapset(db, row.beatmapset_id, apiJobId);
+            if (cacheEntry && cacheEntry.submitted_date) {
+              await db.run(
+                'UPDATE requests SET added_date = ? WHERE id = ?',
+                [cacheEntry.submitted_date, row.id]
+              );
+              updated++;
+            }
+          } catch (err) {
+            console.error(`Failed to refresh added_date for request ${row.id} (beatmapset ${row.beatmapset_id}):`, err.message);
           }
-        } catch (err) {
-          console.error(`Failed to refresh added_date for request ${row.id} (beatmapset ${row.beatmapset_id}):`, err.message);
         }
+      } finally {
+        finishApiJob(apiJobId);
       }
       console.log(`[refresh-dates] Updated added_date for ${updated}/${rows.length} requests.`);
     })();

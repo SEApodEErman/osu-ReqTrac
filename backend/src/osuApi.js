@@ -6,6 +6,11 @@ let accessToken = null;
 let tokenExpiresAt = null;
 let rateLimitedUntil = null;
 let lastRequestTime = 0;
+let pendingApiRequests = 0;
+let lastApiError = null;
+let lastApiErrorAt = null;
+let nextApiJobId = 1;
+const apiJobs = new Map();
 const RATE_LIMIT_WAIT = 30000;
 const MIN_REQUEST_INTERVAL = 2000;
 
@@ -33,14 +38,15 @@ function setRateLimited() {
   console.warn(`[osuApi] 429 detected. Pausing all API calls for ${RATE_LIMIT_WAIT / 1000}s.`);
 }
 
-// Get credentials from environment or settings table
+// Credentials are configured in the app settings so development and packaged
+// runs use one source of truth.
 async function getCredentials() {
   const db = await getDatabase();
   const idSetting = await db.get('SELECT value FROM settings WHERE key = ?', 'osu_client_id');
   const secretSetting = await db.get('SELECT value FROM settings WHERE key = ?', 'osu_client_secret');
 
-  const client_id = process.env.OSU_CLIENT_ID || (idSetting ? idSetting.value : null);
-  const client_secret = process.env.OSU_CLIENT_SECRET || (secretSetting ? secretSetting.value : null);
+  const client_id = idSetting ? idSetting.value : null;
+  const client_secret = secretSetting ? secretSetting.value : null;
 
   return { client_id, client_secret };
 }
@@ -54,7 +60,7 @@ async function getAccessToken() {
   const { client_id, client_secret } = await getCredentials();
 
   if (!client_id || !client_secret) {
-    throw new Error('osu! API credentials are not configured. Please set them in settings or .env file.');
+    throw new Error('osu! API credentials are not configured. Please add them in Settings.');
   }
 
   await waitIfRateLimited();
@@ -96,37 +102,89 @@ async function getAccessToken() {
 
 // Helper to make authenticated requests to osu! API
 async function apiFetch(endpoint) {
-  await waitIfRateLimited();
-  await throttle();
-
-  const token = await getAccessToken();
-  const url = endpoint.startsWith('http') ? endpoint : `https://osu.ppy.sh/api/v2/${endpoint.replace(/^\//, '')}`;
-
-  const response = await fetch(url, {
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Accept': 'application/json',
-      'x-api-version': '20220705'
-    }
-  });
-
-  lastRequestTime = Date.now();
-
-  if (response.status === 429) {
-    setRateLimited();
+  pendingApiRequests++;
+  try {
     await waitIfRateLimited();
-    return apiFetch(endpoint);
-  }
+    await throttle();
 
-  if (!response.ok) {
-    if (response.status === 404) {
-      return null;
+    const token = await getAccessToken();
+    const url = endpoint.startsWith('http') ? endpoint : `https://osu.ppy.sh/api/v2/${endpoint.replace(/^\//, '')}`;
+
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/json',
+        'x-api-version': '20220705'
+      }
+    });
+
+    lastRequestTime = Date.now();
+
+    if (response.status === 429) {
+      setRateLimited();
+      await waitIfRateLimited();
+      return apiFetch(endpoint);
     }
-    const errText = await response.text();
-    throw new Error(`osu! API Error [${response.status}]: ${errText}`);
-  }
 
-  return response.json();
+    if (!response.ok) {
+      if (response.status === 404) {
+        return null;
+      }
+      const errText = await response.text();
+      throw new Error(`osu! API Error [${response.status}]: ${errText}`);
+    }
+
+    return response.json();
+  } catch (error) {
+    lastApiError = error.message;
+    lastApiErrorAt = Date.now();
+    throw error;
+  } finally {
+    pendingApiRequests--;
+  }
+}
+
+function getApiStatus() {
+  const rateLimitSeconds = rateLimitedUntil && rateLimitedUntil > Date.now()
+    ? Math.ceil((rateLimitedUntil - Date.now()) / 1000)
+    : 0;
+  const jobs = Array.from(apiJobs.values()).map(job => ({
+    ...job,
+    remainingRequests: Math.max(0, job.totalRequests - job.completedRequests)
+  }));
+  const queuedJobRequests = jobs.reduce((total, job) => total + job.remainingRequests, 0);
+  const throttleSeconds = Math.ceil(((pendingApiRequests + queuedJobRequests) * MIN_REQUEST_INTERVAL) / 1000);
+
+  return {
+    pendingRequests: pendingApiRequests,
+    queuedRequests: queuedJobRequests,
+    jobs,
+    throttleMs: MIN_REQUEST_INTERVAL,
+    estimatedSeconds: Math.max(throttleSeconds, rateLimitSeconds),
+    rateLimitedSeconds: rateLimitSeconds,
+    lastError: lastApiError,
+    lastErrorAt: lastApiErrorAt
+  };
+}
+
+function createApiJob(label, totalRequests = 0) {
+  const id = nextApiJobId++;
+  apiJobs.set(id, { id, label, totalRequests, completedRequests: 0 });
+  return id;
+}
+
+function addApiJobWork(id, requestCount) {
+  const job = apiJobs.get(id);
+  if (job) job.totalRequests += requestCount;
+}
+
+function updateApiJob(id, completedRequests) {
+  const job = apiJobs.get(id);
+  if (job) job.completedRequests += completedRequests;
+}
+
+function finishApiJob(id) {
+  apiJobs.delete(id);
 }
 
 // Fetch beatmapset details
@@ -179,5 +237,10 @@ module.exports = {
   fetchBeatmap,
   fetchUser,
   downloadCover,
-  getCredentials
+  getCredentials,
+  getApiStatus,
+  createApiJob,
+  addApiJobWork,
+  updateApiJob,
+  finishApiJob
 };

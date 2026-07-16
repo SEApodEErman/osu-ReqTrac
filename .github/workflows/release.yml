@@ -38,6 +38,9 @@ jobs:
       - name: Build frontend
         run: npm run build:frontend
 
+      - name: Generate application icons
+        run: npm run generate:icon
+
       - name: Build and publish (Electron)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

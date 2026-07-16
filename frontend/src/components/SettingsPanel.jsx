@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Key, 
-  UserCheck, 
   Upload, 
   Download, 
   FileSpreadsheet, 
@@ -17,16 +16,16 @@ import {
 
 export default function SettingsPanel({ 
   settingsData, 
+  theme,
+  onThemeChange,
   onSaveCredentials, 
   onDisconnect, 
   onImportCsv,
-  onImportJson
+  onImportJson,
+  showFirstLaunchSetup = false,
+  onDismissFirstLaunchSetup
 }) {
-  const { isConfigured, connectedAccount } = settingsData || {};
-  const [theme, setTheme] = useState(() => {
-    if (typeof window === 'undefined') return 'dark';
-    return localStorage.getItem('theme') || 'dark';
-  });
+  const { isConfigured, connectedAccount, userId } = settingsData || {};
   const [oauthValidation, setOauthValidation] = useState(null);
   const [isValidatingOauth, setIsValidatingOauth] = useState(false);
 
@@ -57,15 +56,14 @@ export default function SettingsPanel({
     return () => window.clearTimeout(timeoutId);
   }, [validateOauthConfig]);
 
-  const toggleTheme = (newTheme) => {
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    document.documentElement.setAttribute('data-theme', newTheme);
-  };
+  useEffect(() => {
+    setConnectedUserId(userId || '');
+  }, [userId]);
 
   // Local state for credentials config
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
+  const [connectedUserId, setConnectedUserId] = useState('');
   const [isSavingCreds, setIsSavingCreds] = useState(false);
 
   // CSV State
@@ -102,39 +100,25 @@ export default function SettingsPanel({
 
   const handleSaveCredentials = async (e) => {
     e.preventDefault();
-    if (!clientId.trim() && !clientSecret.trim()) return;
+    if (!clientId.trim() && !clientSecret.trim() && connectedUserId === (userId || '')) return;
 
     setIsSavingCreds(true);
     try {
       await onSaveCredentials({ 
         client_id: clientId.trim() || undefined, 
-        client_secret: clientSecret.trim() || undefined 
+        client_secret: clientSecret.trim() || undefined,
+        user_id: connectedUserId.trim()
       });
       setClientId('');
       setClientSecret('');
-      alert('osu! API credentials saved successfully.');
+      setConnectedUserId('');
+      alert('osu! API settings saved successfully.');
       setTimeout(validateOauthConfig, 500);
     } catch (e) {
       console.error(e);
       alert('Failed to save credentials.');
     } finally {
       setIsSavingCreds(false);
-    }
-  };
-
-  const handleConnectOsu = async () => {
-    try {
-      const res = await fetch('/api/settings/oauth-url');
-      if (res.ok) {
-        const data = await res.json();
-        window.location.href = data.url;
-      } else {
-        const err = await res.json();
-        alert(`Error: ${err.error || 'Please configure Client ID and Secret first.'}`);
-      }
-    } catch (e) {
-      console.error(e);
-      alert('OAuth initialization failed.');
     }
   };
 
@@ -209,6 +193,16 @@ export default function SettingsPanel({
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+
+        {showFirstLaunchSetup && !isConfigured && (
+          <div className="card" style={{ border: '1px solid var(--osu-pink)', backgroundColor: 'var(--osu-pink-transparent)' }}>
+            <h3 style={{ fontSize: '16px', marginBottom: '8px' }}>Welcome to osu!ReqTrac</h3>
+            <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '12px' }}>
+              Add your osu! OAuth application Client ID and Client Secret below to enable beatmap syncing. You can optionally add your osu! User ID so guest difficulty requests can be matched to your profile without signing in.
+            </p>
+            <button type="button" className="btn-secondary" onClick={onDismissFirstLaunchSetup}>Got it</button>
+          </div>
+        )}
         
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -216,7 +210,7 @@ export default function SettingsPanel({
             osu! API v2 Connection
           </h3>
           <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
-            To automatically sync beatmap and requester profiles, you must configure your OAuth Application credentials. Get them on the <a href="https://osu.ppy.sh/home/account/edit#oauth-applications" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--osu-pink)', textDecoration: 'underline' }}>osu! OAuth Application setup page</a>.
+            Configure your OAuth Application Client ID and Client Secret to sync beatmap and requester profiles. An osu! User ID is optional and is only used to identify your own guest difficulties. Get the credentials on the <a href="https://osu.ppy.sh/home/account/edit#oauth-applications" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--osu-pink)', textDecoration: 'underline' }}>osu! OAuth Application setup page</a>.
           </p>
 
           {oauthValidation && (
@@ -236,7 +230,7 @@ export default function SettingsPanel({
                 ) : (
                   <AlertCircle size={16} style={{ color: 'var(--priority-medium)' }} />
                 )}
-                <span>{oauthValidation.valid ? 'OAuth Configuration Valid' : 'OAuth Configuration Issues Detected'}</span>
+                <span>{oauthValidation.valid ? 'API Configuration Valid' : 'API Configuration Issues Detected'}</span>
                 {isValidatingOauth && <RefreshCw size={14} className="spin" style={{ color: 'var(--osu-pink)', marginLeft: 'auto' }} />}
               </div>
               {oauthValidation.issues && oauthValidation.issues.length > 0 && (
@@ -249,12 +243,11 @@ export default function SettingsPanel({
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', fontSize: '11px', color: 'var(--text-muted)' }}>
                 <span>Client ID: {oauthValidation.clientIdConfigured ? '✓' : '✗'}</span>
                 <span>Client Secret: {oauthValidation.clientSecretConfigured ? '✓' : '✗'}</span>
-                <span>Redirect URI: {oauthValidation.redirectUri || 'Not set'}</span>
+                <span>User ID: {userId || 'Not set'}</span>
               </div>
               {!oauthValidation.valid && (
                 <p style={{ margin: 0, fontSize: '11px', color: 'var(--text-muted)' }}>
-                  Configure your OAuth application at <a href="https://osu.ppy.sh/home/account/edit#oauth-applications" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--osu-pink)' }}>osu! OAuth settings</a>. 
-                  Make sure the Redirect URI is set to <code>{oauthValidation.redirectUri || 'http://localhost:3001/api/settings/oauth-callback'}</code>.
+                  Configure your OAuth application at <a href="https://osu.ppy.sh/home/account/edit#oauth-applications" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--osu-pink)' }}>osu! OAuth settings</a>.
                 </p>
               )}
             </div>
@@ -272,6 +265,17 @@ export default function SettingsPanel({
               />
             </div>
             <div>
+              <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>Your osu! User ID (Optional)</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                className="input-text"
+                placeholder={userId || 'e.g. 2'}
+                value={connectedUserId}
+                onChange={(e) => setConnectedUserId(e.target.value)}
+              />
+            </div>
+            <div>
               <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>Client Secret</label>
               <input 
                 type="password" 
@@ -284,22 +288,6 @@ export default function SettingsPanel({
             <div style={{ gridColumn: '1 / -1', display: 'flex', gap: '8px', marginTop: '4px' }}>
               <button type="submit" className="btn-primary" disabled={isSavingCreds}>
                 {isSavingCreds ? 'Saving...' : 'Save Credentials'}
-              </button>
-
-              <button 
-                type="button" 
-                onClick={handleConnectOsu} 
-                className="btn-secondary"
-                disabled={!isConfigured}
-                style={{ 
-                  color: connectedAccount ? 'var(--req-completed)' : (isConfigured ? 'var(--text-main)' : 'var(--text-muted)'),
-                  borderColor: connectedAccount ? 'var(--req-completed)' : (isConfigured ? 'var(--border)' : 'var(--border)'),
-                  opacity: isConfigured ? 1 : 0.6,
-                  cursor: isConfigured ? 'pointer' : 'not-allowed'
-                }}
-              >
-                <UserCheck size={16} />
-                <span>{connectedAccount ? `Connected: ${connectedAccount.username}` : 'Connect osu! Account'}</span>
               </button>
 
               {connectedAccount && (
@@ -320,17 +308,16 @@ export default function SettingsPanel({
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
             <FileSpreadsheet size={18} style={{ color: 'var(--req-working)' }} />
-            Google Sheets CSV Migration
+            Import Beatmap Links
           </h3>
           <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
-            Migrate from your existing requests spreadsheet. The CSV must have column headers: <code>Artist, Title, Mapper, Link, Map Status, Remarks</code>. 
-            Links in the Link column will trigger automatic metadata fetching from osu!.
+            Paste one osu! beatmap link per line to import multiple requests at once. Legacy CSV files are still supported with the column headers: <code>Artist, Title, Mapper, Link, Map Status, Remarks</code>. Imported requests intentionally have no added date.
           </p>
 
           <form onSubmit={handleCsvImport} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             <div>
               <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>
-                Paste CSV Contents or Select File
+                Paste beatmap links (one per line) or select a legacy CSV file
               </label>
               <input 
                 type="file" 
@@ -340,7 +327,7 @@ export default function SettingsPanel({
               />
               <textarea 
                 className="input-text" 
-                placeholder="Paste CSV rows here (comma-separated)..."
+                placeholder={'https://osu.ppy.sh/beatmapsets/123456\nhttps://osu.ppy.sh/beatmaps/789012'}
                 value={csvText}
                 onChange={(e) => setCsvText(e.target.value)}
                 style={{ minHeight: '120px', fontFamily: 'monospace', fontSize: '12px', resize: 'vertical' }}
@@ -348,7 +335,7 @@ export default function SettingsPanel({
             </div>
             <div>
               <button type="submit" className="btn-primary" disabled={isImportingCsv || !csvText.trim()}>
-                {isImportingCsv ? 'Importing & Syncing...' : 'Migrate Requests'}
+                {isImportingCsv ? 'Importing & Syncing...' : 'Import Requests'}
               </button>
             </div>
           </form>
@@ -438,7 +425,7 @@ export default function SettingsPanel({
             Appearance
           </h3>
           <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
-            Choose your preferred color theme. The setting is saved locally in your browser.
+            Choose a color theme, or follow your operating system preference. The setting is saved locally in your browser.
           </p>
 
           <div style={{ 
@@ -450,7 +437,7 @@ export default function SettingsPanel({
             width: 'fit-content'
           }}>
             <button
-              onClick={() => toggleTheme('dark')}
+              onClick={() => onThemeChange('dark')}
               style={{
                 flexGrow: 1,
                 display: 'flex',
@@ -470,7 +457,7 @@ export default function SettingsPanel({
               <span>Dark</span>
             </button>
             <button
-              onClick={() => toggleTheme('light')}
+              onClick={() => onThemeChange('light')}
               style={{
                 flexGrow: 1,
                 display: 'flex',
@@ -488,6 +475,26 @@ export default function SettingsPanel({
             >
               <Sun size={14} style={{ marginRight: '6px' }} />
               <span>Light</span>
+            </button>
+            <button
+              onClick={() => onThemeChange('system')}
+              style={{
+                flexGrow: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '10px 20px',
+                borderRadius: '6px',
+                backgroundColor: theme === 'system' ? 'var(--bg-card)' : 'transparent',
+                color: theme === 'system' ? 'var(--osu-pink)' : 'var(--text-muted)',
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+                fontSize: '12px',
+                fontWeight: '600'
+              }}
+            >
+              <Monitor size={14} style={{ marginRight: '6px' }} />
+              <span>System</span>
             </button>
           </div>
         </div>

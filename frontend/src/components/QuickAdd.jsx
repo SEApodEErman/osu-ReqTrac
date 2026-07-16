@@ -7,7 +7,8 @@ export default function QuickAdd({
   onResolveDuplicate, 
   onCancelDuplicate,
   isOpen,
-  onToggle
+  onToggle,
+  defaultCategory = 'All'
 }) {
   const [inputVal, setInputVal] = useState('');
   const [isManual, setIsManual] = useState(false);
@@ -29,12 +30,13 @@ export default function QuickAdd({
   const [tags, setTags] = useState('');
   
   // Categories Checklist
-  const [categories, setCategories] = useState({
-    Hitsounds: true,
-    'Guest Difficulties': false,
-    Storyboards: false,
-    Others: false
-  });
+  const getDefaultCategories = () => {
+    const saved = localStorage.getItem('lastRequestCategories');
+    const defaults = saved ? JSON.parse(saved) : { Hitsounds: true, 'Guest Difficulties': false, Storyboards: false, Others: false };
+    if (defaultCategory !== 'All' && defaultCategory in defaults) defaults[defaultCategory] = true;
+    return defaults;
+  };
+  const [categories, setCategories] = useState(getDefaultCategories);
   const [otherText, setOtherText] = useState('');
 
   // Fetch beatmap info from osu! API
@@ -92,12 +94,8 @@ export default function QuickAdd({
     setPriority('Medium');
     setDeadline('');
     setTags('');
-    setCategories({
-      Hitsounds: true,
-      'Guest Difficulties': false,
-      Storyboards: false,
-      Others: false
-    });
+    localStorage.setItem('lastRequestCategories', JSON.stringify(categories));
+    setCategories(getDefaultCategories());
     setOtherText('');
     setIsManual(false);
   };
@@ -184,7 +182,7 @@ export default function QuickAdd({
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
               <Plus size={18} style={{ color: 'var(--osu-pink)' }} />
-              Quick Add Request
+              Add Request
             </h3>
             <button
               type="button"

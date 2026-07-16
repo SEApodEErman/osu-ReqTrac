@@ -1,4 +1,5 @@
 import React from 'react';
+import appIcon from '../assets/app-icon.svg';
 import { 
   LayoutDashboard, 
   ListTodo, 
@@ -16,6 +17,16 @@ export default function Sidebar({
   connectedAccount,
   onDisconnect
 }) {
+  const openConnectedProfile = async () => {
+    if (!connectedAccount?.id) return;
+    const profileUrl = `https://osu.ppy.sh/users/${connectedAccount.id}`;
+    if (window.electronAPI?.openExternal) {
+      await window.electronAPI.openExternal(profileUrl);
+    } else {
+      window.open(profileUrl, '_blank', 'noopener,noreferrer');
+    }
+  };
+
   const categories = [
     { id: 'All', name: 'All Requests', icon: ListTodo },
     { id: 'Hitsounds', name: 'Hitsounds', icon: Music },
@@ -34,22 +45,17 @@ export default function Sidebar({
         alignItems: 'center',
         gap: '10px'
       }}>
-        <div style={{ 
+        <img
+          src={appIcon}
+          alt=""
+          aria-hidden="true"
+          style={{
           width: '32px', 
           height: '32px', 
           borderRadius: '8px', 
-          backgroundColor: 'var(--osu-pink)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: 'white',
-          fontWeight: '800',
-          fontFamily: 'var(--font-display)',
-          fontSize: '18px',
-          boxShadow: '0 2px 8px rgba(255, 102, 170, 0.4)'
-        }}>
-          R
-        </div>
+          flexShrink: 0,
+        }}
+        />
         <div>
           <h2 style={{ fontSize: '15px', fontWeight: '700', fontFamily: 'var(--font-display)', lineHeight: '1.2' }}>
             osu!ReqTrac
@@ -172,7 +178,23 @@ export default function Sidebar({
             borderRadius: '8px',
             border: '1px solid var(--border)'
           }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              type="button"
+              onClick={openConnectedProfile}
+              disabled={!connectedAccount.id}
+              title={connectedAccount.id ? 'Open osu! profile' : 'No osu! user ID configured'}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: 0,
+                border: 0,
+                background: 'transparent',
+                color: 'inherit',
+                cursor: connectedAccount.id ? 'pointer' : 'default',
+                textAlign: 'left'
+              }}
+            >
               <img
                 src={connectedAccount.avatar || '/uploads/covers/default.jpg'} 
                 alt={connectedAccount.username} 
@@ -186,7 +208,7 @@ export default function Sidebar({
                 </div>
                 <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>osu! Profile</div>
               </div>
-            </div>
+            </button>
             <button 
               onClick={onDisconnect}
               title="Disconnect Account"

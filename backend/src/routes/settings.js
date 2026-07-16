@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db');
-const { getCredentials, fetchBeatmapset } = require('../osuApi');
+const { getCredentials, fetchBeatmapset, fetchUser } = require('../osuApi');
 
 // Get redirect URI from environment or use default
 function getRedirectUri() {
@@ -24,8 +24,9 @@ router.get('/', async (req, res, next) => {
     res.json({
       isConfigured,
       clientId: credentials.client_id ? '********' : null,
-      connectedAccount: usernameRow ? {
-        username: usernameRow.value,
+      userId: userIdRow ? userIdRow.value : null,
+      connectedAccount: userIdRow ? {
+        username: usernameRow ? usernameRow.value : `osu! user #${userIdRow.value}`,
         avatar: avatarRow ? avatarRow.value : null,
         id: userIdRow ? parseInt(userIdRow.value, 10) : null
       } : null,
@@ -40,7 +41,7 @@ router.get('/', async (req, res, next) => {
 // POST /api/settings - configure client credentials
 router.post('/', async (req, res, next) => {
   try {
-    const { client_id, client_secret } = req.body;
+    const { client_id, client_secret, user_id } = req.body;
     const db = await getDatabase();
 
     if (client_id !== undefined) {
@@ -48,6 +49,28 @@ router.post('/', async (req, res, next) => {
     }
     if (client_secret !== undefined) {
       await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'osu_client_secret', client_secret.toString().trim());
+    }
+    if (user_id !== undefined) {
+      const normalizedUserId = user_id.toString().trim();
+      if (normalizedUserId && !/^\d+$/.test(normalizedUserId)) {
+        return res.status(400).json({ error: 'osu! User ID must be numeric.' });
+      }
+      if (normalizedUserId) {
+        await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'connected_user_id', normalizedUserId);
+        try {
+          const userData = await fetchUser(normalizedUserId);
+          if (userData) {
+            await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'connected_username', userData.username);
+            await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'connected_avatar', userData.avatar_url || '');
+          }
+        } catch (error) {
+          // Keep the ID even when profile lookup is unavailable; it is enough
+          // for guest-difficulty matching on the next request refresh.
+          console.warn('Could not resolve connected osu! user:', error.message);
+        }
+      } else {
+        await db.run('DELETE FROM settings WHERE key IN (?, ?, ?)', 'connected_user_id', 'connected_username', 'connected_avatar');
+      }
     }
 
     res.json({ success: true, message: 'Settings saved successfully' });

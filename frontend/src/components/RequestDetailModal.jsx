@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   X, 
   ExternalLink, 
@@ -11,6 +11,7 @@ import {
   Trash2,
   Clock
 } from 'lucide-react';
+import { countryCodeToFlag } from '../utils/countryFlag';
 
 // osu! official star difficulty spectrum from osu.Game.Rulesets.Osu.Difficulty.OsuColour
 // https://github.com/ppy/osu/blob/master/osu.Game.Rulesets.Osu/Difficulty/OsuColour.cs
@@ -62,7 +63,7 @@ const STAR_TEXT_SPECTRUM = [
 
 function getStarDifficultyTextColor(stars) {
   if (stars < STAR_TEXT_CUTOFF) return 'rgba(0,0,0,0.75)';
-  if (stars < STAR_TEXT_GRADIENT_CUTOFF) return '#ff6600';
+  if (stars < STAR_TEXT_GRADIENT_CUTOFF) return '#f6f05c';
 
   for (let i = 0; i < STAR_TEXT_SPECTRUM.length - 1; i++) {
     const current = STAR_TEXT_SPECTRUM[i];
@@ -96,6 +97,12 @@ function interpolateColor(color1, color2, ratio) {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
+function dateInputValue(value) {
+  if (!value || value === 0 || value === '0') return '';
+  const text = String(value).split(/[ T]/)[0];
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
+}
+
 export default function RequestDetailModal({ 
   request, 
   onClose, 
@@ -111,8 +118,15 @@ export default function RequestDetailModal({
   // Local editable states
   const [requestStatus, setRequestStatus] = useState(request.request_status);
   const [priority, setPriority] = useState(request.priority);
-  const [deadline, setDeadline] = useState(request.deadline || '');
-  const [addedDate, setAddedDate] = useState(request.added_date ? request.added_date.split(' ')[0] : '');
+  const [deadline, setDeadline] = useState(dateInputValue(request.deadline));
+  const [addedDate, setAddedDate] = useState(dateInputValue(request.added_date));
+  const [artist, setArtist] = useState(request.artist || '');
+  const [title, setTitle] = useState(request.title || '');
+  const [creator, setCreator] = useState(request.creator || '');
+  const [difficultyName, setDifficultyName] = useState(request.difficulty_name || '');
+  const [requesterUsername, setRequesterUsername] = useState(request.requester_username || '');
+  const deadlineInputRef = useRef(null);
+  const addedDateInputRef = useRef(null);
   const [guestDifficultyTargetSR, setGuestDifficultyTargetSR] = useState(request.guest_difficulty_target_sr || '');
   const [guestDifficultyName, setGuestDifficultyName] = useState(request.guest_difficulty_name || '');
   const [isEditingDate, setIsEditingDate] = useState(false);
@@ -232,6 +246,13 @@ export default function RequestDetailModal({
       notes: notes || null,
       discord_link: discordLink || null,
       osu_profile_link: profileLink || null,
+      ...(request.is_osu_link ? {} : {
+        non_osu_artist: artist.trim(),
+        non_osu_title: title.trim(),
+        non_osu_creator: creator.trim(),
+        non_osu_difficulty: difficultyName.trim() || null,
+        requester_username: requesterUsername.trim() || 'Anonymous'
+      }),
       categories: catsPayload,
       tags
     };
@@ -424,12 +445,15 @@ export default function RequestDetailModal({
                   fontSize: '13px',
                   color: 'var(--text-muted)'
                 }}>
-                  This is a manually added request. Difficulty metadata is not synced with the osu! API.
-                  {request.difficulty_name && (
-                    <div style={{ marginTop: '8px', color: 'var(--text-main)', fontWeight: '600' }}>
-                      Requested Difficulty: {request.difficulty_name}
-                    </div>
-                  )}
+                  <div style={{ display: 'grid', gap: '10px' }}>
+                    <span>Manual request details</span>
+                    {[['Artist', artist, setArtist], ['Title', title, setTitle], ['Creator', creator, setCreator], ['Difficulty', difficultyName, setDifficultyName], ['Requester', requesterUsername, setRequesterUsername]].map(([label, value, setter]) => (
+                      <label key={label} style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
+                        {label}
+                        <input className="input-text" value={value} onChange={(e) => setter(e.target.value)} style={{ marginTop: '4px' }} />
+                      </label>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -614,8 +638,12 @@ export default function RequestDetailModal({
                   </div>
                   <div style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
                     {request.requester_country && (
-                      <span style={{ fontWeight: '600', textTransform: 'uppercase' }}>
-                        [{request.requester_country}]
+                      <span
+                        title={request.requester_country.toUpperCase()}
+                        aria-label={`Country: ${request.requester_country.toUpperCase()}`}
+                        className="country-flag"
+                      >
+                        {countryCodeToFlag(request.requester_country)}
                       </span>
                     )}
                     <span>{request.requester_is_creator ? 'Mapper (auto)' : (request.requester_id ? 'osu! ID Cached' : 'Manual Entry')}</span>
@@ -689,16 +717,18 @@ export default function RequestDetailModal({
               </label>
               {isEditingDeadline ? (
                 <input
+                  ref={deadlineInputRef}
                   type="date"
                   className="input-text"
                   value={deadline}
                   autoFocus
+                  onClick={(e) => e.currentTarget.showPicker?.()}
                   onChange={(e) => setDeadline(e.target.value)}
                   onBlur={() => setIsEditingDeadline(false)}
                 />
               ) : (
                 <div
-                  onClick={() => setIsEditingDeadline(true)}
+                  onClick={() => { setIsEditingDeadline(true); window.setTimeout(() => deadlineInputRef.current?.showPicker?.(), 0); }}
                   className="input-text"
                   style={{ cursor: 'pointer', color: deadline ? 'var(--text-main)' : 'var(--text-muted)', fontWeight: '600', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
                 >
@@ -715,20 +745,22 @@ export default function RequestDetailModal({
               </label>
               {isEditingDate ? (
                 <input
+                  ref={addedDateInputRef}
                   type="date"
                   className="input-text"
                   value={addedDate}
                   autoFocus
+                  onClick={(e) => e.currentTarget.showPicker?.()}
                   onChange={(e) => setAddedDate(e.target.value)}
                   onBlur={() => setIsEditingDate(false)}
                 />
               ) : (
                 <div
-                  onClick={() => setIsEditingDate(true)}
+                  onClick={() => { setIsEditingDate(true); window.setTimeout(() => addedDateInputRef.current?.showPicker?.(), 0); }}
                   className="input-text"
                   style={{ cursor: 'pointer', color: addedDate ? 'var(--text-main)' : 'var(--text-muted)', fontWeight: '600', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
                 >
-                  <span>{request.added_date ? new Date(request.added_date).toLocaleDateString() : 'No date set'}</span>
+                  <span>{addedDate ? new Date(addedDate).toLocaleDateString() : '—'}</span>
                   <Calendar size={14} style={{ opacity: 0.6 }} />
                 </div>
               )}
@@ -877,13 +909,23 @@ export default function RequestDetailModal({
               />
             </div>
 
-            {/* Save changes button */}
-            <button onClick={handleSave} className="btn-primary" style={{ marginTop: '10px', justifyContent: 'center' }}>
-              Save Changes
-            </button>
-
           </div>
 
+        </div>
+
+        {/* Full-width modal action footer */}
+        <div style={{
+          borderTop: '1px solid var(--border)',
+          padding: '16px 24px',
+          backgroundColor: 'var(--bg-card)'
+        }}>
+          <button
+            onClick={handleSave}
+            className="btn-primary"
+            style={{ width: '100%', justifyContent: 'center' }}
+          >
+            Save Changes
+          </button>
         </div>
 
         {/* BOTTOM SECTION: Activity History Log */}

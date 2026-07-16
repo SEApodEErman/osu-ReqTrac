@@ -1,8 +1,11 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, shell } = require('electron');
 const path = require('path');
 
 // Set a stable app name so userData resolves to a clean, consistent folder
 app.setName('osu!ReqTrac');
+// The default Electron menu is visually out of place for this desktop app.
+// Navigation and actions are presented in the renderer's app-style top bar.
+Menu.setApplicationMenu(null);
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -22,12 +25,31 @@ const { initAutoUpdater } = require('./updater');
 let mainWindow;
 let backendPort;
 
+ipcMain.handle('window:minimize', () => mainWindow?.minimize());
+ipcMain.handle('window:toggle-maximize', () => {
+  if (!mainWindow) return false;
+  if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize();
+  } else {
+    mainWindow.maximize();
+  }
+  return mainWindow.isMaximized();
+});
+ipcMain.handle('window:close', () => mainWindow?.close());
+ipcMain.handle('open-external', (_event, url) => {
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
+    throw new Error('Only HTTP(S) URLs can be opened externally.');
+  }
+  return shell.openExternal(url);
+});
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 1000,
     minHeight: 700,
+    frame: false,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -41,10 +63,27 @@ async function createWindow() {
     mainWindow.show();
   });
 
+  // Keep external sites in the user's default browser instead of opening an
+  // Electron child window, including links opened with target="_blank".
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) {
+      void shell.openExternal(url);
+      return { action: 'deny' };
+    }
+    return { action: 'allow' };
+  });
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (/^https?:\/\//i.test(url) && !/^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\//i.test(url)) {
+      event.preventDefault();
+      void shell.openExternal(url);
+    }
+  });
+
   if (isDev) {
     // Dev: Vite dev server (which proxies /api to the standalone backend on 3001)
     mainWindow.loadURL('http://localhost:3000');
-    mainWindow.webContents.openDevTools();
+    // mainWindow.webContents.openDevTools();
   } else {
     // Prod: the backend serves the built frontend on its own port,
     // so relative /api and /uploads URLs resolve correctly.

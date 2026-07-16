@@ -1,4 +1,5 @@
 import React from 'react';
+import { countryCodeToFlag } from '../utils/countryFlag';
 import { 
   FileText, 
   Play, 
@@ -438,8 +439,13 @@ export default function Dashboard({ statsData, requestsList, onOpenRequest, conn
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
                     <span style={{ fontSize: '13px', fontWeight: '600', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {r.country_code && (
-                        <span style={{ color: 'var(--text-muted)', fontWeight: '700', marginRight: '6px', textTransform: 'uppercase' }}>
-                          [{r.country_code}]
+                        <span
+                          title={r.country_code.toUpperCase()}
+                          aria-label={`Country: ${r.country_code.toUpperCase()}`}
+                          className="country-flag"
+                          style={{ marginRight: '6px' }}
+                        >
+                          {countryCodeToFlag(r.country_code)}
                         </span>
                       )}
                       {r.username}

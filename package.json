@@ -1,6 +1,6 @@
 {
   "name": "osu-reqtrac-root",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "description": "Root package runner for osu!ReqTrac",
   "author": "seapodeerman",
   "main": "electron/main.js",
@@ -13,7 +13,8 @@
     "dev:frontend": "cd frontend && npx vite",
     "dev:electron": "wait-on tcp:3000 tcp:3001 && cross-env NODE_ENV=development electron .",
     "dev": "concurrently -n \"backend,frontend,electron\" -c \"yellow,cyan,green\" \"npm run dev:backend\" \"npm run dev:frontend\" \"npm run dev:electron\"",
-    "build:frontend": "cd frontend && npx vite build",
+    "generate:icon": "node scripts/generate-icon.js",
+    "build:frontend": "npm run generate:icon && cd frontend && npx vite build",
     "build": "npm run build:frontend && electron-builder",
     "build:dir": "npm run build:frontend && electron-builder --dir",
     "release": "npm run build:frontend && electron-builder --publish always",
@@ -21,7 +22,6 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
     "electron-updater": "^6.3.9",
     "express": "^4.19.2",
     "sqlite": "^5.1.1",
@@ -32,6 +32,7 @@
     "cross-env": "^7.0.3",
     "electron": "^35.0.0",
     "electron-builder": "^25.0.0",
+    "sharp": "^0.35.3",
     "wait-on": "^8.0.1"
   },
   "build": {
@@ -68,6 +69,8 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "osu!ReqTrac",
       "artifactName": "${productName}-${version}-Setup.${ext}"
     },
     "mac": {
@@ -75,7 +78,7 @@
         "dmg",
         "zip"
       ],
-      "icon": "build/icon.png",
+      "icon": "build/icon.icns",
       "category": "public.app-category.utilities"
     },
     "linux": {

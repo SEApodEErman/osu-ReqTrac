@@ -3,6 +3,7 @@ const router = express.Router();
 const { getDatabase } = require('../db');
 const { refreshAndCacheBeatmapset } = require('./beatmaps');
 const { fetchBeatmap, fetchUser, downloadCover } = require('../osuApi');
+const { createApiJob, addApiJobWork, updateApiJob, finishApiJob } = require('../osuApi');
 
 // GET /api/migration/export - Export backup JSON
 router.get('/export', async (req, res, next) => {
@@ -166,13 +167,14 @@ router.post('/import-csv', async (req, res, next) => {
       return res.status(400).json({ error: 'csvText is required in request body' });
     }
 
-    // Split CSV by newline characters
+    // Accept either the legacy CSV format or a simple one-link-per-line list.
     const lines = csvText.split(/\r?\n/).filter(line => line.trim().length > 0);
-    if (lines.length < 2) {
-      return res.status(400).json({ error: 'CSV must contain at least a header row and one data row' });
+    if (lines.length === 0) {
+      return res.status(400).json({ error: 'Provide at least one beatmap link or a CSV data row.' });
     }
 
-    const headers = parseCSVLine(lines[0]);
+    const linkListMode = lines.every(line => /^https?:\/\/(?:www\.)?osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i.test(line.trim()));
+    const headers = linkListMode ? [] : parseCSVLine(lines[0]);
     
     // Map columns by header name (case-insensitive, ignores extra whitespace)
     const headerMap = {};
@@ -201,12 +203,12 @@ router.post('/import-csv', async (req, res, next) => {
 
     // Validate required columns
     const missingColumns = [];
-    if (colIndices.artist === -1) missingColumns.push('Artist');
-    if (colIndices.title === -1) missingColumns.push('Title');
-    if (colIndices.mapper === -1) missingColumns.push('Mapper');
-    if (colIndices.link === -1) missingColumns.push('Link');
-    if (colIndices.mapStatus === -1) missingColumns.push('Map Status');
-    if (colIndices.remarks === -1) missingColumns.push('Remarks');
+    if (!linkListMode && colIndices.artist === -1) missingColumns.push('Artist');
+    if (!linkListMode && colIndices.title === -1) missingColumns.push('Title');
+    if (!linkListMode && colIndices.mapper === -1) missingColumns.push('Mapper');
+    if (!linkListMode && colIndices.link === -1) missingColumns.push('Link');
+    if (!linkListMode && colIndices.mapStatus === -1) missingColumns.push('Map Status');
+    if (!linkListMode && colIndices.remarks === -1) missingColumns.push('Remarks');
 
     if (missingColumns.length > 0) {
       return res.status(400).json({ 
@@ -219,18 +221,20 @@ router.post('/import-csv', async (req, res, next) => {
     const db = await getDatabase();
     let importCount = 0;
     const errors = [];
+    const apiJobId = createApiJob(linkListMode ? 'Importing beatmap links' : 'Importing CSV metadata');
+    const prefetches = [];
 
-    for (let i = 1; i < lines.length; i++) {
+    for (let i = linkListMode ? 0 : 1; i < lines.length; i++) {
       const row = parseCSVLine(lines[i]);
       if (row.length === 0 || (row.length === 1 && !row[0])) continue;
 
       // Extract values using column indices
-      const rawArtist = row[colIndices.artist] || '';
-      const rawTitle = row[colIndices.title] || '';
-      const rawMapper = row[colIndices.mapper] || '';
-      const rawLink = row[colIndices.link] || '';
-      const rawMapStatus = row[colIndices.mapStatus] || '';
-      const rawRemarks = row[colIndices.remarks] || '';
+      const rawArtist = linkListMode ? '' : (row[colIndices.artist] || '');
+      const rawTitle = linkListMode ? '' : (row[colIndices.title] || '');
+      const rawMapper = linkListMode ? '' : (row[colIndices.mapper] || '');
+      const rawLink = linkListMode ? lines[i] : (row[colIndices.link] || '');
+      const rawMapStatus = linkListMode ? '' : (row[colIndices.mapStatus] || '');
+      const rawRemarks = linkListMode ? '' : (row[colIndices.remarks] || '');
 
       // Trim whitespace
       const artist = rawArtist.trim();
@@ -241,7 +245,7 @@ router.post('/import-csv', async (req, res, next) => {
       const remarks = rawRemarks.trim();
 
       // Validate required fields
-      if (!artist || !title || !mapper || !link) {
+      if ((!linkListMode && (!artist || !title || !mapper)) || !link) {
         errors.push(`Row ${i + 1}: Missing required fields (Artist, Title, Mapper, Link)`);
         continue;
       }
@@ -260,6 +264,8 @@ router.post('/import-csv', async (req, res, next) => {
         if (mapMatch) {
           // It's a beatmap link, fetch to get beatmapset_id
           isOsuLink = true;
+          addApiJobWork(apiJobId, 1);
+          updateApiJob(apiJobId, 1);
           try {
             const mapData = await fetchBeatmap(parseInt(mapMatch[1], 10));
             if (mapData && mapData.beatmapset_id) {
@@ -291,9 +297,13 @@ router.post('/import-csv', async (req, res, next) => {
         }
 
         // Pre-fetch beatmap metadata in the background (does not block the HTTP response)
-        refreshAndCacheBeatmapset(db, beatmapsetId).catch(err => {
-          console.error(`Failed to pre-fetch metadata for ID ${beatmapsetId} during CSV import:`, err.message);
-        });
+        addApiJobWork(apiJobId, 2);
+        prefetches.push(
+          refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId)
+            .catch(err => {
+              console.error(`Failed to pre-fetch metadata for ID ${beatmapsetId} during import:`, err.message);
+            })
+        );
       }
 
       // Insert request
@@ -301,7 +311,7 @@ router.post('/import-csv', async (req, res, next) => {
         INSERT INTO requests (
           beatmapset_id, is_osu_link, non_osu_artist, non_osu_title, non_osu_creator, non_osu_difficulty,
           requester_username, request_status, priority, deadline, notes, added_date, completed_date
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
       `, [
         beatmapsetId,
         isOsuLink ? 1 : 0,
@@ -329,14 +339,16 @@ router.post('/import-csv', async (req, res, next) => {
       await db.run(`
         INSERT INTO history (request_id, action_type, details)
         VALUES (?, ?, ?)
-      `, [requestId, 'created', 'Request imported via CSV']);
+      `, [requestId, 'created', linkListMode ? 'Request imported from beatmap link list' : 'Request imported via CSV']);
 
       importCount++;
     }
 
+    Promise.allSettled(prefetches).then(() => finishApiJob(apiJobId));
+
     res.json({
       success: true,
-      message: `CSV imported successfully. Imported ${importCount} requests.${errors.length > 0 ? ` ${errors.length} rows had errors.` : ''}`,
+      message: `${linkListMode ? 'Beatmap links' : 'CSV'} imported successfully. Imported ${importCount} requests.${errors.length > 0 ? ` ${errors.length} rows had errors.` : ''}`,
       errors: errors.length > 0 ? errors : undefined
     });
   } catch (error) {

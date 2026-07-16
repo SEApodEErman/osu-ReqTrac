@@ -64,6 +64,7 @@
   /* Fonts */
   --font-main: 'Inter', sans-serif;
   --font-display: 'Outfit', sans-serif;
+  --font-emoji: 'Segoe UI Emoji', 'Apple Color Emoji', 'Noto Color Emoji', 'Twemoji Mozilla', sans-serif;
 }
 
 * {
@@ -81,6 +82,15 @@ html, body {
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
   overflow: hidden; /* Desktop-first app layout */
+}
+
+/* Keep regional-indicator flags out of the app's regular text font. */
+.country-flag {
+  font-family: var(--font-emoji);
+  font-variant-emoji: emoji;
+  font-size: 1.05em;
+  line-height: 1;
+  display: inline-block;
 }
 
 /* Custom Scrollbars */
@@ -121,10 +131,18 @@ button, input, select, textarea {
 }
 
 /* Sidebar & Navigation */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+}
+
 .app-container {
   display: flex;
   width: 100vw;
-  height: 100vh;
+  height: calc(100vh - 38px);
+  min-height: 0;
 }
 
 .sidebar {
@@ -143,8 +161,114 @@ button, input, select, textarea {
   flex-direction: column;
   height: 100%;
   background-color: var(--bg-app);
+  overflow: hidden;
+}
+
+.main-view {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
+
+.app-topbar {
+  height: 38px;
+  padding: 0;
+  background: #1e1e1e;
+  color: #c8c8c8;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+.app-topbar-drag-region { display: flex; align-items: center; height: 100%; min-width: 0; flex: 1; }
+.no-drag { -webkit-app-region: no-drag; }
+.app-window-controls button {
+  border: 0;
+  color: #b8b8b8;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.app-topbar-title { margin-left: 16px; gap: 7px; }
+.app-window-controls { display: flex; align-self: stretch; }
+.app-window-controls button { width: 46px; height: 38px; }
+.app-window-controls button:hover { background: #343434; color: #fff; }
+.app-window-controls .app-window-close:hover { background: #c42b3c; color: #fff; }
+
+.app-topbar-title,
+.app-topbar-status {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.app-topbar-title { gap: 8px; }
+.app-topbar-status {
+  gap: 6px;
+  color: #9b9b9b;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.app-topbar-brand {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--osu-pink);
+  color: white;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 13px;
+}
+.app-topbar-name {
+  color: #e7e7e7;
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+}
+.app-topbar-section {
+  color: #b0b0b0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-topbar-chevron { color: var(--text-muted); }
+
+.osu-api-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1200;
+  width: min(380px, calc(100vw - 40px));
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 15px;
+  color: var(--text-main);
+  background: var(--bg-card);
+  border: 1px solid var(--osu-pink);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  animation: fadeIn 0.2s ease-out;
+}
+.osu-api-toast-error { border-color: var(--priority-high); }
+.osu-api-toast-icon { color: var(--osu-pink); padding-top: 1px; }
+.osu-api-toast-error .osu-api-toast-icon { color: var(--priority-high); }
+.osu-api-toast-content { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.osu-api-toast-content strong { font-size: 12px; }
+.osu-api-toast-content span,
+.osu-api-toast-content small { color: var(--text-muted); font-size: 11px; line-height: 1.35; }
+.osu-api-toast-clock { color: var(--text-muted); margin-left: auto; flex-shrink: 0; }
 
 /* Generic Layout Utilities */
 .dashboard-grid {
@@ -224,6 +348,13 @@ button, input, select, textarea {
 .input-text:focus {
   border-color: var(--osu-pink);
   box-shadow: 0 0 0 2px var(--osu-pink-transparent);
+}
+
+input[type="date"] {
+  color-scheme: dark;
+}
+:root[data-theme="light"] input[type="date"] {
+  color-scheme: light;
 }
 
 select.input-text {

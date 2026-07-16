@@ -1,4 +1,3 @@
-require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -39,6 +38,7 @@ const { router: beatmapsRouter } = require('./routes/beatmaps');
 const statsRouter = require('./routes/stats');
 const migrationRouter = require('./routes/migration');
 const settingsRouter = require('./routes/settings');
+const osuRouter = require('./routes/osu');
 
 // Mount routes
 app.use('/api/requests', requestsRouter);
@@ -46,6 +46,7 @@ app.use('/api/beatmaps', beatmapsRouter);
 app.use('/api/stats', statsRouter);
 app.use('/api/migration', migrationRouter);
 app.use('/api/settings', settingsRouter);
+app.use('/api/osu', osuRouter);
 
 // Basic health check
 app.get('/api/health', (req, res) => {
@@ -107,14 +108,6 @@ function fsWriteFileSync(p, c) {
 async function startServer() {
   await getDatabase();
   console.log('Database initialized successfully.');
-
-  // Verify osu! OAuth credentials exist in environment variables
-  const oauthClientId = process.env.OSU_CLIENT_ID;
-  const oauthClientSecret = process.env.OSU_CLIENT_SECRET;
-  if (!oauthClientId || !oauthClientSecret) {
-    console.warn('\n[WARNING] osu! OAuth credentials are missing from environment variables (OSU_CLIENT_ID and/or OSU_CLIENT_SECRET).');
-    console.warn('To enable beatmap syncing and account connection, please configure them in your backend/.env file or through the Settings page in the web UI.\n');
-  }
 
   return new Promise((resolve, reject) => {
     const server = app.listen(PORT, '127.0.0.1', () => {

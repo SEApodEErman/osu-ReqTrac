@@ -6,18 +6,27 @@ import RequestsTable from './components/RequestsTable';
 import RequestDetailModal from './components/RequestDetailModal';
 import SettingsPanel from './components/SettingsPanel';
 import QuickAdd from './components/QuickAdd';
+import TopBar from './components/TopBar';
+import OsuApiToast from './components/OsuApiToast';
+
+function getResolvedTheme(preference) {
+  if (preference !== 'system') return preference;
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [theme, setTheme] = useState(() => {
     if (typeof window === 'undefined') return 'dark';
-    return localStorage.getItem('theme') || 'dark';
+    return localStorage.getItem('theme') || 'system';
   });
   const [requestsList, setRequestsList] = useState([]);
   const [statsData, setStatsData] = useState({});
   const [settingsData, setSettingsData] = useState({});
   const [selectedRequest, setSelectedRequest] = useState(null);
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
+  const [showFirstLaunchSetup, setShowFirstLaunchSetup] = useState(false);
+  const [osuApiStatus, setOsuApiStatus] = useState(null);
 
   // QuickAdd duplicate check state
   const [duplicateError, setDuplicateError] = useState(null);
@@ -72,16 +81,33 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setSettingsData(data);
+        if (!data.isConfigured && !localStorage.getItem('credentialsSetupPromptShown')) {
+          localStorage.setItem('credentialsSetupPromptShown', '1');
+          setActiveTab('settings');
+          setShowFirstLaunchSetup(true);
+        }
       }
     } catch (e) {
       console.error('Error fetching settings:', e);
     }
   };
 
-  // Load the persisted theme and initial data once the client component mounts.
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark');
+    const applyTheme = () => {
+      document.documentElement.setAttribute('data-theme', getResolvedTheme(theme));
+    };
 
+    applyTheme();
+    if (theme !== 'system') return undefined;
+
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: light)');
+    const handleThemeChange = () => applyTheme();
+    mediaQuery.addEventListener?.('change', handleThemeChange);
+    return () => mediaQuery.removeEventListener?.('change', handleThemeChange);
+  }, [theme]);
+
+  // Load the initial data once the client component mounts.
+  useEffect(() => {
     void Promise.all([
       fetch('/api/requests').then(async (res) => {
         if (res.ok) setRequestsList(await res.json());
@@ -90,17 +116,43 @@ export default function App() {
         if (res.ok) setStatsData(await res.json());
       }),
       fetch('/api/settings').then(async (res) => {
-        if (res.ok) setSettingsData(await res.json());
+        if (res.ok) {
+          const data = await res.json();
+          setSettingsData(data);
+          if (!data.isConfigured && !localStorage.getItem('credentialsSetupPromptShown')) {
+            localStorage.setItem('credentialsSetupPromptShown', '1');
+            setActiveTab('settings');
+            setShowFirstLaunchSetup(true);
+          }
+        }
       }),
     ]).catch((error) => {
       console.error('Failed to load initial data:', error);
     });
   }, []);
 
+  useEffect(() => {
+    let isMounted = true;
+    const pollApiStatus = async () => {
+      try {
+        const res = await fetch('/api/osu/status');
+        if (res.ok && isMounted) setOsuApiStatus(await res.json());
+      } catch (error) {
+        console.error('Failed to load osu! API status:', error);
+      }
+    };
+
+    void pollApiStatus();
+    const intervalId = window.setInterval(pollApiStatus, 1000);
+    return () => {
+      isMounted = false;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
   const toggleTheme = (newTheme) => {
     setTheme(newTheme);
     localStorage.setItem('theme', newTheme);
-    document.documentElement.setAttribute('data-theme', newTheme);
   };
 
   // ADD Request
@@ -332,6 +384,10 @@ export default function App() {
       return (
         <SettingsPanel
           settingsData={settingsData}
+          theme={theme}
+          onThemeChange={toggleTheme}
+          showFirstLaunchSetup={showFirstLaunchSetup}
+          onDismissFirstLaunchSetup={() => setShowFirstLaunchSetup(false)}
           onSaveCredentials={handleSaveCredentials}
           onDisconnect={handleDisconnect}
           onImportCsv={handleImportCsv}
@@ -345,7 +401,7 @@ export default function App() {
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', padding: '24px 0 0 0' }}>
 
-          {/* Quick Add - Collapsible */}
+          {/* Add - Collapsible */}
           <div style={{ padding: '0 24px' }}>
             {isQuickAddOpen ? (
               <QuickAdd
@@ -355,6 +411,7 @@ export default function App() {
                 onCancelDuplicate={() => setDuplicateError(null)}
                 isOpen={isQuickAddOpen}
                 onToggle={() => setIsQuickAddOpen(false)}
+                defaultCategory={activeCategory}
               />
             ) : (
               <button
@@ -363,7 +420,7 @@ export default function App() {
                 style={{ width: 'fit-content', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
               >
                 <Plus size={18} style={{ color: '#fff' }} />
-                <span style={{ fontWeight: '600', lineHeight: '1' }}>Quick Add Request</span>
+                <span style={{ fontWeight: '600', lineHeight: '1' }}>Add Request</span>
               </button>
             )}
           </div>
@@ -386,20 +443,25 @@ export default function App() {
   };
 
   return (
-    <div className="app-container">
+    <div className="app-shell">
+      <TopBar activeTab={activeTab} connectedAccount={settingsData.connectedAccount} />
+      <div className="app-container">
 
-      {/* LEFT SIDEBAR PANEL */}
-      <Sidebar
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        connectedAccount={settingsData.connectedAccount}
-        onDisconnect={handleDisconnect}
-      />
+        {/* LEFT SIDEBAR PANEL */}
+        <Sidebar
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          connectedAccount={settingsData.connectedAccount}
+          onDisconnect={handleDisconnect}
+        />
 
-      {/* RIGHT MAIN LAYOUT */}
-      <main className="main-content">
-        {renderMainView()}
-      </main>
+        {/* RIGHT MAIN LAYOUT */}
+        <main className="main-content">
+          <div className="main-view">
+            {renderMainView()}
+          </div>
+        </main>
+      </div>
 
       {/* REQUEST DETAIL MODAL (Overlay) */}
       {selectedRequest && (
@@ -411,6 +473,8 @@ export default function App() {
           connectedAccount={settingsData.connectedAccount}
         />
       )}
+
+      <OsuApiToast status={osuApiStatus} />
 
     </div>
   );

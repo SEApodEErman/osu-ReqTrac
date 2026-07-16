@@ -636,7 +636,7 @@ export default function RequestsTable({
 
                     {/* Added Date */}
                     <td style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
-                      {new Date(req.added_date).toLocaleDateString()}
+                      {req.added_date ? new Date(req.added_date).toLocaleDateString() : '—'}
                     </td>
 
                     {/* Actions dropdown/button */}

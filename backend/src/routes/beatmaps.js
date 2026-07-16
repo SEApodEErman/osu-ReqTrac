@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db');
-const { fetchBeatmapset, fetchUser, downloadCover } = require('../osuApi');
+const { fetchBeatmapset, fetchUser, downloadCover, updateApiJob } = require('../osuApi');
 
 // Fetch and cache a user profile (used for beatmap creators / requesters)
 async function cacheUser(db, userIdOrUsername) {
@@ -29,7 +29,8 @@ function isCacheExpired(lastUpdatedStr) {
 }
 
 // Function to fetch, download cover, and cache a beatmapset
-async function refreshAndCacheBeatmapset(db, beatmapsetId) {
+async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
+  if (apiJobId) updateApiJob(apiJobId, 1);
   const mapsetData = await fetchBeatmapset(beatmapsetId);
   if (!mapsetData) {
     throw new Error(`Beatmapset with ID ${beatmapsetId} not found on osu!`);
@@ -57,6 +58,7 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId) {
   });
 
   // Cache the creator's user profile (name + avatar) to avoid repeat API calls
+  if (apiJobId) updateApiJob(apiJobId, 1);
   await cacheUser(db, mapsetData.user_id);
 
   const cacheEntry = {
