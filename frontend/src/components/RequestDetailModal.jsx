@@ -114,6 +114,7 @@ export default function RequestDetailModal({
   const [historyLogs, setHistoryLogs] = useState([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isRefreshingMetadata, setIsRefreshingMetadata] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   
   // Local editable states
   const [requestStatus, setRequestStatus] = useState(request.request_status);
@@ -227,6 +228,8 @@ export default function RequestDetailModal({
   };
 
   const handleSave = async () => {
+    if (isSaving) return;
+
     const catsPayload = categories
       .filter(c => c.checked)
       .map(c => ({
@@ -257,10 +260,16 @@ export default function RequestDetailModal({
       tags
     };
 
-    await onUpdateRequest(request.id, payload);
-    // Reload history to show the save events
-    fetchHistory();
-    alert('Changes saved successfully!');
+    setIsSaving(true);
+    try {
+      const didSave = await onUpdateRequest(request.id, payload);
+      if (didSave) {
+        // Reload history to show the save events without blocking the editor.
+        void fetchHistory();
+      }
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   // Duration parser helper (seconds -> mm:ss)
@@ -923,9 +932,10 @@ export default function RequestDetailModal({
           <button
             onClick={handleSave}
             className="btn-primary"
+            disabled={isSaving}
             style={{ width: '100%', justifyContent: 'center' }}
           >
-            Save Changes
+            {isSaving ? 'Saving…' : 'Save Changes'}
           </button>
         </div>
 

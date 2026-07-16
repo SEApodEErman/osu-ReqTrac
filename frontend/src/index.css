@@ -263,8 +263,11 @@ button, input, select, textarea {
   animation: fadeIn 0.2s ease-out;
 }
 .osu-api-toast-error { border-color: var(--priority-high); }
+.osu-api-toast-success { border-color: var(--req-completed); }
+.osu-api-toast-info { border-color: var(--osu-pink); }
 .osu-api-toast-icon { color: var(--osu-pink); padding-top: 1px; }
 .osu-api-toast-error .osu-api-toast-icon { color: var(--priority-high); }
+.osu-api-toast-success .osu-api-toast-icon { color: var(--req-completed); }
 .osu-api-toast-content { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .osu-api-toast-content strong { font-size: 12px; }
 .osu-api-toast-content span,
@@ -430,6 +433,10 @@ select.input-text {
 }
 .btn-primary:hover {
   background-color: var(--osu-pink-hover);
+}
+.btn-primary:disabled {
+  opacity: 0.65;
+  cursor: wait;
 }
 
 .btn-secondary {

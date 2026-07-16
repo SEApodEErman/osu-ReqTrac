@@ -24,6 +24,14 @@ function credentials() {
   return getGoogleConfig();
 }
 
+function clientCredentialFields() {
+  const { clientId, clientSecret } = credentials();
+  return {
+    client_id: clientId,
+    ...(clientSecret ? { client_secret: clientSecret } : {})
+  };
+}
+
 function redirectUri(req) {
   return `http://${req.get('host')}/api/google/callback`;
 }
@@ -70,19 +78,50 @@ async function saveToken(db, key, value) {
   await save(db, key, protectToken(value));
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function diagnosticPage(title, message, details) {
+  const detailText = JSON.stringify(details, null, 2);
+  return `<!doctype html>
+    <html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head>
+    <body style="font-family: sans-serif; padding: 2rem; max-width: 60rem">
+      <h2>${escapeHtml(title)}</h2>
+      <p>${escapeHtml(message)}</p>
+      <p>Diagnostic details (safe to share; do not share this page URL):</p>
+      <pre style="white-space: pre-wrap; background: #f4f4f4; padding: 1rem">${escapeHtml(detailText)}</pre>
+    </body></html>`;
+}
+
 async function googleFetch(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
   let data;
   try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text }; }
-  if (!response.ok) throw new Error(data?.error?.message || data?.error_description || data?.error || `Google API error (${response.status})`);
+  if (!response.ok) {
+    const nestedError = data?.error && typeof data.error === 'object' ? data.error : {};
+    const googleError = {
+      status: response.status,
+      code: typeof data?.error === 'string' ? data.error : (nestedError.code || ''),
+      description: data?.error_description || nestedError.message || '',
+      uri: data?.error_uri || nestedError.error_uri || ''
+    };
+    const message = googleError.description || googleError.code || `Google API error (${response.status})`;
+    const error = new Error(message);
+    error.googleError = googleError;
+    throw error;
+  }
   return data;
 }
 
 async function tokenFromCode(req, code, verifier) {
-  const { clientId, clientSecret } = credentials();
-  const body = { code, client_id: clientId, redirect_uri: redirectUri(req), grant_type: 'authorization_code', code_verifier: verifier };
-  if (clientSecret) body.client_secret = clientSecret;
+  const body = { ...clientCredentialFields(), code, redirect_uri: redirectUri(req), grant_type: 'authorization_code', code_verifier: verifier };
   return googleFetch(TOKEN_URL, {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(body)
@@ -92,10 +131,8 @@ async function tokenFromCode(req, code, verifier) {
 async function accessToken(db, stored) {
   if (stored.google_access_token) return stored.google_access_token;
   if (!stored.google_refresh_token) throw new Error('Google account is not connected.');
-  const { clientId, clientSecret } = credentials();
   const refreshToken = unprotectToken(stored.google_refresh_token);
-  const body = { client_id: clientId, refresh_token: refreshToken, grant_type: 'refresh_token' };
-  if (clientSecret) body.client_secret = clientSecret;
+  const body = { ...clientCredentialFields(), refresh_token: refreshToken, grant_type: 'refresh_token' };
   const result = await googleFetch(TOKEN_URL, {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(body)
@@ -362,7 +399,21 @@ router.get('/callback', async (req, res) => {
   const pending = pendingStates.get(req.query.state);
   pendingStates.delete(req.query.state);
   if (!pending || pending.expiresAt < Date.now()) return res.status(400).send('Google authorization expired. Return to ReqTrac and try again.');
-  if (req.query.error) return res.status(400).send(`Google authorization failed: ${req.query.error}`);
+  if (req.query.error) {
+    const config = credentials();
+    return res.status(400).type('html').send(diagnosticPage(
+      'Google authorization failed',
+      req.query.error_description || req.query.error,
+      {
+        phase: 'authorization',
+        error: req.query.error,
+        error_description: req.query.error_description || '',
+        error_uri: req.query.error_uri || '',
+        clientIdPresent: Boolean(config.clientId),
+        clientSecretPresent: Boolean(config.clientSecret)
+      }
+    ));
+  }
   try {
     const tokenData = await tokenFromCode(req, req.query.code, pending.verifier);
     const db = await getDatabase();
@@ -377,7 +428,19 @@ router.get('/callback', async (req, res) => {
         <a href="osureqtrac://oauth-complete">Return to osu!ReqTrac</a>
         <script>window.location.replace('osureqtrac://oauth-complete');</script>
       </body></html>`);
-  } catch (error) { res.status(500).send(`Google authorization failed: ${error.message}`); }
+  } catch (error) {
+    const config = credentials();
+    res.status(500).type('html').send(diagnosticPage(
+      'Google authorization failed',
+      error.message,
+      {
+        phase: 'token_exchange',
+        ...(error.googleError || { message: error.message }),
+        clientIdPresent: Boolean(config.clientId),
+        clientSecretPresent: Boolean(config.clientSecret)
+      }
+    ));
+  }
 });
 
 router.post('/sync', async (req, res, next) => {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Plus } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
@@ -14,6 +14,15 @@ function getResolvedTheme(preference) {
   return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 }
 
+const API_REQUEST_TIMEOUT_MS = 30000;
+
+function fetchWithTimeout(input, init = {}, timeoutMs = API_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(input, { ...init, signal: controller.signal })
+    .finally(() => window.clearTimeout(timeoutId));
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [theme, setTheme] = useState(() => {
@@ -27,9 +36,24 @@ export default function App() {
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
   const [showFirstLaunchSetup, setShowFirstLaunchSetup] = useState(false);
   const [osuApiStatus, setOsuApiStatus] = useState(null);
+  const [toastNotice, setToastNotice] = useState(null);
+  const toastTimerRef = useRef(null);
 
   // QuickAdd duplicate check state
   const [duplicateError, setDuplicateError] = useState(null);
+
+  const showToast = (message, type = 'info') => {
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    setToastNotice({ message, type });
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastNotice(null);
+      toastTimerRef.current = null;
+    }, 6000);
+  };
+
+  useEffect(() => () => {
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+  }, []);
 
   const fetchData = async () => {
     try {
@@ -45,7 +69,7 @@ export default function App() {
 
   const fetchRequests = async () => {
     try {
-      const res = await fetch('/api/requests');
+      const res = await fetchWithTimeout('/api/requests');
       if (res.ok) {
         const data = await res.json();
         setRequestsList(data);
@@ -65,7 +89,7 @@ export default function App() {
 
   const fetchStats = async () => {
     try {
-      const res = await fetch('/api/stats');
+      const res = await fetchWithTimeout('/api/stats');
       if (res.ok) {
         const data = await res.json();
         setStatsData(data);
@@ -217,7 +241,7 @@ export default function App() {
   // UPDATE Request
   const handleUpdateRequest = async (id, payload) => {
     try {
-      const res = await fetch(`/api/requests/${id}`, {
+      const res = await fetchWithTimeout(`/api/requests/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -225,13 +249,26 @@ export default function App() {
 
       if (res.ok) {
         await Promise.all([fetchRequests(), fetchStats()]);
+        showToast('Request updated successfully.', 'success');
+        return true;
       } else {
-        const errData = await res.json();
-        alert(`Failed to update request: ${errData.error}`);
+        let message = `Request update failed (${res.status}).`;
+        try {
+          const errData = await res.json();
+          if (errData.error) message = `Request update failed: ${errData.error}`;
+        } catch {
+          // Keep the status-based message when the server did not return JSON.
+        }
+        showToast(message, 'error');
+        return false;
       }
     } catch (e) {
       console.error(e);
-      alert('Network Error.');
+      const message = e.name === 'AbortError'
+        ? 'Request update timed out. Check the local server and osu! API connection.'
+        : 'Request update could not reach the local server.';
+      showToast(message, 'error');
+      return false;
     }
   };
 
@@ -495,7 +532,7 @@ export default function App() {
         />
       )}
 
-      <OsuApiToast status={osuApiStatus} />
+      <OsuApiToast status={osuApiStatus} notification={toastNotice} />
 
     </div>
   );
