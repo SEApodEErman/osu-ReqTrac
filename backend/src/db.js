@@ -141,12 +141,12 @@ async function getDatabase() {
   return dbInstance;
 }
 
-// Migration to update difficulty creators/owners for old cache entries
+// Migration to update difficulty creator data for old cache entries
 async function migrateExistingDifficulties(db) {
   try {
-    const expiredMaps = await db.all("SELECT beatmapset_id FROM beatmap_cache WHERE difficulties_json NOT LIKE '%creator_name%'");
+    const expiredMaps = await db.all("SELECT beatmapset_id FROM beatmap_cache WHERE difficulties_json NOT LIKE '%creator_names%'");
     if (expiredMaps.length > 0) {
-      console.log(`[db] Found ${expiredMaps.length} beatmapsets in cache needing difficulty owner updates. Migrating...`);
+      console.log(`[db] Found ${expiredMaps.length} beatmapsets in cache needing difficulty creator updates. Migrating...`);
       const { refreshAndCacheBeatmapset } = require('./routes/beatmaps');
       for (const row of expiredMaps) {
         try {
@@ -158,7 +158,7 @@ async function migrateExistingDifficulties(db) {
           console.error(`[db] Failed to migrate beatmapset ${row.beatmapset_id}:`, err.message);
         }
       }
-      console.log('[db] Difficulty owner migration finished.');
+      console.log('[db] Difficulty creator migration finished.');
     }
   } catch (error) {
     console.error('[db] Error in migrateExistingDifficulties:', error.message);

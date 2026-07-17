@@ -104,6 +104,15 @@ function dateInputValue(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '';
 }
 
+function getDifficultyCreatorNames(difficulty, fallback = '') {
+  if (Array.isArray(difficulty.creator_names) && difficulty.creator_names.length > 0) {
+    return difficulty.creator_names.filter(Boolean);
+  }
+
+  if (difficulty.creator_name) return [difficulty.creator_name];
+  return fallback ? [fallback] : [];
+}
+
 export default function RequestDetailModal({ 
   request, 
   onClose, 
@@ -408,17 +417,19 @@ export default function RequestDetailModal({
                     border: '1px solid var(--border)'
                   }}>
                     {request.difficulties && request.difficulties.length > 0 ? (
-                      request.difficulties.map((diff, index) => (
-                        <div 
-                          key={index}
-                          style={{
-                            padding: '6px 8px',
-                            backgroundColor: 'var(--bg-card)',
-                            border: '1px solid var(--border)',
-                            borderRadius: '6px',
-                            fontSize: '12px'
-                          }}
-                        >
+                      request.difficulties.map((diff, index) => {
+                        const creatorLabel = getDifficultyCreatorNames(diff).join(', ');
+                        return (
+                          <div
+                            key={index}
+                            style={{
+                              padding: '6px 8px',
+                              backgroundColor: 'var(--bg-card)',
+                              border: '1px solid var(--border)',
+                              borderRadius: '6px',
+                              fontSize: '12px'
+                            }}
+                          >
                           <div style={{ 
                             fontWeight: '600', 
                             whiteSpace: 'nowrap', 
@@ -436,14 +447,27 @@ export default function RequestDetailModal({
                             <span>AR: {diff.ar} • OD: {diff.od}</span>
                             <span>CS: {diff.cs} • HP: {diff.hp}</span>
                             <span>Length: {formatLength(diff.drain)}</span>
-                            {diff.creator_name && (
-                              <span style={{ color: 'var(--text-muted)', marginTop: '2px', borderTop: '1px solid var(--border)', paddingTop: '2px' }}>
-                                Creator: {diff.creator_name}
+                            {creatorLabel && (
+                              <span
+                                title={`Creator: ${creatorLabel}`}
+                                style={{
+                                  display: 'block',
+                                  color: 'var(--text-muted)',
+                                  marginTop: '2px',
+                                  borderTop: '1px solid var(--border)',
+                                  paddingTop: '2px',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                Creator: {creatorLabel}
                               </span>
                             )}
                           </div>
-                        </div>
-                      ))
+                          </div>
+                        );
+                      })
                     ) : (
                       <span style={{ fontSize: '12px', color: 'var(--text-muted)', gridColumn: '1 / -1' }}>
                         No difficulty details available.
@@ -482,6 +506,7 @@ export default function RequestDetailModal({
                     // Show the detected difficulty belonging to the connected user
                     (() => {
                       const diff = request.user_difficulty;
+                      const creatorLabel = getDifficultyCreatorNames(diff, connectedAccount?.username || 'You').join(', ');
                       const color = getStarDifficultyColor(diff.stars);
                       const textColor = getStarDifficultyTextColor(diff.stars);
                       const [r, g, b] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
@@ -514,7 +539,19 @@ export default function RequestDetailModal({
                             <span>AR: {diff.ar} • OD: {diff.od}</span>
                             <span>CS: {diff.cs} • HP: {diff.hp}</span>
                             <span>Length: {formatLength(diff.drain)}</span>
-                            <span style={{ color: 'var(--osu-pink)', marginTop: '2px' }}>Creator: {diff.creator_name || connectedAccount?.username || 'You'}</span>
+                            <span
+                              title={`Creator: ${creatorLabel}`}
+                              style={{
+                                display: 'block',
+                                color: 'var(--osu-pink)',
+                                marginTop: '2px',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              Creator: {creatorLabel}
+                            </span>
                           </div>
                         </div>
                       );

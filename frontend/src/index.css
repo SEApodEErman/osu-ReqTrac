@@ -649,8 +649,210 @@ select.input-text {
 }
 
 .requests-table {
-  min-width: 1320px;
+  --request-text-lines: 1;
+  width: 100%;
+  min-width: 0;
   table-layout: fixed;
+}
+
+.requests-table-container {
+  container: request-table / inline-size;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.requests-table .request-col-select { width: 4%; }
+.requests-table .request-col-cover { width: 6%; }
+.requests-table .request-col-song { width: 24%; }
+.requests-table .request-col-beatmap-status { width: 10%; }
+.requests-table .request-col-request-status { width: 11%; }
+.requests-table .request-col-priority { width: 8%; }
+.requests-table .request-col-deadline { width: 9%; }
+.requests-table .request-col-notes { width: 11%; }
+.requests-table .request-col-added { width: 9%; }
+.requests-table .request-col-actions { width: 8%; }
+
+.requests-table-with-tags .request-col-song { width: 20%; }
+.requests-table-with-tags .request-col-tags { width: 9%; }
+.requests-table-with-tags .request-col-notes { width: 8%; }
+.requests-table-with-tags .request-col-added { width: 8%; }
+.requests-table-with-tags .request-col-actions { width: 7%; }
+
+.compact-table.requests-table th,
+.compact-table.requests-table td {
+  min-width: 0;
+  padding: 10px clamp(4px, 0.8cqw, 12px);
+  overflow: hidden;
+}
+
+.requests-table th {
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.request-cover {
+  display: block;
+  width: min(56px, 100%);
+  height: auto;
+  aspect-ratio: 7 / 4;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.request-song-cell,
+.request-song-content,
+.request-title-line,
+.request-title {
+  min-width: 0;
+}
+
+.request-title-line {
+  display: flex;
+  align-items: flex-start;
+  gap: clamp(2px, 0.5cqw, 6px);
+  width: 100%;
+}
+
+.request-title,
+.request-notes {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--request-text-lines);
+}
+
+.request-title {
+  flex: 1 1 auto;
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.request-song-subtitle {
+  display: -webkit-box;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.request-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: calc(var(--request-text-lines) * 19px);
+  overflow: hidden;
+}
+
+.requests-table .badge {
+  max-width: 100%;
+  padding-inline: clamp(3px, 0.7cqw, 10px);
+  font-size: clamp(8px, 0.8cqw, 11px);
+  letter-spacing: 0;
+}
+
+.request-beatmap-badge {
+  justify-content: center;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.requests-table .request-table-select {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 0;
+}
+
+.requests-table .request-table-select .status-badge-inner {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 4px clamp(12px, 1.6cqw, 22px) 4px clamp(2px, 0.6cqw, 10px);
+  overflow: hidden;
+  font-size: inherit;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+}
+
+.request-select-chevron {
+  position: absolute;
+  top: 50%;
+  right: clamp(2px, 0.6cqw, 8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.request-deadline {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.request-deadline svg {
+  flex: 0 0 auto;
+}
+
+.requests-table .request-notes-cell,
+.requests-table .request-added-date {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.request-notes {
+  width: 100%;
+  line-height: 1.35;
+}
+
+.request-added-date {
+  overflow-wrap: anywhere;
+}
+
+.request-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+@container request-table (max-width: 1050px) {
+  .requests-table {
+    --request-text-lines: 2;
+  }
+
+  .requests-table .sortable-header-content {
+    align-items: flex-start;
+    gap: 2px;
+  }
+}
+
+@container request-table (max-width: 760px) {
+  .requests-table {
+    --request-text-lines: 3;
+  }
+
+  .compact-table.requests-table th,
+  .compact-table.requests-table td {
+    padding-block: 8px;
+  }
+
+  .requests-table .sortable-header-content > svg {
+    display: none;
+  }
 }
 
 .compact-table th {

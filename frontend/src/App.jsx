@@ -32,6 +32,7 @@ export default function App() {
     return localStorage.getItem('theme') || 'system';
   });
   const [requestsList, setRequestsList] = useState([]);
+  const [requestSort, setRequestSort] = useState({ sortBy: 'added_date', sortOrder: 'desc' });
   const [statsData, setStatsData] = useState({});
   const [settingsData, setSettingsData] = useState({});
   const [selectedRequest, setSelectedRequest] = useState(null);
@@ -563,6 +564,9 @@ export default function App() {
             onBulkUpdateCategory={handleBulkUpdateCategory}
             onBulkDelete={handleBulkDelete}
             activeCategory={activeCategory}
+            sortBy={requestSort.sortBy}
+            sortOrder={requestSort.sortOrder}
+            onSortChange={(sortBy, sortOrder) => setRequestSort({ sortBy, sortOrder })}
           />
         </div>
       );

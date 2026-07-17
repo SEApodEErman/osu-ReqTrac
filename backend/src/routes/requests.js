@@ -4,7 +4,7 @@ const { getDatabase } = require('../db');
 const { fetchBeatmap, fetchBeatmapset, fetchUser, downloadCover } = require('../osuApi');
 const { refreshAndCacheBeatmapset } = require('./beatmaps');
 const { createApiJob, updateApiJob, finishApiJob } = require('../osuApi');
-const { findUserDifficulty, parseOsuLink, parseOsuUserLink } = require('../utils/requestUtils');
+const { findUserDifficulty, isGuestDifficulty, parseOsuLink, parseOsuUserLink } = require('../utils/requestUtils');
 
 // Helper to update or cache a user profile
 async function fetchAndCacheUser(db, userIdOrUsername) {
@@ -100,10 +100,11 @@ router.get('/', async (req, res, next) => {
           numDifficulties = difficulties.length;
           highestStars = difficulties.reduce((max, d) => d.stars > max ? d.stars : max, 0);
 
-          // Compute guest difficulties: difficulties where creator_id != beatmapset creator_id
+          // A difficulty is a guest difficulty when any assigned creator is not
+          // the beatmapset creator.
           const beatmapsetCreatorId = reqRow.cache_creator_id;
           if (beatmapsetCreatorId) {
-            guestDifficulties = difficulties.filter(d => d.creator_id && d.creator_id !== beatmapsetCreatorId);
+            guestDifficulties = difficulties.filter(d => isGuestDifficulty(d, beatmapsetCreatorId));
             guestDifficultyCount = guestDifficulties.length;
             highestGuestStars = guestDifficulties.reduce((max, d) => d.stars > max ? d.stars : max, 0);
           }

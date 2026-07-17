@@ -41,7 +41,16 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
 
   // Extract difficulties
   const difficulties = mapsetData.beatmaps.map(b => {
-    const owner = b.owners && b.owners[0] ? b.owners[0] : null;
+    const owners = Array.isArray(b.owners)
+      ? b.owners.filter(owner => owner?.username)
+      : [];
+    const creatorNames = owners.length > 0
+      ? owners.map(owner => owner.username)
+      : (mapsetData.creator ? [mapsetData.creator] : []);
+    const creatorIds = owners
+      .map(owner => owner.id)
+      .filter(id => id !== undefined && id !== null);
+
     return {
       id: b.id,
       name: b.version,
@@ -52,8 +61,10 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
       ar: b.ar,
       od: b.accuracy,
       hp: b.drain,
-      creator_id: owner ? owner.id : b.user_id,
-      creator_name: owner ? owner.username : mapsetData.creator
+      creator_id: creatorIds[0] ?? b.user_id,
+      creator_ids: creatorIds.length > 0 ? creatorIds : (b.user_id ? [b.user_id] : []),
+      creator_name: creatorNames[0] || mapsetData.creator,
+      creator_names: creatorNames
     };
   });
 

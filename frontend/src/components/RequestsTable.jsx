@@ -74,12 +74,6 @@ function getOrderedValue(value, order) {
   return index === -1 ? order.length : index;
 }
 
-function truncateNote(note, maxLength = 18) {
-  if (!note) return '';
-  if (note.length <= maxLength) return note;
-  return `${note.slice(0, maxLength - 3).trimEnd()}...`;
-}
-
 function getStarDifficultyTextColor(stars) {
   if (stars < STAR_TEXT_CUTOFF) return 'rgba(0,0,0,0.75)';
   if (stars < STAR_TEXT_GRADIENT_CUTOFF) return '#f6f05c';
@@ -154,9 +148,9 @@ function StarRatingBadge({ stars }) {
   );
 }
 
-function SortableHeader({ label, onSort, style }) {
+function SortableHeader({ label, onSort }) {
   return (
-    <th onClick={onSort} className="sortable-header" style={{ cursor: 'pointer', ...style }}>
+    <th onClick={onSort} className="sortable-header" style={{ cursor: 'pointer' }}>
       <span className="sortable-header-content">
         <span>{label}</span>
         <ArrowUpDown size={12} />
@@ -174,7 +168,10 @@ export default function RequestsTable({
   onBulkUpdatePriority,
   onBulkUpdateCategory,
   onBulkDelete,
-  activeCategory
+  activeCategory,
+  sortBy,
+  sortOrder,
+  onSortChange,
 }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
@@ -182,16 +179,11 @@ export default function RequestsTable({
   const [tagFilter, setTagFilter] = useState('');
   const [selectedIds, setSelectedIds] = useState([]);
   
-  // Sorting state
-  const [sortBy, setSortBy] = useState('added_date');
-  const [sortOrder, setSortOrder] = useState('desc'); // 'asc' or 'desc'
-
   const toggleSort = (field) => {
     if (sortBy === field) {
-      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+      onSortChange(field, sortOrder === 'asc' ? 'desc' : 'asc');
     } else {
-      setSortBy(field);
-      setSortOrder(RANKED_SORT_FIELDS.has(field) ? 'asc' : 'desc');
+      onSortChange(field, RANKED_SORT_FIELDS.has(field) ? 'asc' : 'desc');
     }
   };
 
@@ -442,16 +434,29 @@ export default function RequestsTable({
       </div>
 
       {/* Main Table Container */}
-      <div className="table-container">
+      <div className="table-container requests-table-container">
         {filteredRequests.length === 0 ? (
           <div style={{ padding: '48px 24px', textAlign: 'center', color: 'var(--text-muted)' }}>
             No requests match your current filters.
           </div>
         ) : (
-          <table className="compact-table requests-table">
+          <table className={`compact-table requests-table${showTags ? ' requests-table-with-tags' : ''}`}>
+            <colgroup>
+              <col className="request-col-select" />
+              <col className="request-col-cover" />
+              <col className="request-col-song" />
+              {showTags && <col className="request-col-tags" />}
+              <col className="request-col-beatmap-status" />
+              <col className="request-col-request-status" />
+              <col className="request-col-priority" />
+              <col className="request-col-deadline" />
+              <col className="request-col-notes" />
+              <col className="request-col-added" />
+              <col className="request-col-actions" />
+            </colgroup>
             <thead>
               <tr>
-                <th style={{ width: '36px', textAlign: 'center' }}>
+                <th style={{ textAlign: 'center' }}>
                   <input 
                     type="checkbox" 
                     onChange={handleSelectAll} 
@@ -459,18 +464,18 @@ export default function RequestsTable({
                     style={{ cursor: 'pointer' }}
                   />
                 </th>
-                <th style={{ width: '70px' }}>Cover</th>
-                <SortableHeader label="Song / Artist" onSort={() => toggleSort('title')} style={{ width: '360px' }} />
+                <th>Cover</th>
+                <SortableHeader label="Song / Artist" onSort={() => toggleSort('title')} />
                 {showTags && (
-                  <th style={{ width: '130px' }}>Tags</th>
+                  <th>Tags</th>
                 )}
-                <SortableHeader label="Beatmap Status" onSort={() => toggleSort('ranked_status')} style={{ width: '140px' }} />
-                <SortableHeader label="Request Status" onSort={() => toggleSort('request_status')} style={{ width: '150px' }} />
-                <SortableHeader label="Priority" onSort={() => toggleSort('priority')} style={{ width: '100px' }} />
-                <SortableHeader label="Deadline" onSort={() => toggleSort('deadline')} style={{ width: '120px' }} />
-                <th style={{ width: '120px' }}>Notes</th>
-                <SortableHeader label="Added" onSort={() => toggleSort('added_date')} style={{ width: '90px' }} />
-                <th style={{ width: '60px', textAlign: 'right' }}>Actions</th>
+                <SortableHeader label="Beatmap Status" onSort={() => toggleSort('ranked_status')} />
+                <SortableHeader label="Request Status" onSort={() => toggleSort('request_status')} />
+                <SortableHeader label="Priority" onSort={() => toggleSort('priority')} />
+                <SortableHeader label="Deadline" onSort={() => toggleSort('deadline')} />
+                <th>Notes</th>
+                <SortableHeader label="Added" onSort={() => toggleSort('added_date')} />
+                <th style={{ textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -499,11 +504,11 @@ export default function RequestsTable({
                     {/* Cover Photo */}
                     <td>
                       <img
+                        className="request-cover"
                         src={req.local_cover_path} 
                         alt="cover" 
                         width={56}
                         height={32}
-                        style={{ width: '56px', height: '32px', borderRadius: '4px', objectFit: 'cover', display: 'block', border: '1px solid var(--border)' }}
                         onError={(e) => {
                           e.target.src = '/uploads/covers/default.jpg';
                         }}
@@ -511,18 +516,12 @@ export default function RequestsTable({
                     </td>
 
                     {/* Metadata (Title + Artist + Creator) */}
-                    <td>
-                      <div>
-                        <div style={{ fontWeight: '600', color: 'var(--text-main)', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, width: '100%', whiteSpace: 'nowrap' }}>
+                    <td className="request-song-cell">
+                      <div className="request-song-content">
+                        <div className="request-title-line">
                           <span
+                            className="request-title"
                             title={req.title}
-                            style={{
-                              minWidth: 0,
-                              flex: '0 1 auto',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
                           >
                             {req.title}
                           </span>
@@ -537,7 +536,7 @@ export default function RequestsTable({
                             }} title="High Priority" />
                           )}
                         </div>
-                        <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                        <div className="request-song-subtitle">
                           {req.artist} • <span style={{ color: 'var(--text-main)' }}>{req.creator}</span>
                         </div>
                       </div>
@@ -547,7 +546,7 @@ export default function RequestsTable({
                     {showTags && (
                       <td>
                         {req.tags && req.tags.length > 0 ? (
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                          <div className="request-tags">
                             {req.tags.slice(0, 5).map(tag => (
                               <span 
                                 key={tag}
@@ -582,14 +581,14 @@ export default function RequestsTable({
 
                     {/* Beatmap Status */}
                     <td>
-                      <span className={`badge badge-${(req.ranked_status || 'Manual').toLowerCase()}`}>
+                      <span className={`badge request-beatmap-badge badge-${(req.ranked_status || 'Manual').toLowerCase()}`}>
                         {req.ranked_status || 'Manual'}
                       </span>
                     </td>
 
 {/* Inline Request Status Selector */}
                     <td onClick={(e) => e.stopPropagation()}>
-                      <div className={`status-badge-select badge badge-${req.request_status.toLowerCase()}`} style={{ position: 'relative', display: 'inline-block' }}>
+                      <div className={`status-badge-select request-table-select badge badge-${req.request_status.toLowerCase()}`}>
                         <select
                           value={req.request_status}
                           onChange={(e) => onUpdateRequest(req.id, { request_status: e.target.value })}
@@ -603,8 +602,6 @@ export default function RequestsTable({
                             appearance: 'none',
                             textAlign: 'center',
                             textAlignLast: 'center',
-                            paddingRight: '22px',
-                            paddingLeft: '10px',
                             border: 'none',
                             backgroundImage: 'none',
                             backgroundColor: 'transparent',
@@ -616,16 +613,7 @@ export default function RequestsTable({
                           <option className="status-option-completed" value="Completed">Completed</option>
                           <option className="status-option-cancelled" value="Cancelled">Cancelled</option>
                         </select>
-                        <div style={{
-                          position: 'absolute',
-                          right: '8px',
-                          top: '50%',
-                          transform: 'translateY(-50%)',
-                          pointerEvents: 'none',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center'
-                        }}>
+                        <div className="request-select-chevron">
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                             <polyline points="6 9 12 15 18 9"/>
                           </svg>
@@ -635,7 +623,7 @@ export default function RequestsTable({
 
                     {/* Inline Priority Selector */}
                     <td onClick={(e) => e.stopPropagation()}>
-                      <div className={`status-badge-select badge badge-priority-${(req.priority || 'Low').toLowerCase()}`} style={{ position: 'relative', display: 'inline-block' }}>
+                      <div className={`status-badge-select request-table-select badge badge-priority-${(req.priority || 'Low').toLowerCase()}`}>
                         <select
                           value={req.priority || 'Low'}
                           onChange={(e) => onUpdateRequest(req.id, { priority: e.target.value })}
@@ -649,8 +637,6 @@ export default function RequestsTable({
                             appearance: 'none',
                             textAlign: 'center',
                             textAlignLast: 'center',
-                            paddingRight: '22px',
-                            paddingLeft: '10px',
                             border: 'none',
                             backgroundImage: 'none',
                             backgroundColor: 'transparent',
@@ -660,16 +646,7 @@ export default function RequestsTable({
                           <option value="Medium">Medium</option>
                           <option value="High">High</option>
                         </select>
-                        <div style={{ 
-                          position: 'absolute', 
-                          right: '8px', 
-                          top: '50%', 
-                          transform: 'translateY(-50%)',
-                          pointerEvents: 'none',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center'
-                        }}>
+                        <div className="request-select-chevron">
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                             <polyline points="6 9 12 15 18 9"/>
                           </svg>
@@ -680,7 +657,7 @@ export default function RequestsTable({
                     {/* Deadline */}
                     <td>
                       {deadlineInfo ? (
-                        <span style={{ color: deadlineInfo.color, fontWeight: '600', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <span className="request-deadline" style={{ color: deadlineInfo.color }}>
                           <Calendar size={12} />
                           {deadlineInfo.text}
                         </span>
@@ -691,34 +668,25 @@ export default function RequestsTable({
 
                     {/* Notes */}
                     <td
+                      className="request-notes-cell"
                       title={req.notes || undefined}
                       style={{
-                        width: '120px',
-                        maxWidth: '120px',
                         color: req.notes ? 'var(--text-main)' : 'var(--text-muted)',
-                        fontSize: '11px',
                       }}
                     >
-                      <span style={{
-                        display: 'block',
-                        width: '100%',
-                        maxWidth: '100%',
-                        overflow: 'hidden',
-                        whiteSpace: 'nowrap',
-                        textOverflow: "'...'",
-                      }}>
-                        {req.notes ? truncateNote(req.notes) : '—'}
+                      <span className="request-notes">
+                        {req.notes || '—'}
                       </span>
                     </td>
 
                     {/* Added Date */}
-                    <td style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
+                    <td className="request-added-date">
                       {req.added_date ? new Date(req.added_date).toLocaleDateString() : '—'}
                     </td>
 
                     {/* Actions dropdown/button */}
                     <td onClick={(e) => e.stopPropagation()} style={{ textAlign: 'right' }}>
-                      <div style={{ display: 'flex', gap: '4px', justifyContent: 'flex-end' }}>
+                      <div className="request-row-actions">
                         <button 
                           onClick={() => onOpenRequest(req)} 
                           title="Open Details"

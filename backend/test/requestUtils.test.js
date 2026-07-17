@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   findUserDifficulty,
+  isGuestDifficulty,
   parseOsuLink,
   parseOsuUserLink,
 } = require('../src/utils/requestUtils');
@@ -45,6 +46,26 @@ test('matches a guest difficulty by username or assigned name when an id is unav
 
   assert.deepEqual(findUserDifficulty(difficulties, { connectedUsername: 'guestmapper' }), difficulties[0]);
   assert.deepEqual(findUserDifficulty(difficulties, { assignedName: 'guest insane' }), difficulties[0]);
+});
+
+test('matches a difficulty by any assigned creator', () => {
+  const difficulty = {
+    name: 'Collab Insane',
+    creator_id: 4,
+    creator_ids: [4, 42],
+    creator_name: 'GuestMapper',
+    creator_names: ['GuestMapper', 'SecondMapper'],
+    stars: 5.7,
+  };
+
+  assert.equal(findUserDifficulty([difficulty], { connectedUserId: 42 }), difficulty);
+  assert.equal(findUserDifficulty([difficulty], { connectedUsername: 'secondmapper' }), difficulty);
+});
+
+test('counts a difficulty as guest-owned when a secondary creator is not the set creator', () => {
+  assert.equal(isGuestDifficulty({ creator_id: 1, creator_ids: [1, 42] }, 1), true);
+  assert.equal(isGuestDifficulty({ creator_id: 1, creator_ids: [1] }, 1), false);
+  assert.equal(isGuestDifficulty({ creator_id: 42 }, 1), true);
 });
 
 test('returns null when no guest difficulty belongs to the connected account', () => {
