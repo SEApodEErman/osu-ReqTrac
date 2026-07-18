@@ -1,7 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const { getDatabase } = require('../db');
-const { getCredentials, fetchBeatmapset, fetchUser } = require('../osuApi');
+const { getDatabase, coversDir } = require('../db');
+const { getCredentials, fetchBeatmapset, fetchUser, clearAccessToken } = require('../osuApi');
+const { acquireBackupLock } = require('../utils/backupLock');
+const { waitForBackgroundTasks } = require('../utils/backgroundTasks');
+const { pauseMetadataSyncWorker, initializeMetadataSyncWorker } = require('../services/beatmapMetadataSync');
+const { readCoverFiles, writeCoverFiles } = require('../utils/backup');
 
 // Get redirect URI from environment or use default
 function getRedirectUri() {
@@ -87,6 +91,74 @@ router.post('/disconnect', async (req, res, next) => {
     res.json({ success: true, message: 'Disconnected successfully' });
   } catch (error) {
     next(error);
+  }
+});
+
+// POST /api/settings/delete-all-data - permanently clear all local application data
+router.post('/delete-all-data', async (req, res, next) => {
+  let db;
+  let transactionStarted = false;
+  let resetCommitted = false;
+  let releaseBackupLock;
+  let originalCoverFiles;
+  let coverFilesModified = false;
+
+  try {
+    releaseBackupLock = await acquireBackupLock();
+    await waitForBackgroundTasks();
+    db = await getDatabase();
+    await pauseMetadataSyncWorker();
+    originalCoverFiles = await readCoverFiles(coversDir);
+
+    await db.exec('BEGIN TRANSACTION');
+    transactionStarted = true;
+
+    // Delete child tables before requests/tags while foreign-key enforcement is on.
+    for (const table of [
+      'request_categories',
+      'request_tags',
+      'history',
+      'requests',
+      'beatmap_cache',
+      'beatmap_metadata_sync',
+      'users_cache',
+      'tags',
+      'settings'
+    ]) {
+      await db.run(`DELETE FROM ${table}`);
+    }
+    await db.run('DELETE FROM sqlite_sequence');
+
+    // Keep the default cover asset, but remove all downloaded cover images.
+    coverFilesModified = true;
+    await writeCoverFiles(coversDir, []);
+
+    await db.exec('COMMIT');
+    transactionStarted = false;
+    resetCommitted = true;
+    clearAccessToken();
+    await db.run('PRAGMA foreign_keys = ON');
+    await initializeMetadataSyncWorker();
+
+    res.json({ success: true, message: 'All local application data was deleted.' });
+  } catch (error) {
+    if (db && transactionStarted) {
+      await db.exec('ROLLBACK').catch(() => {});
+    }
+    if (!resetCommitted && coverFilesModified && originalCoverFiles) {
+      await writeCoverFiles(coversDir, originalCoverFiles).catch(restoreError => {
+        console.error('[settings] Failed to restore cover files after data deletion error:', restoreError.message);
+      });
+    }
+    if (db) {
+      await db.run('PRAGMA foreign_keys = ON').catch(() => {});
+      await initializeMetadataSyncWorker().catch(recoveryError => {
+        console.error('[settings] Failed to restart metadata sync worker:', recoveryError.message);
+      });
+    }
+    next(error);
+  } finally {
+    releaseBackupLock?.();
   }
 });
 

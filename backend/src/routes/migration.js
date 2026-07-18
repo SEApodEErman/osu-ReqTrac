@@ -1,80 +1,164 @@
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 const { getDatabase } = require('../db');
-const { refreshAndCacheBeatmapset } = require('./beatmaps');
-const { fetchBeatmap } = require('../osuApi');
+const { fetchBeatmaps } = require('../osuApi');
 const { createApiJob, addApiJobWork, updateApiJob, finishApiJob } = require('../osuApi');
 const { parseOsuLink } = require('../utils/requestUtils');
+const { parseWorkbook, suggestMapping, validateMapping, normalizeRows, VALID_CATEGORIES } = require('../utils/spreadsheetImport');
+const { initializeMetadataSyncWorker, pauseMetadataSyncWorker, queueBeatmapMetadata } = require('../services/beatmapMetadataSync');
+const { coversDir } = require('../db');
+const { BACKUP_VERSION, readCoverFiles, validateBackup, writeCoverFiles } = require('../utils/backup');
+const { acquireBackupLock } = require('../utils/backupLock');
+const { waitForBackgroundTasks } = require('../utils/backgroundTasks');
 
 const IMPORT_CATEGORY_NAMES = new Set(['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others']);
+const spreadsheetUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+function readJson(value, fallback) {
+  try {
+    return value ? JSON.parse(value) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function spreadsheetBuffer(req) {
+  if (req.file) return req.file.buffer;
+
+  const sourceUrl = String(req.body.sourceUrl || '').trim();
+  let url;
+  try {
+    url = new URL(sourceUrl);
+  } catch {
+    throw new Error('Upload a CSV or Excel file, or provide a valid public Google Sheets URL.');
+  }
+  if (url.protocol !== 'https:' || url.hostname !== 'docs.google.com') {
+    throw new Error('Only public https://docs.google.com/spreadsheets URLs are supported.');
+  }
+  const match = url.pathname.match(/^\/spreadsheets\/d\/([^/]+)/);
+  if (!match) throw new Error('Provide a Google Sheets spreadsheet URL.');
+
+  const exportUrl = new URL(`https://docs.google.com/spreadsheets/d/${match[1]}/export`);
+  exportUrl.searchParams.set('format', 'xlsx');
+  const gid = url.searchParams.get('gid');
+  if (gid) exportUrl.searchParams.set('gid', gid);
+  const response = await fetch(exportUrl, { signal: AbortSignal.timeout(30000) });
+  if (!response.ok) throw new Error('Could not download the Google Sheet. Ensure that it is publicly accessible.');
+  return Buffer.from(await response.arrayBuffer());
+}
+
+function spreadsheetForName(worksheets, name) {
+  const worksheet = worksheets.find(sheet => sheet.name === name) || worksheets[0];
+  if (!worksheet.headers.some(header => header && !header.startsWith('Column '))) {
+    throw new Error('The selected worksheet must include a header row.');
+  }
+  return worksheet;
+}
+
+function importableCategories(values) {
+  const categories = Array.isArray(values) ? values.filter(value => VALID_CATEGORIES.has(value)) : [];
+  return categories.length > 0 ? [...new Set(categories)] : ['Hitsounds'];
+}
 
 // GET /api/migration/export - Export backup JSON
 router.get('/export', async (req, res, next) => {
+  let transactionStarted = false;
+  let releaseBackupLock;
   try {
+    releaseBackupLock = await acquireBackupLock();
+    await waitForBackgroundTasks();
     const db = await getDatabase();
-    
+    await pauseMetadataSyncWorker();
+    await db.exec('BEGIN');
+    transactionStarted = true;
     const requests = await db.all('SELECT * FROM requests');
     const request_categories = await db.all('SELECT * FROM request_categories');
     const beatmap_cache = await db.all('SELECT * FROM beatmap_cache');
     const users_cache = await db.all('SELECT * FROM users_cache');
+    const beatmap_metadata_sync = await db.all('SELECT * FROM beatmap_metadata_sync');
     const history = await db.all('SELECT * FROM history');
     const tags = await db.all('SELECT * FROM tags');
     const request_tags = await db.all('SELECT * FROM request_tags');
     const settings = await db.all('SELECT * FROM settings');
+    const sqlite_sequence = await db.all('SELECT name, seq FROM sqlite_sequence');
+    const cover_files = await readCoverFiles(coversDir);
 
     const backup = {
-      version: '1.0.0',
+      version: BACKUP_VERSION,
       exported_at: new Date().toISOString(),
       requests,
       request_categories,
       beatmap_cache,
       users_cache,
+      beatmap_metadata_sync,
       history,
       tags,
       request_tags,
-      settings
+      settings,
+      sqlite_sequence,
+      cover_files
     };
+
+    await db.exec('COMMIT');
+    transactionStarted = false;
+    await initializeMetadataSyncWorker();
 
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', 'attachment; filename=backup.json');
     res.json(backup);
   } catch (error) {
+    if (transactionStarted) {
+      const db = await getDatabase();
+      await db.exec('ROLLBACK');
+      await initializeMetadataSyncWorker();
+    }
     next(error);
+  } finally {
+    releaseBackupLock?.();
   }
 });
 
 // POST /api/migration/import-json - Restore backup JSON
 router.post('/import-json', async (req, res, next) => {
+  let db;
+  let transactionStarted = false;
+  let releaseBackupLock;
+  let originalCoverFiles;
+  let coverFilesModified = false;
   try {
-    const backup = req.body;
-    if (!backup || !backup.requests) {
-      return res.status(400).json({ error: 'Invalid backup JSON structure' });
+    let backup;
+    try {
+      backup = validateBackup(req.body);
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
     }
 
-    const db = await getDatabase();
+    releaseBackupLock = await acquireBackupLock();
+    await waitForBackgroundTasks();
+    db = await getDatabase();
+    await pauseMetadataSyncWorker();
 
-    // Disable foreign keys temporarily during restore to avoid order constraint errors
-    await db.run('PRAGMA foreign_keys = OFF');
+    await db.exec('BEGIN TRANSACTION');
+    transactionStarted = true;
 
     // Clear existing tables
-    await db.run('DELETE FROM requests');
     await db.run('DELETE FROM request_categories');
-    await db.run('DELETE FROM beatmap_cache');
-    await db.run('DELETE FROM users_cache');
-    await db.run('DELETE FROM history');
-    await db.run('DELETE FROM tags');
     await db.run('DELETE FROM request_tags');
-    // Keep credentials settings unless provided
-    if (backup.settings && backup.settings.length > 0) {
-      await db.run('DELETE FROM settings');
-    }
+    await db.run('DELETE FROM history');
+    await db.run('DELETE FROM requests');
+    await db.run('DELETE FROM beatmap_cache');
+    await db.run('DELETE FROM beatmap_metadata_sync');
+    await db.run('DELETE FROM users_cache');
+    await db.run('DELETE FROM tags');
+    await db.run('DELETE FROM settings');
 
     // Insert requests
     for (const r of backup.requests || []) {
       await db.run(`
-        INSERT INTO requests (id, beatmapset_id, is_osu_link, non_osu_artist, non_osu_title, non_osu_creator, non_osu_difficulty, requester_id, requester_username, request_status, priority, deadline, notes, input_link, discord_link, osu_profile_link, added_date, completed_date, last_updated)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [r.id, r.beatmapset_id, r.is_osu_link, r.non_osu_artist, r.non_osu_title, r.non_osu_creator, r.non_osu_difficulty, r.requester_id, r.requester_username, r.request_status, r.priority, r.deadline, r.notes, r.input_link || null, r.discord_link, r.osu_profile_link, r.added_date, r.completed_date, r.last_updated]);
+        INSERT INTO requests (id, beatmapset_id, is_osu_link, non_osu_artist, non_osu_title, non_osu_creator, non_osu_difficulty, requester_id, requester_username, request_status, priority, deadline, notes, input_link, discord_link, osu_profile_link, added_date, completed_date, last_updated, guest_difficulty_target_sr, guest_difficulty_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [r.id, r.beatmapset_id, r.is_osu_link, r.non_osu_artist, r.non_osu_title, r.non_osu_creator, r.non_osu_difficulty, r.requester_id, r.requester_username, r.request_status, r.priority, r.deadline, r.notes, r.input_link ?? null, r.discord_link, r.osu_profile_link, r.added_date, r.completed_date, r.last_updated, r.guest_difficulty_target_sr ?? null, r.guest_difficulty_name ?? null]);
     }
 
     // Insert request_categories
@@ -88,9 +172,16 @@ router.post('/import-json', async (req, res, next) => {
     // Insert beatmap_cache
     for (const bc of backup.beatmap_cache || []) {
       await db.run(`
-        INSERT INTO beatmap_cache (beatmapset_id, artist, title, creator, creator_id, cover_url, local_cover_path, ranked_status, difficulties_json, last_updated)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [bc.beatmapset_id, bc.artist, bc.title, bc.creator, bc.creator_id, bc.cover_url, bc.local_cover_path, bc.ranked_status, bc.difficulties_json, bc.last_updated]);
+        INSERT INTO beatmap_cache (beatmapset_id, artist, title, creator, creator_id, cover_url, local_cover_path, ranked_status, difficulties_json, ranked_date, osu_last_updated, submitted_date, metadata_complete, last_updated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [bc.beatmapset_id, bc.artist, bc.title, bc.creator, bc.creator_id, bc.cover_url, bc.local_cover_path, bc.ranked_status, bc.difficulties_json, bc.ranked_date ?? null, bc.osu_last_updated ?? null, bc.submitted_date ?? null, bc.metadata_complete ?? (backup.version === '1.0.0' ? 0 : 1), bc.last_updated]);
+    }
+
+    for (const sync of backup.beatmap_metadata_sync || []) {
+      await db.run(`
+        INSERT INTO beatmap_metadata_sync (beatmapset_id, status, attempt_count, last_error, next_attempt_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, [sync.beatmapset_id, sync.status, sync.attempt_count, sync.last_error, sync.next_attempt_at, sync.created_at, sync.updated_at]);
     }
 
     // Insert users_cache
@@ -124,19 +215,50 @@ router.post('/import-json', async (req, res, next) => {
       await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [s.key, s.value]);
     }
 
+    await db.run('DELETE FROM sqlite_sequence');
+    for (const sequence of backup.sqlite_sequence) {
+      await db.run('INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)', sequence.name, sequence.seq);
+    }
+
+    const foreignKeyErrors = await db.all('PRAGMA foreign_key_check');
+    if (foreignKeyErrors.length > 0) {
+      throw new Error(`Backup restore failed integrity validation (${foreignKeyErrors.length} foreign-key errors).`);
+    }
+
+    if (backup._hasCoverFiles) {
+      originalCoverFiles = await readCoverFiles(coversDir);
+      coverFilesModified = true;
+      await writeCoverFiles(coversDir, backup.cover_files);
+    }
+
+    await db.exec('COMMIT');
+    transactionStarted = false;
     await db.run('PRAGMA foreign_keys = ON');
+    await initializeMetadataSyncWorker();
 
     res.json({ success: true, message: 'Backup JSON restored successfully' });
   } catch (error) {
     // Re-enable foreign keys just in case
-    const db = await getDatabase();
+    db ||= await getDatabase();
+    if (transactionStarted) await db.exec('ROLLBACK');
+    if (coverFilesModified && originalCoverFiles) {
+      await writeCoverFiles(coversDir, originalCoverFiles).catch(restoreError => {
+        console.error('[migration] Failed to restore original cover files:', restoreError.message);
+      });
+    }
     await db.run('PRAGMA foreign_keys = ON');
+    await initializeMetadataSyncWorker();
     next(error);
+  } finally {
+    releaseBackupLock?.();
   }
 });
 
 // POST /api/migration/import-beatmap-links - Import one osu! beatmap link per line.
 router.post('/import-beatmap-links', async (req, res, next) => {
+  let apiJobId = null;
+  let db;
+  let transactionStarted = false;
   try {
     const { linksText, categories } = req.body;
     if (typeof linksText !== 'string' || !linksText.trim()) {
@@ -165,43 +287,57 @@ router.post('/import-beatmap-links', async (req, res, next) => {
       });
     }
 
-    const db = await getDatabase();
+    db = await getDatabase();
+    await db.exec('BEGIN TRANSACTION');
+    transactionStarted = true;
     let importCount = 0;
-    const apiJobId = createApiJob('Importing beatmap links');
-    const prefetches = [];
+    let metadataQueued = 0;
+    let metadataAlreadyAvailable = 0;
+    let metadataFailed = 0;
+    let missingBeatmaps = 0;
+    apiJobId = createApiJob('Importing beatmap links');
+    const parsedLinks = lines.map(parseOsuLink);
+    const beatmapIds = parsedLinks
+      .filter(parsedLink => parsedLink.type === 'beatmap')
+      .map(parsedLink => parsedLink.id);
+    const beatmapBatchCount = Math.ceil(new Set(beatmapIds).size / 50);
+    const failedBeatmapIds = new Set();
+    const existingRequestRows = await db.all('SELECT id, beatmapset_id FROM requests WHERE beatmapset_id IS NOT NULL');
+    const existingRequestByBeatmapset = new Map(
+      existingRequestRows.map(existingRequest => [existingRequest.beatmapset_id, existingRequest])
+    );
+
+    addApiJobWork(apiJobId, beatmapBatchCount);
+    const fetchedBeatmaps = await fetchBeatmaps(beatmapIds, {
+      onBatchError: batch => batch.forEach(id => failedBeatmapIds.add(id))
+    });
+    updateApiJob(apiJobId, beatmapBatchCount);
+    let fetchedBeatmapIndex = 0;
 
     for (let i = 0; i < lines.length; i++) {
-      const link = lines[i];
-      const parsedLink = parseOsuLink(link);
+      const parsedLink = parsedLinks[i];
       let beatmapsetId = null;
+      let provisional = null;
       if (parsedLink.type === 'beatmapset') {
         beatmapsetId = parsedLink.id;
       } else {
-        addApiJobWork(apiJobId, 1);
-        updateApiJob(apiJobId, 1);
-        const mapData = await fetchBeatmap(parsedLink.id);
+        const mapData = fetchedBeatmaps[fetchedBeatmapIndex++];
         if (mapData && mapData.beatmapset_id) {
           beatmapsetId = mapData.beatmapset_id;
+          provisional = mapData.beatmapset;
         } else {
+          if (!failedBeatmapIds.has(parsedLink.id)) missingBeatmaps++;
           continue;
         }
       }
 
       // Check if beatmapset ID is already added
       if (beatmapsetId) {
-        const existing = await db.get('SELECT id FROM requests WHERE beatmapset_id = ?', beatmapsetId);
+        const existing = existingRequestByBeatmapset.get(beatmapsetId);
         if (existing) {
           continue;
         }
 
-        // Pre-fetch beatmap metadata in the background (does not block the HTTP response)
-        addApiJobWork(apiJobId, 2);
-        prefetches.push(
-          refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId)
-            .catch(err => {
-              console.error(`Failed to pre-fetch metadata for ID ${beatmapsetId} during import:`, err.message);
-            })
-        );
       }
 
       // Insert request
@@ -241,19 +377,242 @@ router.post('/import-beatmap-links', async (req, res, next) => {
       `, [requestId, 'created', 'Request imported from beatmap link list']);
 
       importCount++;
+      existingRequestByBeatmapset.set(beatmapsetId, { id: requestId, beatmapset_id: beatmapsetId });
+      const metadataState = await queueBeatmapMetadata(db, beatmapsetId, provisional);
+      if (metadataState === 'available') metadataAlreadyAvailable++;
+      else if (metadataState === 'failed') metadataFailed++;
+      else metadataQueued++;
     }
 
-    // Do not return until all imported beatmaps have finished their metadata sync.
-    // The frontend refreshes the request table after this response, so the cache
-    // must be populated before the response is sent.
-    await Promise.allSettled(prefetches);
+    await db.exec('COMMIT');
+    transactionStarted = false;
+    void initializeMetadataSyncWorker().catch(error => console.error('[migration] Failed to start metadata worker:', error.message));
     finishApiJob(apiJobId);
+    apiJobId = null;
 
     res.json({
       success: true,
-      message: `Beatmap links imported successfully. Imported ${importCount} requests.`
+      metadataQueued,
+      metadataAlreadyAvailable,
+      metadataFailed,
+      missingBeatmaps,
+      apiFailures: failedBeatmapIds.size,
+      message: `Imported ${importCount} requests. ${metadataQueued} beatmapsets are syncing in the background.${metadataFailed ? ` ${metadataFailed} beatmapsets require a manual metadata retry.` : ''}${missingBeatmaps ? ` ${missingBeatmaps} beatmaps were not found.` : ''}${failedBeatmapIds.size ? ` ${failedBeatmapIds.size} beatmaps could not be resolved because an API batch failed.` : ''}`
     });
   } catch (error) {
+    if (transactionStarted) await db.exec('ROLLBACK');
+    if (apiJobId) finishApiJob(apiJobId);
+    next(error);
+  }
+});
+
+// POST /api/migration/import-spreadsheet - Preview or import CSV, Excel, and public Google Sheets data.
+router.post('/import-spreadsheet', spreadsheetUpload.single('file'), async (req, res, next) => {
+  let apiJobId = null;
+  let db;
+  let transactionStarted = false;
+  try {
+    const action = req.body.action || 'inspect';
+    const worksheets = parseWorkbook(await spreadsheetBuffer(req));
+    const worksheet = spreadsheetForName(worksheets, req.body.worksheet);
+
+    if (action === 'inspect') {
+      return res.json({
+        worksheets: worksheets.map(sheet => sheet.name),
+        worksheet: worksheet.name,
+        headers: worksheet.headers,
+        suggestedMapping: suggestMapping(worksheet.headers),
+        sampleRows: worksheet.rows.slice(0, 5)
+      });
+    }
+
+    const suppliedMapping = readJson(req.body.mapping, {});
+    const mappingResult = validateMapping(worksheet.headers, suppliedMapping);
+    if (mappingResult.errors.length > 0) {
+      return res.status(400).json({ error: mappingResult.errors.join(' ') });
+    }
+
+    const defaultCategories = importableCategories(readJson(req.body.defaultCategories, ['Hitsounds']));
+    const { records, errors } = normalizeRows(worksheet.headers, worksheet.rows, mappingResult.mapping, defaultCategories);
+    if (errors.length > 0) return res.status(400).json({ error: errors.join(' ') });
+
+    const invalidRecords = records.filter(record => record.errors.length > 0);
+    if (action === 'preview') {
+      return res.json({
+        worksheet: worksheet.name,
+        totalRows: records.length,
+        validRows: records.length - invalidRecords.length,
+        invalidRows: invalidRecords.map(record => ({ rowNumber: record.rowNumber, errors: record.errors })),
+        previewRows: records.slice(0, 20).map(record => ({
+          rowNumber: record.rowNumber,
+          link: record.link || '',
+          title: record.title || '',
+          notes: record.notes || '',
+          errors: record.errors
+        }))
+      });
+    }
+
+    if (action !== 'import') return res.status(400).json({ error: 'Invalid spreadsheet import action.' });
+
+    const duplicateMode = req.body.duplicateMode === 'update' ? 'update' : 'skip';
+    const validRecords = records.filter(record => record.errors.length === 0);
+    const parsedLinks = validRecords.map(record => record.link ? parseOsuLink(record.link) : null);
+    const beatmapIds = parsedLinks
+      .filter(parsedLink => parsedLink?.type === 'beatmap')
+      .map(parsedLink => parsedLink.id);
+    apiJobId = createApiJob('Importing spreadsheet');
+    const beatmapBatchCount = Math.ceil(new Set(beatmapIds).size / 50);
+    const failedBeatmapIds = new Set();
+    addApiJobWork(apiJobId, beatmapBatchCount);
+    const fetchedBeatmaps = await fetchBeatmaps(beatmapIds, {
+      onBatchError: batch => batch.forEach(id => failedBeatmapIds.add(id))
+    });
+    updateApiJob(apiJobId, beatmapBatchCount);
+    let fetchedBeatmapIndex = 0;
+    db = await getDatabase();
+    await db.exec('BEGIN TRANSACTION');
+    transactionStarted = true;
+    const result = {
+      imported: 0,
+      updated: 0,
+      skippedDuplicates: 0,
+      invalid: invalidRecords.length,
+      missingBeatmaps: 0,
+      apiFailures: 0,
+      metadataQueued: 0,
+      metadataAlreadyAvailable: 0,
+      metadataFailed: 0,
+      errors: invalidRecords.map(record => ({ rowNumber: record.rowNumber, error: record.errors.join(' ') }))
+    };
+    const existingRequestRows = await db.all('SELECT id, beatmapset_id FROM requests WHERE beatmapset_id IS NOT NULL');
+    const existingRequestByBeatmapset = new Map(
+      existingRequestRows.map(existingRequest => [existingRequest.beatmapset_id, existingRequest])
+    );
+
+    for (let index = 0; index < validRecords.length; index++) {
+      const record = validRecords[index];
+      const parsedLink = parsedLinks[index];
+      let beatmapsetId = null;
+      let isOsuLink = false;
+      let provisional = null;
+
+      if (record.link) {
+        if (!parsedLink) {
+          result.invalid++;
+          result.errors.push({ rowNumber: record.rowNumber, error: 'Invalid osu! beatmap link.' });
+          continue;
+        }
+        isOsuLink = true;
+        if (parsedLink.type === 'beatmapset') {
+          beatmapsetId = parsedLink.id;
+        } else {
+          const beatmap = fetchedBeatmaps[fetchedBeatmapIndex++];
+          beatmapsetId = beatmap?.beatmapset_id || null;
+          provisional = beatmap?.beatmapset || null;
+        }
+        if (!beatmapsetId) {
+          if (parsedLink.type === 'beatmap' && failedBeatmapIds.has(parsedLink.id)) {
+            result.apiFailures++;
+            result.errors.push({ rowNumber: record.rowNumber, error: 'Beatmap lookup failed because the osu! API batch failed.' });
+          } else {
+            result.missingBeatmaps++;
+            result.errors.push({ rowNumber: record.rowNumber, error: 'Beatmap was not found on osu!.' });
+          }
+          continue;
+        }
+        if (!provisional) {
+          provisional = {
+            id: beatmapsetId,
+            artist: record.artist,
+            title: record.title,
+            creator: record.creator
+          };
+        }
+      }
+
+      const existing = beatmapsetId ? existingRequestByBeatmapset.get(beatmapsetId) : null;
+      if (existing && duplicateMode === 'skip') {
+        result.skippedDuplicates++;
+        continue;
+      }
+
+      if (existing) {
+        await db.run(`
+          UPDATE requests SET requester_username = ?, request_status = ?, priority = ?, deadline = ?, notes = ?,
+            discord_link = ?, osu_profile_link = ?, added_date = COALESCE(?, added_date),
+            completed_date = COALESCE(?, completed_date), last_updated = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `, [
+          record.requester || 'Anonymous', record.status, record.priority, record.deadline || null, record.notes || null,
+          record.discordLink || null, record.osuProfileLink || null, record.addedDate || null, record.completedDate || null, existing.id
+        ]);
+        for (const category of record.categories) {
+          await db.run(`
+            INSERT INTO request_categories (request_id, category_name, other_text, status)
+            SELECT ?, ?, NULL, 'Pending'
+            WHERE NOT EXISTS (
+              SELECT 1 FROM request_categories WHERE request_id = ? AND category_name = ?
+            )
+          `, existing.id, category, existing.id, category);
+        }
+        result.updated++;
+        const metadataState = await queueBeatmapMetadata(db, beatmapsetId, provisional);
+        if (metadataState === 'available') result.metadataAlreadyAvailable++;
+        else if (metadataState === 'failed') result.metadataFailed++;
+        else result.metadataQueued++;
+        continue;
+      }
+
+      const insertResult = await db.run(`
+        INSERT INTO requests (
+          beatmapset_id, is_osu_link, non_osu_artist, non_osu_title, non_osu_creator, non_osu_difficulty,
+          requester_username, request_status, priority, deadline, notes, input_link, discord_link, osu_profile_link,
+          added_date, completed_date
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        beatmapsetId,
+        isOsuLink ? 1 : 0,
+        isOsuLink ? null : (record.artist || null),
+        isOsuLink ? null : (record.title || null),
+        isOsuLink ? null : (record.creator || null),
+        isOsuLink ? null : (record.difficulty || null),
+        record.requester || 'Anonymous', record.status, record.priority, record.deadline || null, record.notes || null,
+        record.link || null, record.discordLink || null, record.osuProfileLink || null,
+        record.addedDate || null, record.completedDate || null
+      ]);
+
+      for (const category of record.categories) {
+        await db.run(
+          'INSERT INTO request_categories (request_id, category_name, other_text, status) VALUES (?, ?, ?, ?)',
+          [insertResult.lastID, category, null, 'Pending']
+        );
+      }
+      await db.run('INSERT INTO history (request_id, action_type, details) VALUES (?, ?, ?)', [
+        insertResult.lastID, 'created', `Request imported from spreadsheet row ${record.rowNumber}`
+      ]);
+      result.imported++;
+      if (beatmapsetId) {
+        existingRequestByBeatmapset.set(beatmapsetId, { id: insertResult.lastID, beatmapset_id: beatmapsetId });
+      }
+
+      if (beatmapsetId) {
+        const metadataState = await queueBeatmapMetadata(db, beatmapsetId, provisional);
+        if (metadataState === 'available') result.metadataAlreadyAvailable++;
+        else if (metadataState === 'failed') result.metadataFailed++;
+        else result.metadataQueued++;
+      }
+    }
+
+    await db.exec('COMMIT');
+    transactionStarted = false;
+    void initializeMetadataSyncWorker().catch(error => console.error('[migration] Failed to start metadata worker:', error.message));
+    finishApiJob(apiJobId);
+    apiJobId = null;
+    res.json({ success: true, ...result });
+  } catch (error) {
+    if (transactionStarted) await db.exec('ROLLBACK');
+    if (apiJobId) finishApiJob(apiJobId);
     next(error);
   }
 });

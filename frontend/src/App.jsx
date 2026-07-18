@@ -9,6 +9,7 @@ import QuickAdd from './components/QuickAdd';
 import MultipleRequestsImport from './components/MultipleRequestsImport';
 import TopBar from './components/TopBar';
 import Toast from './components/Toast';
+import ConfirmModal from './components/ConfirmModal';
 
 function getResolvedTheme(preference) {
   if (preference !== 'system') return preference;
@@ -16,6 +17,17 @@ function getResolvedTheme(preference) {
 }
 
 const API_REQUEST_TIMEOUT_MS = 30000;
+const METADATA_STATUS_POLL_MS = 3000;
+const METADATA_LIST_REFRESH_MS = 15000;
+const BULK_REQUEST_BATCH_SIZE = 400;
+
+function requestIdBatches(ids) {
+  const batches = [];
+  for (let index = 0; index < ids.length; index += BULK_REQUEST_BATCH_SIZE) {
+    batches.push(ids.slice(index, index + BULK_REQUEST_BATCH_SIZE));
+  }
+  return batches;
+}
 
 function fetchWithTimeout(input, init = {}, timeoutMs = API_REQUEST_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -40,8 +52,13 @@ export default function App() {
   const [isMultipleImportOpen, setIsMultipleImportOpen] = useState(false);
   const [showFirstLaunchSetup, setShowFirstLaunchSetup] = useState(false);
   const [osuApiStatus, setOsuApiStatus] = useState(null);
+  const [metadataSyncStatus, setMetadataSyncStatus] = useState(null);
   const [toastNotice, setToastNotice] = useState(null);
+  const [confirmationRequest, setConfirmationRequest] = useState(null);
+  const [isBulkStatusUpdating, setIsBulkStatusUpdating] = useState(false);
   const toastIdRef = useRef(0);
+  const bulkStatusUpdateRef = useRef(false);
+  const metadataProgressRef = useRef({ settled: null, lastListRefresh: 0 });
 
   // QuickAdd duplicate check state
   const [duplicateError, setDuplicateError] = useState(null);
@@ -54,6 +71,20 @@ export default function App() {
   }, []);
 
   const dismissToast = useCallback(() => setToastNotice(null), []);
+
+  const confirmationResolverRef = useRef(null);
+  const requestConfirmation = useCallback((options) => new Promise((resolve) => {
+    if (confirmationResolverRef.current) confirmationResolverRef.current(false);
+    confirmationResolverRef.current = resolve;
+    setConfirmationRequest(options);
+  }), []);
+
+  const finishConfirmation = useCallback((confirmed) => {
+    const resolve = confirmationResolverRef.current;
+    confirmationResolverRef.current = null;
+    setConfirmationRequest(null);
+    resolve?.(confirmed);
+  }, []);
 
   useEffect(() => {
     const removeUpdateListener = window.electronAPI?.onUpdateDownloaded?.(({ version }) => {
@@ -77,27 +108,28 @@ export default function App() {
     }
   };
 
-  const fetchRequests = async () => {
+  const fetchRequests = useCallback(async () => {
     try {
       const res = await fetchWithTimeout('/api/requests');
       if (res.ok) {
         const data = await res.json();
         setRequestsList(data);
 
-        // Keep detail modal updated if open
-        if (selectedRequest) {
-          const updated = data.find(r => r.id === selectedRequest.id);
-          if (updated) {
-            setSelectedRequest(updated);
-          }
-        }
+        // Keep a detail modal opened during background sync up to date.
+        setSelectedRequest(current => {
+          if (!current) return current;
+          const updated = data.find(request => request.id === current.id);
+          return updated
+            ? { ...current, ...updated, difficulties: current.difficulties }
+            : current;
+        });
       }
     } catch (e) {
       console.error('Error fetching requests list:', e);
     }
-  };
+  }, []);
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
       const res = await fetchWithTimeout('/api/stats');
       if (res.ok) {
@@ -107,7 +139,7 @@ export default function App() {
     } catch (e) {
       console.error('Error fetching stats:', e);
     }
-  };
+  }, []);
 
   const fetchSettings = async () => {
     try {
@@ -165,6 +197,60 @@ export default function App() {
     });
   }, []);
 
+  const hasPendingMetadata = requestsList.some(request =>
+    request.metadata_sync_status === 'Pending' || request.metadata_sync_status === 'Processing'
+  );
+
+  useEffect(() => {
+    if (!hasPendingMetadata) {
+      setMetadataSyncStatus(null);
+      return undefined;
+    }
+    let cancelled = false;
+    let timeoutId = null;
+    metadataProgressRef.current = { settled: null, lastListRefresh: Date.now() };
+
+    const pollMetadataStatus = async () => {
+      let scheduleNext = true;
+      try {
+        const response = await fetchWithTimeout('/api/beatmaps/sync/status');
+        if (!response.ok || cancelled) return;
+        const status = await response.json();
+        if (cancelled) return;
+        setMetadataSyncStatus(status);
+
+        const active = (status.Pending || 0) + (status.Processing || 0);
+        const settled = (status.Completed || 0) + (status.Failed || 0);
+        const progress = metadataProgressRef.current;
+        const progressChanged = progress.settled !== null && progress.settled !== settled;
+        progress.settled = settled;
+
+        if (active === 0) {
+          scheduleNext = false;
+          await Promise.all([fetchRequests(), fetchStats()]);
+          return;
+        }
+
+        if (progressChanged && Date.now() - progress.lastListRefresh >= METADATA_LIST_REFRESH_MS) {
+          progress.lastListRefresh = Date.now();
+          await fetchRequests();
+        }
+      } catch (error) {
+        console.error('Failed to poll metadata sync status:', error);
+      } finally {
+        if (!cancelled && scheduleNext) {
+          timeoutId = window.setTimeout(pollMetadataStatus, METADATA_STATUS_POLL_MS);
+        }
+      }
+    };
+
+    void pollMetadataStatus();
+    return () => {
+      cancelled = true;
+      if (timeoutId) window.clearTimeout(timeoutId);
+    };
+  }, [hasPendingMetadata, fetchRequests, fetchStats]);
+
   useEffect(() => {
     let isMounted = true;
     const pollApiStatus = async () => {
@@ -188,6 +274,22 @@ export default function App() {
     setTheme(newTheme);
     localStorage.setItem('theme', newTheme);
   };
+
+  const handleOpenRequest = useCallback(async (request) => {
+    setSelectedRequest(request);
+    if (!request.is_osu_link || !request.beatmapset_id) return;
+
+    try {
+      const response = await fetchWithTimeout(`/api/beatmaps/${request.beatmapset_id}?cacheOnly=1`);
+      if (!response.ok) return;
+      const beatmap = await response.json();
+      setSelectedRequest(current => current?.id === request.id
+        ? { ...current, difficulties: beatmap.difficulties || [] }
+        : current);
+    } catch (error) {
+      console.error('Failed to load request difficulty details:', error);
+    }
+  }, []);
 
   // ADD Request
   const handleAddRequest = async (payload, callback) => {
@@ -306,36 +408,79 @@ export default function App() {
 
   // Bulk status update
   const handleBulkUpdateStatus = async (ids, status) => {
+    if (!ids.length) return false;
+    if (bulkStatusUpdateRef.current) {
+      showToast('A bulk status update is already in progress.', 'warning');
+      return false;
+    }
+
+    bulkStatusUpdateRef.current = true;
+    setIsBulkStatusUpdating(true);
+    const trackerId = ++toastIdRef.current;
+    let completed = 0;
+    let failed = 0;
+    setToastNotice({
+      id: trackerId,
+      type: 'progress',
+      persistent: true,
+      message: `Updating 0 of ${ids.length} requests to "${status}"...`,
+      progress: { completed: 0, total: ids.length }
+    });
+
+    const updateTracker = () => {
+      const completedCount = completed;
+      setToastNotice(current => current?.id === trackerId ? {
+        ...current,
+        message: `Updating ${completedCount} of ${ids.length} requests to "${status}"...`,
+        progress: { completed: completedCount, total: ids.length }
+      } : current);
+    };
+
     try {
-      await Promise.all(
-        ids.map(id =>
-          fetch(`/api/requests/${id}`, {
+      for (const batch of requestIdBatches(ids)) {
+        try {
+          const response = await fetch('/api/requests/bulk', {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ request_status: status })
-          })
-        )
-      );
+            body: JSON.stringify({ ids: batch, request_status: status })
+          });
+          if (!response.ok) failed += batch.length;
+        } catch (error) {
+          failed += batch.length;
+          console.error('Failed to update request batch:', error);
+        } finally {
+          completed += batch.length;
+          updateTracker();
+        }
+      }
       await Promise.all([fetchRequests(), fetchStats()]);
-      showToast(`Successfully updated status to "${status}" for ${ids.length} requests.`, 'success');
+      if (failed) {
+        showToast(`Updated ${ids.length - failed} of ${ids.length} requests to "${status}". ${failed} failed.`, 'warning');
+      } else {
+        showToast(`Successfully updated status to "${status}" for ${ids.length} requests.`, 'success');
+      }
+      return true;
     } catch (e) {
       console.error(e);
       showToast('Failed to update status for some requests.', 'error');
+      return false;
+    } finally {
+      bulkStatusUpdateRef.current = false;
+      setIsBulkStatusUpdating(false);
     }
   };
 
   // Bulk priority update
   const handleBulkUpdatePriority = async (ids, priority) => {
     try {
-      await Promise.all(
-        ids.map(id =>
-          fetch(`/api/requests/${id}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ priority })
-          })
-        )
-      );
+      for (const batch of requestIdBatches(ids)) {
+        const response = await fetch('/api/requests/bulk', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: batch, priority })
+        });
+        if (!response.ok) throw new Error('Bulk priority update failed');
+      }
       await Promise.all([fetchRequests(), fetchStats()]);
       showToast(`Successfully updated priority to "${priority}" for ${ids.length} requests.`, 'success');
     } catch (e) {
@@ -347,27 +492,13 @@ export default function App() {
   // Bulk category/type update
   const handleBulkUpdateCategory = async (ids, categoryName, mode) => {
     try {
-      const requestsById = new Map(requestsList.map(request => [request.id, request]));
-      const responses = await Promise.all(ids.map(id => {
-        const request = requestsById.get(id);
-        if (!request) throw new Error(`Request ${id} was not found`);
-
-        const currentCategories = Array.isArray(request.categories) ? request.categories : [];
-        const nextCategories = mode === 'move'
-          ? [{ category_name: categoryName, status: 'Pending' }]
-          : currentCategories.some(category => category.category_name === categoryName)
-            ? currentCategories
-            : [...currentCategories, { category_name: categoryName, status: 'Pending' }];
-
-        return fetch(`/api/requests/${id}`, {
+      for (const batch of requestIdBatches(ids)) {
+        const response = await fetch('/api/requests/bulk', {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ categories: nextCategories })
+          body: JSON.stringify({ ids: batch, categoryName, mode })
         });
-      }));
-
-      if (responses.some(response => !response.ok)) {
-        throw new Error('One or more category updates failed');
+        if (!response.ok) throw new Error('One or more category updates failed');
       }
 
       await Promise.all([fetchRequests(), fetchStats()]);
@@ -381,11 +512,14 @@ export default function App() {
   // Bulk delete
   const handleBulkDelete = async (ids) => {
     try {
-      await Promise.all(
-        ids.map(id =>
-          fetch(`/api/requests/${id}`, { method: 'DELETE' })
-        )
-      );
+      for (const batch of requestIdBatches(ids)) {
+        const response = await fetch('/api/requests/bulk', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: batch })
+        });
+        if (!response.ok) throw new Error('Bulk delete failed');
+      }
       await Promise.all([fetchRequests(), fetchStats()]);
       showToast(`Successfully deleted ${ids.length} requests.`, 'success');
     } catch (e) {
@@ -410,12 +544,29 @@ export default function App() {
 
   // Disconnect Settings osu! profile
   const handleDisconnect = async () => {
-    if (confirm('Disconnect connected osu! account?')) {
+    if (await requestConfirmation({
+      title: 'Disconnect osu! account?',
+      message: 'Your connected osu! account will be removed from ReqTrac. Your tracked requests will remain available.',
+      confirmLabel: 'Disconnect',
+    })) {
       const res = await fetch('/api/settings/disconnect', { method: 'POST' });
       if (res.ok) {
         await fetchSettings();
       }
     }
+  };
+
+  // Delete all locally stored application data from Settings.
+  const handleDeleteAllData = async () => {
+    const res = await fetch('/api/settings/delete-all-data', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || 'Delete all data failed');
+    }
+
+    setSelectedRequest(null);
+    localStorage.removeItem('credentialsSetupPromptShown');
+    await Promise.all([fetchRequests(), fetchStats(), fetchSettings()]);
   };
 
   // Beatmap link migration
@@ -430,7 +581,7 @@ export default function App() {
       const data = await res.json();
       if (res.ok) {
         await Promise.all([fetchRequests(), fetchStats()]);
-        showToast(data.message, 'success');
+        showToast(data.message, data.apiFailures ? 'warning' : 'success');
         return true;
       } else {
         showToast(`Beatmap Link Import Failed: ${data.error}`, 'error');
@@ -468,6 +619,10 @@ export default function App() {
     }
   };
 
+  const handleSpreadsheetImported = async () => {
+    await Promise.all([fetchRequests(), fetchStats()]);
+  };
+
   // Render correct main view
   const renderMainView = () => {
     if (activeTab === 'dashboard') {
@@ -475,7 +630,7 @@ export default function App() {
         <Dashboard
           statsData={statsData}
           requestsList={requestsList}
-          onOpenRequest={setSelectedRequest}
+          onOpenRequest={handleOpenRequest}
           connectedAccount={settingsData.connectedAccount}
         />
       );
@@ -490,9 +645,12 @@ export default function App() {
           showFirstLaunchSetup={showFirstLaunchSetup}
           onDismissFirstLaunchSetup={() => setShowFirstLaunchSetup(false)}
           onSaveCredentials={handleSaveCredentials}
-          onDisconnect={handleDisconnect}
-           onImportJson={handleImportJson}
-          onNotify={showToast}
+           onDisconnect={handleDisconnect}
+          onDeleteAllData={handleDeleteAllData}
+          onImportJson={handleImportJson}
+          onSpreadsheetImported={handleSpreadsheetImported}
+           onNotify={showToast}
+           onRequestConfirmation={requestConfirmation}
         />
       );
     }
@@ -556,13 +714,15 @@ export default function App() {
           {/* Requests List */}
           <RequestsTable
             requestsList={requestsList}
-            onOpenRequest={setSelectedRequest}
+            onOpenRequest={handleOpenRequest}
             onDeleteRequest={handleDeleteRequest}
             onUpdateRequest={handleUpdateRequest}
             onBulkUpdateStatus={handleBulkUpdateStatus}
+            isBulkStatusUpdating={isBulkStatusUpdating}
             onBulkUpdatePriority={handleBulkUpdatePriority}
             onBulkUpdateCategory={handleBulkUpdateCategory}
-            onBulkDelete={handleBulkDelete}
+             onBulkDelete={handleBulkDelete}
+             onRequestConfirmation={requestConfirmation}
             activeCategory={activeCategory}
             sortBy={requestSort.sortBy}
             sortOrder={requestSort.sortOrder}
@@ -614,7 +774,19 @@ export default function App() {
         />
       )}
 
-      <Toast status={osuApiStatus} notification={toastNotice} onDismiss={dismissToast} />
+      <Toast
+        status={osuApiStatus}
+        metadataSyncStatus={metadataSyncStatus}
+        notification={toastNotice}
+        onDismiss={dismissToast}
+      />
+
+      <ConfirmModal
+        isOpen={Boolean(confirmationRequest)}
+        {...confirmationRequest}
+        onConfirm={() => finishConfirmation(true)}
+        onCancel={() => finishConfirmation(false)}
+      />
 
     </div>
   );

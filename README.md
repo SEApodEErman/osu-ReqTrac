@@ -17,6 +17,7 @@ osu!ReqTrac is a local-first request tracker for osu! beatmap work such as hitso
 - **Categories and tags** — Track Hitsounds, Guest Difficulties, Storyboards, custom categories, and searchable tags.
 - **Individual requests** — Add an osu! beatmap link or create a manual/non-osu entry with artist, title, creator, requester, and an optional reference link.
 - **Bulk requests** — Use **Add Multiple Requests** on the Requests page to import one osu! beatmap link per line and assign categories to all imported requests.
+- **Migration support** — Use **Import Requests from Spreadsheet** on the Settings page to import your existing spreadsheet with guided header mapping.
 - **osu! integration** — Connect an osu! account through OAuth to sync beatmap metadata, covers, difficulties, ranked status, and user information.
 - **Beatmap caching** — Cache artist, title, creator, cover art, dates, and difficulties locally for faster access and offline viewing.
 - **Dashboard and statistics** — View request totals, status distribution, workload, and other summary information.
@@ -40,9 +41,9 @@ Manual and non-osu! requests remain local. Their reference links can be opened f
 ## Screenshots
 
 <p align="center">
-  <img src="https://seapodeerman.s-ul.eu/2gedAQwX" alt="osu!ReqTrac dashboard" width="33%" />
-  <img src="https://seapodeerman.s-ul.eu/N3Sb3dLH" alt="osu!ReqTrac request list" width="33%" />
-  <img src="https://seapodeerman.s-ul.eu/PnSqVxXp" alt="osu!ReqTrac settings" width="33%" />
+  <img src="https://seapodeerman.s-ul.eu/q1W6qFCr" alt="osu!ReqTrac dashboard" width="33%" />
+  <img src="https://seapodeerman.s-ul.eu/OG2zDP7x" alt="osu!ReqTrac request list" width="33%" />
+  <img src="https://seapodeerman.s-ul.eu/uPvcQ997" alt="osu!ReqTrac requests pop-up" width="33%" />
 </p>
 
 ## Installation for Users
@@ -157,7 +158,7 @@ Treat the local database and configuration files as sensitive. Google tokens are
 
 5. Open a pull request with a clear description of the change.
 
-Bug reports and feature suggestions are welcome through [GitHub Issues](https://github.com/SEApodEErman/osu-ReqTrac/issues). You can also contact the maintainer through the [Discord server](https://discord.gg/Z5VFCdkExJ).
+Bug reports and feature suggestions are welcome through [GitHub Issues](https://github.com/SEApodEErman/osu-ReqTrac/issues). You can also contact me through the [Discord server](https://discord.gg/Z5VFCdkExJ).
 
 ## License and Trademark Notice
 

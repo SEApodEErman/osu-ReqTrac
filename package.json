@@ -1,6 +1,6 @@
 {
   "name": "osu-reqtrac-root",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Root package runner for osu!ReqTrac",
   "author": "seapodeerman",
   "main": "electron/main.js",
@@ -24,8 +24,10 @@
     "cors": "^2.8.5",
     "electron-updater": "^6.3.9",
     "express": "^4.19.2",
+    "multer": "^2.2.0",
     "sqlite": "^5.1.1",
-    "sqlite3": "^5.1.7"
+    "sqlite3": "^5.1.7",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

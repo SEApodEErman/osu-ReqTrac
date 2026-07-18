@@ -4,8 +4,10 @@ const { getDatabase, coversDir } = require('./db');
 
 let accessToken = null;
 let tokenExpiresAt = null;
+let accessTokenRequest = null;
 let rateLimitedUntil = null;
 let lastRequestTime = 0;
+let apiRequestQueue = Promise.resolve();
 let pendingApiRequests = 0;
 let lastApiError = null;
 let lastApiErrorAt = null;
@@ -15,6 +17,7 @@ const RATE_LIMIT_WAIT = 30000;
 const MIN_REQUEST_INTERVAL = 2000;
 const NETWORK_TIMEOUT_MS = 30000;
 const MAX_RATE_LIMIT_RETRIES = 2;
+const MAX_BEATMAPS_PER_REQUEST = 50;
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = NETWORK_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -37,6 +40,19 @@ async function throttle() {
   }
 }
 
+function queueApiRequest(request) {
+  const queuedRequest = apiRequestQueue.then(async () => {
+    await waitIfRateLimited();
+    await throttle();
+    const response = await request();
+    lastRequestTime = Date.now();
+    if (response.status === 429) setRateLimited();
+    return response;
+  });
+  apiRequestQueue = queuedRequest.catch(() => {});
+  return queuedRequest;
+}
+
 async function waitIfRateLimited() {
   while (rateLimitedUntil && Date.now() < rateLimitedUntil) {
     const remaining = Math.ceil((rateLimitedUntil - Date.now()) / 1000);
@@ -48,6 +64,12 @@ async function waitIfRateLimited() {
 function setRateLimited() {
   rateLimitedUntil = Date.now() + RATE_LIMIT_WAIT;
   console.warn(`[osuApi] 429 detected. Pausing all API calls for ${RATE_LIMIT_WAIT / 1000}s.`);
+}
+
+function clearAccessToken() {
+  accessToken = null;
+  tokenExpiresAt = null;
+  accessTokenRequest = null;
 }
 
 // Credentials are configured in the app settings so development and packaged
@@ -64,7 +86,7 @@ async function getCredentials() {
 }
 
 // Fetch a new access token using client credentials
-async function getAccessToken(rateLimitRetries = 0) {
+async function requestAccessToken(rateLimitRetries = 0) {
   if (accessToken && tokenExpiresAt && Date.now() < tokenExpiresAt) {
     return accessToken;
   }
@@ -75,10 +97,7 @@ async function getAccessToken(rateLimitRetries = 0) {
     throw new Error('osu! API credentials are not configured. Please add them in Settings.');
   }
 
-  await waitIfRateLimited();
-  await throttle();
-
-  const response = await fetchWithTimeout('https://osu.ppy.sh/oauth/token', {
+  const response = await queueApiRequest(() => fetchWithTimeout('https://osu.ppy.sh/oauth/token', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -90,17 +109,14 @@ async function getAccessToken(rateLimitRetries = 0) {
       grant_type: 'client_credentials',
       scope: 'public'
     })
-  });
-
-  lastRequestTime = Date.now();
+  }));
 
   if (response.status === 429) {
     if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
       throw new Error('osu! API rate limit persisted after several retries.');
     }
-    setRateLimited();
     await waitIfRateLimited();
-    return getAccessToken(rateLimitRetries + 1);
+    return requestAccessToken(rateLimitRetries + 1);
   }
 
   if (!response.ok) {
@@ -115,31 +131,37 @@ async function getAccessToken(rateLimitRetries = 0) {
   return accessToken;
 }
 
+async function getAccessToken() {
+  if (accessToken && tokenExpiresAt && Date.now() < tokenExpiresAt) {
+    return accessToken;
+  }
+  if (!accessTokenRequest) {
+    accessTokenRequest = requestAccessToken().finally(() => {
+      accessTokenRequest = null;
+    });
+  }
+  return accessTokenRequest;
+}
+
 // Helper to make authenticated requests to osu! API
 async function apiFetch(endpoint, rateLimitRetries = 0) {
   pendingApiRequests++;
   try {
-    await waitIfRateLimited();
-    await throttle();
-
     const token = await getAccessToken();
     const url = endpoint.startsWith('http') ? endpoint : `https://osu.ppy.sh/api/v2/${endpoint.replace(/^\//, '')}`;
 
-    const response = await fetchWithTimeout(url, {
+    const response = await queueApiRequest(() => fetchWithTimeout(url, {
       headers: {
         'Authorization': `Bearer ${token}`,
         'Accept': 'application/json',
         'x-api-version': '20220705'
       }
-    });
-
-    lastRequestTime = Date.now();
+    }));
 
     if (response.status === 429) {
       if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
         throw new Error('osu! API rate limit persisted after several retries.');
       }
-      setRateLimited();
       await waitIfRateLimited();
       return apiFetch(endpoint, rateLimitRetries + 1);
     }
@@ -215,6 +237,40 @@ async function fetchBeatmap(beatmapId) {
   return apiFetch(`beatmaps/${beatmapId}`);
 }
 
+// Fetch beatmaps in API-sized batches and align results with the input IDs.
+async function fetchBeatmaps(beatmapIds, { onBatchError } = {}) {
+  if (!Array.isArray(beatmapIds) || beatmapIds.length === 0) {
+    return [];
+  }
+
+  const normalizedIds = beatmapIds.map(id => {
+    const numericId = typeof id === 'string' && id.trim() !== '' ? Number(id) : id;
+    return Number.isSafeInteger(numericId) && numericId > 0 ? numericId : null;
+  });
+  const uniqueIds = [...new Set(normalizedIds.filter(id => id !== null))];
+  const beatmapsById = new Map();
+
+  for (let i = 0; i < uniqueIds.length; i += MAX_BEATMAPS_PER_REQUEST) {
+    const batch = uniqueIds.slice(i, i + MAX_BEATMAPS_PER_REQUEST);
+    const query = batch.map(id => `ids[]=${id}`).join('&');
+
+    try {
+      const data = await apiFetch(`beatmaps?${query}`);
+      const beatmaps = Array.isArray(data?.beatmaps) ? data.beatmaps : [];
+      for (const beatmap of beatmaps) {
+        if (Number.isSafeInteger(beatmap?.id)) {
+          beatmapsById.set(beatmap.id, beatmap);
+        }
+      }
+    } catch (error) {
+      console.error(`Failed to fetch beatmap batch starting with ID ${batch[0]}:`, error.message);
+      onBatchError?.(batch, error);
+    }
+  }
+
+  return normalizedIds.map(id => id === null ? null : beatmapsById.get(id) || null);
+}
+
 // Fetch user profile (caches requesters)
 async function fetchUser(userIdOrUsername) {
   // If it's a numeric ID, search by ID, otherwise by username
@@ -253,6 +309,7 @@ async function downloadCover(beatmapsetId, coverUrl) {
 module.exports = {
   fetchBeatmapset,
   fetchBeatmap,
+  fetchBeatmaps,
   fetchUser,
   downloadCover,
   getCredentials,
@@ -260,5 +317,6 @@ module.exports = {
   createApiJob,
   addApiJobWork,
   updateApiJob,
-  finishApiJob
+  finishApiJob,
+  clearAccessToken
 };

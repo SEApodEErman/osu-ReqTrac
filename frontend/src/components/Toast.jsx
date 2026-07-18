@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, Clock3, Info, Loader2, X } from 'lucide-react';
 
 const NOTIFICATION_DURATION_MS = 5000;
+const API_ACTIVITY_DEBOUNCE_MS = 4000;
 
 function formatEta(seconds) {
   if (seconds < 60) return `${seconds}s`;
@@ -20,6 +21,8 @@ function NotificationToast({ notification, onDismiss }) {
     remainingMsRef.current = NOTIFICATION_DURATION_MS;
     startedAtRef.current = Date.now();
     setIsPaused(false);
+
+    if (notification.persistent) return undefined;
 
     timerRef.current = window.setTimeout(onDismiss, NOTIFICATION_DURATION_MS);
     return () => {
@@ -45,7 +48,9 @@ function NotificationToast({ notification, onDismiss }) {
   };
 
   const type = notification.type || 'info';
-  const title = type === 'success' ? 'Success' : type === 'error' ? 'Action failed' : type === 'warning' ? 'Warning' : 'Notice';
+  const title = type === 'progress' ? 'Bulk update in progress' : type === 'success' ? 'Success' : type === 'error' ? 'Action failed' : type === 'warning' ? 'Warning' : 'Notice';
+  const progress = notification.progress;
+  const progressPercent = progress?.total ? Math.round((progress.completed / progress.total) * 100) : 0;
 
   return (
     <div
@@ -55,11 +60,12 @@ function NotificationToast({ notification, onDismiss }) {
       onMouseLeave={resumeTimer}
     >
       <div className="app-toast-icon">
-        {type === 'success' ? <CheckCircle2 size={18} /> : type === 'error' || type === 'warning' ? <AlertCircle size={18} /> : <Info size={18} />}
+        {type === 'progress' ? <Loader2 size={18} className="spin" /> : type === 'success' ? <CheckCircle2 size={18} /> : type === 'error' || type === 'warning' ? <AlertCircle size={18} /> : <Info size={18} />}
       </div>
       <div className="app-toast-content">
         <strong>{title}</strong>
         <span>{notification.message}</span>
+        {progress && <small>{progressPercent}% complete</small>}
         {notification.action && (
           <button
             type="button"
@@ -76,23 +82,56 @@ function NotificationToast({ notification, onDismiss }) {
       <button type="button" className="app-toast-close" onClick={onDismiss} aria-label="Close notification" title="Close">
         <X size={15} />
       </button>
-      <div
-        key={notification.id}
-        className="app-toast-progress"
-        style={{ animationPlayState: isPaused ? 'paused' : 'running' }}
-        aria-hidden="true"
-      />
+      {progress ? (
+        <div
+          className="app-toast-progress app-toast-progress-tracked"
+          role="progressbar"
+          aria-valuemin="0"
+          aria-valuemax={progress.total}
+          aria-valuenow={progress.completed}
+          style={{ transform: `scaleX(${progress.completed / progress.total})` }}
+        />
+      ) : (
+        <div
+          key={notification.id}
+          className="app-toast-progress"
+          style={{ animationPlayState: isPaused ? 'paused' : 'running' }}
+          aria-hidden="true"
+        />
+      )}
     </div>
   );
 }
 
-export default function Toast({ status, notification, onDismiss = () => {} }) {
+export default function Toast({ status, metadataSyncStatus, notification, onDismiss = () => {} }) {
   const [dismissedStatusKey, setDismissedStatusKey] = useState(null);
+  const [isActivityDebouncedVisible, setIsActivityDebouncedVisible] = useState(false);
   const hasError = status?.lastError && status.lastErrorAt && Date.now() - status.lastErrorAt < 10000;
   const totalRequests = (status?.pendingRequests || 0) + (status?.queuedRequests || 0);
-  const isWorking = totalRequests > 0 || (status?.rateLimitedSeconds || 0) > 0;
-  const statusKey = `${status?.lastErrorAt || ''}:${totalRequests}:${status?.rateLimitedSeconds || 0}`;
-  const showStatus = !notification && (hasError || isWorking) && dismissedStatusKey !== statusKey;
+  const isRateLimited = (status?.rateLimitedSeconds || 0) > 0;
+  const isWorking = totalRequests > 0 || isRateLimited;
+  const isBackgroundSyncing = ((metadataSyncStatus?.Pending || 0) + (metadataSyncStatus?.Processing || 0)) > 0;
+  const shouldShowApiActivity = isWorking && (!isBackgroundSyncing || isRateLimited);
+  const activityKey = shouldShowApiActivity ? (isRateLimited ? 'rate-limited' : 'working') : 'idle';
+
+  useEffect(() => {
+    if (activityKey !== 'working') {
+      setIsActivityDebouncedVisible(activityKey === 'rate-limited');
+      return undefined;
+    }
+
+    setIsActivityDebouncedVisible(false);
+    const timeoutId = window.setTimeout(() => setIsActivityDebouncedVisible(true), API_ACTIVITY_DEBOUNCE_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [activityKey]);
+
+  const showActivity = shouldShowApiActivity && (isRateLimited || isActivityDebouncedVisible);
+  const statusKey = hasError
+    ? `error:${status.lastErrorAt}`
+    : showActivity
+      ? activityKey
+      : 'idle';
+  const showStatus = !notification && (hasError || showActivity) && dismissedStatusKey !== statusKey;
 
   useEffect(() => {
     if (!showStatus && dismissedStatusKey && dismissedStatusKey !== statusKey) {

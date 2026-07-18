@@ -44,6 +44,10 @@ async function getDatabase() {
 
   // Enable foreign key support
   await dbInstance.run('PRAGMA foreign_keys = ON');
+  await dbInstance.run('PRAGMA busy_timeout = 5000');
+  await dbInstance.run('PRAGMA journal_mode = WAL');
+  await dbInstance.run('PRAGMA synchronous = NORMAL');
+  await dbInstance.run('PRAGMA temp_store = MEMORY');
 
   // Initialize schema
   await dbInstance.exec(`
@@ -88,7 +92,19 @@ async function getDatabase() {
       local_cover_path TEXT NOT NULL,
       ranked_status TEXT NOT NULL,
       difficulties_json TEXT NOT NULL,
+      submitted_date TEXT,
+      metadata_complete INTEGER NOT NULL DEFAULT 1,
       last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS beatmap_metadata_sync (
+      beatmapset_id INTEGER PRIMARY KEY,
+      status TEXT NOT NULL CHECK(status IN ('Pending', 'Processing', 'Completed', 'Failed')) DEFAULT 'Pending',
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      next_attempt_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE TABLE IF NOT EXISTS users_cache (
@@ -130,39 +146,62 @@ async function getDatabase() {
   // Lightweight migrations: add columns that may be missing on older databases
   await addColumnIfMissing(dbInstance, 'beatmap_cache', 'ranked_date', 'TEXT');
   await addColumnIfMissing(dbInstance, 'beatmap_cache', 'osu_last_updated', 'TEXT');
+  await addColumnIfMissing(dbInstance, 'beatmap_cache', 'submitted_date', 'TEXT');
+  await addColumnIfMissing(dbInstance, 'beatmap_cache', 'metadata_complete', 'INTEGER NOT NULL DEFAULT 1');
   await addColumnIfMissing(dbInstance, 'requests', 'guest_difficulty_target_sr', 'REAL');
   await addColumnIfMissing(dbInstance, 'requests', 'guest_difficulty_name', 'TEXT');
   await addColumnIfMissing(dbInstance, 'requests', 'input_link', 'TEXT');
-  await migrateRequestStatusConstraint(dbInstance);
+  await migrateRequestSchema(dbInstance);
+  await ensureIndexes(dbInstance);
 
-  // Trigger difficulty migration asynchronously to update existing caches
-  migrateExistingDifficulties(dbInstance);
+  // Persist legacy difficulty refreshes in the normal metadata queue so startup
+  // never launches a second long-running API loop alongside the worker.
+  await queueDifficultyCreatorMigration(dbInstance);
 
   return dbInstance;
 }
 
-// Migration to update difficulty creator data for old cache entries
-async function migrateExistingDifficulties(db) {
-  try {
-    const expiredMaps = await db.all("SELECT beatmapset_id FROM beatmap_cache WHERE difficulties_json NOT LIKE '%creator_names%'");
-    if (expiredMaps.length > 0) {
-      console.log(`[db] Found ${expiredMaps.length} beatmapsets in cache needing difficulty creator updates. Migrating...`);
-      const { refreshAndCacheBeatmapset } = require('./routes/beatmaps');
-      for (const row of expiredMaps) {
-        try {
-          console.log(`[db] Migrating beatmapset ${row.beatmapset_id}...`);
-          await refreshAndCacheBeatmapset(db, row.beatmapset_id);
-          // Wait 2 seconds to avoid rate limits
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        } catch (err) {
-          console.error(`[db] Failed to migrate beatmapset ${row.beatmapset_id}:`, err.message);
-        }
-      }
-      console.log('[db] Difficulty creator migration finished.');
-    }
-  } catch (error) {
-    console.error('[db] Error in migrateExistingDifficulties:', error.message);
-  }
+async function ensureIndexes(db) {
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_requests_beatmapset_id
+      ON requests(beatmapset_id);
+    CREATE INDEX IF NOT EXISTS idx_requests_added_date
+      ON requests(added_date DESC);
+    CREATE INDEX IF NOT EXISTS idx_requests_status_deadline
+      ON requests(request_status, deadline);
+    CREATE INDEX IF NOT EXISTS idx_request_categories_request_category
+      ON request_categories(request_id, category_name);
+    CREATE INDEX IF NOT EXISTS idx_history_request_created
+      ON history(request_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_request_tags_tag_request
+      ON request_tags(tag_id, request_id);
+    CREATE INDEX IF NOT EXISTS idx_metadata_sync_queue
+      ON beatmap_metadata_sync(status, next_attempt_at, created_at, beatmapset_id);
+  `);
+}
+
+async function queueDifficultyCreatorMigration(db) {
+  await db.run(`
+    INSERT INTO beatmap_metadata_sync (beatmapset_id, status, attempt_count, next_attempt_at)
+    SELECT b.beatmapset_id, 'Pending', 0, CURRENT_TIMESTAMP
+    FROM beatmap_cache b
+    WHERE b.metadata_complete = 1
+      AND b.difficulties_json NOT LIKE '%creator_names%'
+      AND EXISTS (SELECT 1 FROM requests r WHERE r.beatmapset_id = b.beatmapset_id)
+    ON CONFLICT(beatmapset_id) DO UPDATE SET
+      status = CASE
+        WHEN beatmap_metadata_sync.status = 'Processing' THEN 'Processing'
+        WHEN beatmap_metadata_sync.status = 'Failed' THEN 'Failed'
+        ELSE 'Pending'
+      END,
+      attempt_count = CASE WHEN beatmap_metadata_sync.status = 'Failed' THEN beatmap_metadata_sync.attempt_count ELSE 0 END,
+      next_attempt_at = CASE
+        WHEN beatmap_metadata_sync.status = 'Processing' THEN beatmap_metadata_sync.next_attempt_at
+        WHEN beatmap_metadata_sync.status = 'Failed' THEN NULL
+        ELSE CURRENT_TIMESTAMP
+      END,
+      updated_at = CURRENT_TIMESTAMP
+  `);
 }
 
 // Add a column to a table if it does not already exist
@@ -177,9 +216,9 @@ async function addColumnIfMissing(db, table, column, type) {
 
 // SQLite does not support altering a CHECK constraint, so rebuild older request
 // tables that predate the Considering status while preserving their data.
-async function migrateRequestStatusConstraint(db) {
+async function migrateRequestSchema(db) {
   const table = await db.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'requests'");
-  if (!table?.sql || table.sql.includes("'Considering'")) return;
+  if (!table?.sql || (table.sql.includes("'Considering'") && table.sql.includes("DEFAULT 'Low'"))) return;
 
   const requestColumns = [
     'id',
@@ -204,9 +243,14 @@ async function migrateRequestStatusConstraint(db) {
     'guest_difficulty_target_sr',
     'guest_difficulty_name'
   ];
-  const existingColumns = new Set((await db.all('PRAGMA table_info(requests)')).map(column => column.name));
+  const existingColumnRows = await db.all('PRAGMA table_info(requests)');
+  const existingColumns = new Set(existingColumnRows.map(column => column.name));
+  const unknownColumns = existingColumnRows.filter(column => !requestColumns.includes(column.name));
+  const preservedDefinitions = unknownColumns
+    .map(column => `"${column.name.replace(/"/g, '""')}" ${column.type || 'TEXT'}`)
+    .join(', ');
   const columnsToCopy = requestColumns.filter(column => existingColumns.has(column));
-  const columnList = columnsToCopy.join(', ');
+  const columnList = [...columnsToCopy, ...unknownColumns.map(column => `"${column.name.replace(/"/g, '""')}"`)].join(', ');
 
   await db.exec('PRAGMA foreign_keys = OFF');
   try {
@@ -234,6 +278,7 @@ async function migrateRequestStatusConstraint(db) {
         last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
         guest_difficulty_target_sr REAL,
         guest_difficulty_name TEXT
+      ${preservedDefinitions ? `, ${preservedDefinitions}` : ''}
       )
     `);
     await db.exec(`INSERT INTO requests_new (${columnList}) SELECT ${columnList} FROM requests`);

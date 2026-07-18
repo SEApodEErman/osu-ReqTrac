@@ -5,6 +5,7 @@ const { fetchBeatmap, fetchBeatmapset, fetchUser, downloadCover } = require('../
 const { refreshAndCacheBeatmapset } = require('./beatmaps');
 const { createApiJob, updateApiJob, finishApiJob } = require('../osuApi');
 const { findUserDifficulty, isGuestDifficulty, parseOsuLink, parseOsuUserLink } = require('../utils/requestUtils');
+const { trackBackgroundTask } = require('../utils/backgroundTasks');
 
 // Helper to update or cache a user profile
 async function fetchAndCacheUser(db, userIdOrUsername) {
@@ -43,14 +44,26 @@ router.get('/', async (req, res, next) => {
     const requests = await db.all(`
       SELECT r.*, 
              b.artist AS cache_artist, b.title AS cache_title, b.creator AS cache_creator, b.creator_id AS cache_creator_id,
-             b.cover_url, b.local_cover_path, b.ranked_status, b.difficulties_json
+             b.cover_url, b.local_cover_path, b.ranked_status, b.difficulties_json, b.metadata_complete,
+             ms.status AS metadata_sync_status, ms.last_error AS metadata_sync_error
       FROM requests r
       LEFT JOIN beatmap_cache b ON r.beatmapset_id = b.beatmapset_id
+      LEFT JOIN beatmap_metadata_sync ms ON r.beatmapset_id = ms.beatmapset_id
       ORDER BY r.added_date DESC
     `);
 
     // Fetch all request categories
     const allCategories = await db.all('SELECT * FROM request_categories');
+    const categoriesByRequest = new Map();
+    for (const category of allCategories) {
+      if (!categoriesByRequest.has(category.request_id)) categoriesByRequest.set(category.request_id, []);
+      categoriesByRequest.get(category.request_id).push({
+        id: category.id,
+        category_name: category.category_name,
+        other_text: category.other_text,
+        status: category.status
+      });
+    }
 
     // Fetch all tags
     const allTags = await db.all(`
@@ -58,33 +71,30 @@ router.get('/', async (req, res, next) => {
       FROM request_tags rt 
       JOIN tags t ON rt.tag_id = t.id
     `);
+    const tagsByRequest = new Map();
+    for (const tag of allTags) {
+      if (!tagsByRequest.has(tag.request_id)) tagsByRequest.set(tag.request_id, []);
+      tagsByRequest.get(tag.request_id).push(tag.name);
+    }
 
     // Fetch all user caches
     const usersList = await db.all('SELECT * FROM users_cache');
     const userMap = new Map(usersList.map(u => [u.id, u]));
 
     // Fetch connected user details from settings
-    const connectedUserIdSetting = await db.get("SELECT value FROM settings WHERE key = 'connected_user_id'");
-    const connectedUsernameSetting = await db.get("SELECT value FROM settings WHERE key = 'connected_username'");
-    const connectedUserId = connectedUserIdSetting ? parseInt(connectedUserIdSetting.value, 10) : null;
-    const connectedUsername = connectedUsernameSetting ? connectedUsernameSetting.value : null;
+    const connectedSettings = await db.all("SELECT key, value FROM settings WHERE key IN ('connected_user_id', 'connected_username')");
+    const connectedSettingMap = new Map(connectedSettings.map(setting => [setting.key, setting.value]));
+    const connectedUserId = connectedSettingMap.has('connected_user_id')
+      ? parseInt(connectedSettingMap.get('connected_user_id'), 10)
+      : null;
+    const connectedUsername = connectedSettingMap.get('connected_username') || null;
 
     // Map categories, tags, and compute highest stars
     const formattedRequests = requests.map(reqRow => {
       const reqId = reqRow.id;
       
-      const categories = allCategories
-        .filter(c => c.request_id === reqId)
-        .map(c => ({
-          id: c.id,
-          category_name: c.category_name,
-          other_text: c.other_text,
-          status: c.status
-        }));
-
-      const tags = allTags
-        .filter(t => t.request_id === reqId)
-        .map(t => t.name);
+      const categories = categoriesByRequest.get(reqId) || [];
+      const tags = tagsByRequest.get(reqId) || [];
 
       // Parse difficulties
       let difficulties = [];
@@ -178,6 +188,11 @@ router.get('/', async (req, res, next) => {
         cover_url: reqRow.cover_url,
         local_cover_path: reqRow.local_cover_path || '/uploads/covers/default.jpg',
         ranked_status: reqRow.is_osu_link ? reqRow.ranked_status : 'Manual',
+        metadata_complete: !reqRow.is_osu_link || !!reqRow.metadata_complete,
+        metadata_sync_status: reqRow.is_osu_link
+          ? (reqRow.metadata_sync_status || (reqRow.metadata_complete ? 'Completed' : 'Pending'))
+          : 'Completed',
+        metadata_sync_error: reqRow.metadata_sync_error || null,
         requester_id: requesterId,
         requester_username: requesterUsername,
         requester_avatar: requesterAvatar,
@@ -196,11 +211,9 @@ router.get('/', async (req, res, next) => {
         last_updated: reqRow.last_updated,
         categories,
         tags,
-        difficulties,
         highest_stars: highestStars,
         num_difficulties: numDifficulties,
         // Guest difficulty info
-        guest_difficulties: guestDifficulties,
         highest_guest_stars: highestGuestStars,
         guest_difficulty_count: guestDifficultyCount,
         guest_difficulty_target_sr: reqRow.guest_difficulty_target_sr,
@@ -477,6 +490,174 @@ router.post('/', async (req, res, next) => {
   }
 });
 
+function normalizedRequestIds(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value
+    .map(id => Number(id))
+    .filter(id => Number.isSafeInteger(id) && id > 0))];
+}
+
+const MAX_BULK_REQUESTS = 400;
+
+// PATCH /api/requests/bulk - update one field or category operation for many requests.
+router.patch('/bulk', async (req, res, next) => {
+  const ids = normalizedRequestIds(req.body.ids);
+  if (ids.length === 0) return res.status(400).json({ error: 'Select at least one valid request.' });
+  if (ids.length > MAX_BULK_REQUESTS) return res.status(400).json({ error: `Bulk updates support up to ${MAX_BULK_REQUESTS} requests per batch.` });
+
+  const placeholders = ids.map(() => '?').join(',');
+  const db = await getDatabase();
+  let transactionStarted = false;
+  try {
+    await db.exec('BEGIN TRANSACTION');
+    transactionStarted = true;
+    let updated = 0;
+
+    if (req.body.request_status !== undefined) {
+      const status = req.body.request_status;
+      if (!['Accepted', 'Considering', 'Working', 'Completed', 'Cancelled'].includes(status)) {
+        await db.exec('ROLLBACK');
+        transactionStarted = false;
+        return res.status(400).json({ error: 'Invalid request status.' });
+      }
+      const oldRows = await db.all(
+        `SELECT id, request_status, beatmapset_id FROM requests WHERE id IN (${placeholders}) AND request_status <> ?`,
+        ...ids, status
+      );
+      const update = await db.run(`
+        UPDATE requests
+        SET request_status = ?,
+            completed_date = CASE WHEN ? = 'Completed' THEN CURRENT_TIMESTAMP ELSE NULL END,
+            last_updated = CURRENT_TIMESTAMP
+        WHERE id IN (${placeholders}) AND request_status <> ?
+      `, status, status, ...ids, status);
+      updated = update.changes || 0;
+      for (const row of oldRows) {
+        await db.run(
+          'INSERT INTO history (request_id, action_type, details) VALUES (?, ?, ?)',
+          row.id, 'status_change', `Status changed: ${row.request_status} -> ${status}`
+        );
+      }
+
+      await db.exec('COMMIT');
+      transactionStarted = false;
+
+      const refreshCandidates = await db.all(`
+        SELECT DISTINCT r.beatmapset_id
+        FROM requests r
+        JOIN beatmap_cache b ON b.beatmapset_id = r.beatmapset_id
+        WHERE r.id IN (${placeholders})
+          AND lower(b.ranked_status) IN ('pending', 'wip', 'graveyard')
+      `, ...ids);
+      if (refreshCandidates.length > 0) {
+        const { enqueueBeatmapRefresh } = require('../services/beatmapMetadataSync');
+        for (const row of refreshCandidates) {
+          await enqueueBeatmapRefresh(db, row.beatmapset_id);
+        }
+      }
+      return res.json({ success: true, updated });
+    }
+
+    if (req.body.priority !== undefined) {
+      const priority = req.body.priority;
+      if (!['Low', 'Medium', 'High'].includes(priority)) {
+        await db.exec('ROLLBACK');
+        transactionStarted = false;
+        return res.status(400).json({ error: 'Invalid priority.' });
+      }
+      const oldRows = await db.all(
+        `SELECT id, priority FROM requests WHERE id IN (${placeholders}) AND priority <> ?`,
+        ...ids, priority
+      );
+      const update = await db.run(
+        `UPDATE requests SET priority = ?, last_updated = CURRENT_TIMESTAMP WHERE id IN (${placeholders}) AND priority <> ?`,
+        priority, ...ids, priority
+      );
+      updated = update.changes || 0;
+      for (const row of oldRows) {
+        await db.run(
+          'INSERT INTO history (request_id, action_type, details) VALUES (?, ?, ?)',
+          row.id, 'priority_change', `Priority updated: ${row.priority} -> ${priority}`
+        );
+      }
+    } else if (req.body.categoryName !== undefined) {
+      const categoryName = req.body.categoryName;
+      const mode = req.body.mode === 'add' ? 'add' : 'move';
+      if (!['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others'].includes(categoryName)) {
+        await db.exec('ROLLBACK');
+        transactionStarted = false;
+        return res.status(400).json({ error: 'Invalid request category.' });
+      }
+      if (mode === 'move') {
+        await db.run(
+          `DELETE FROM request_categories WHERE request_id IN (${placeholders}) AND category_name <> ?`,
+          ...ids, categoryName
+        );
+      }
+      const insert = await db.run(`
+        INSERT INTO request_categories (request_id, category_name, other_text, status)
+        SELECT r.id, ?, NULL, 'Pending'
+        FROM requests r
+        WHERE r.id IN (${placeholders})
+          AND NOT EXISTS (
+            SELECT 1 FROM request_categories c
+            WHERE c.request_id = r.id AND c.category_name = ?
+          )
+      `, categoryName, ...ids, categoryName);
+      updated = mode === 'move' ? ids.length : (insert.changes || 0);
+      await db.run(`
+        INSERT INTO history (request_id, action_type, details)
+        SELECT id, 'bulk_category_change', ? FROM requests WHERE id IN (${placeholders})
+      `, `${mode === 'move' ? 'Moved to' : 'Added to'} category: ${categoryName}`, ...ids);
+    } else {
+      await db.exec('ROLLBACK');
+      transactionStarted = false;
+      return res.status(400).json({ error: 'No supported bulk update was provided.' });
+    }
+
+    await db.exec('COMMIT');
+    transactionStarted = false;
+    res.json({ success: true, updated });
+  } catch (error) {
+    if (transactionStarted) await db.exec('ROLLBACK').catch(() => {});
+    next(error);
+  }
+});
+
+// DELETE /api/requests/bulk - delete many requests in one transaction.
+router.delete('/bulk', async (req, res, next) => {
+  const ids = normalizedRequestIds(req.body.ids);
+  if (ids.length === 0) return res.status(400).json({ error: 'Select at least one valid request.' });
+  if (ids.length > MAX_BULK_REQUESTS) return res.status(400).json({ error: `Bulk deletes support up to ${MAX_BULK_REQUESTS} requests per batch.` });
+
+  const placeholders = ids.map(() => '?').join(',');
+  const db = await getDatabase();
+  let transactionStarted = false;
+  try {
+    const beatmapRows = await db.all(
+      `SELECT DISTINCT beatmapset_id FROM requests WHERE id IN (${placeholders}) AND beatmapset_id IS NOT NULL`,
+      ...ids
+    );
+    await db.exec('BEGIN TRANSACTION');
+    transactionStarted = true;
+    const result = await db.run(`DELETE FROM requests WHERE id IN (${placeholders})`, ...ids);
+    for (const row of beatmapRows) {
+      await db.run(`
+        DELETE FROM beatmap_metadata_sync
+        WHERE beatmapset_id = ? AND NOT EXISTS (
+          SELECT 1 FROM requests WHERE beatmapset_id = ?
+        )
+      `, row.beatmapset_id, row.beatmapset_id);
+    }
+    await db.exec('COMMIT');
+    transactionStarted = false;
+    res.json({ success: true, deleted: result.changes || 0 });
+  } catch (error) {
+    if (transactionStarted) await db.exec('ROLLBACK').catch(() => {});
+    next(error);
+  }
+});
+
 // PATCH /api/requests/:id - update request details and categories
 router.patch('/:id', async (req, res, next) => {
   try {
@@ -700,10 +881,19 @@ router.delete('/:id', async (req, res, next) => {
   try {
     const requestId = parseInt(req.params.id, 10);
     const db = await getDatabase();
+    const request = await db.get('SELECT beatmapset_id FROM requests WHERE id = ?', requestId);
 
     const result = await db.run('DELETE FROM requests WHERE id = ?', requestId);
     if (result.changes === 0) {
       return res.status(404).json({ error: 'Request not found' });
+    }
+    if (request?.beatmapset_id) {
+      await db.run(`
+        DELETE FROM beatmap_metadata_sync
+        WHERE beatmapset_id = ? AND NOT EXISTS (
+          SELECT 1 FROM requests WHERE beatmapset_id = ?
+        )
+      `, request.beatmapset_id, request.beatmapset_id);
     }
 
     res.json({ success: true, message: 'Request deleted successfully' });
@@ -805,7 +995,7 @@ router.post('/refresh-dates', async (req, res, next) => {
       return res.json({ success: true, message: 'No osu! link requests found to update.' });
     }
 
-    const apiJobId = createApiJob('Refreshing request dates', rows.length * 2);
+    const apiJobId = createApiJob('Refreshing request dates', rows.length);
 
     // Respond immediately; process in the background (throttled osu! API calls)
     res.json({
@@ -813,7 +1003,7 @@ router.post('/refresh-dates', async (req, res, next) => {
       message: `Refreshing request dates for ${rows.length} requests in the background. This may take a while due to API rate limiting.`
     });
 
-    (async () => {
+    trackBackgroundTask((async () => {
       let updated = 0;
       try {
         for (const row of rows) {
@@ -836,7 +1026,7 @@ router.post('/refresh-dates', async (req, res, next) => {
         finishApiJob(apiJobId);
       }
       console.log(`[refresh-dates] Updated request dates for ${updated}/${rows.length} requests.`);
-    })();
+    })());
   } catch (error) {
     next(error);
   }

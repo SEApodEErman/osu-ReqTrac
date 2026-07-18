@@ -369,10 +369,42 @@ button, input, select, textarea {
 .spin { display: block; transform-origin: center; animation: toastSpin 1s linear infinite; }
 @keyframes toastSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .app-toast-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; border-radius: 0 0 10px 10px; background: var(--osu-pink); transform-origin: left; animation: toastProgress 5s linear forwards; pointer-events: none; }
+.app-toast-progress-tracked { animation: none; transition: transform 0.2s ease; }
 .app-toast-error .app-toast-progress { background: var(--priority-high); }
 .app-toast-success .app-toast-progress { background: var(--req-completed); }
 .app-toast-warning .app-toast-progress { background: var(--priority-medium); }
 @keyframes toastProgress { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+
+/* In-app confirmation dialogs */
+.app-confirmation-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.65);
+}
+.app-confirmation-dialog {
+  width: min(480px, calc(100vw - 32px));
+  padding: 20px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+}
+.app-confirmation-dialog-danger { border-color: rgba(231, 76, 60, 0.65); }
+.app-confirmation-header { display: flex; align-items: center; gap: 10px; }
+.app-confirmation-header h2 { flex: 1; margin: 0; font-size: 17px; }
+.app-confirmation-icon { color: var(--priority-high); display: flex; }
+.app-confirmation-dialog-warning .app-confirmation-icon { color: var(--priority-medium); }
+.app-confirmation-close { color: var(--text-muted); padding: 3px; cursor: pointer; }
+.app-confirmation-close:hover { color: var(--text-main); }
+.app-confirmation-message { margin: 14px 0 20px; color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+.app-confirmation-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.app-confirmation-confirm { color: var(--priority-high); border-color: rgba(231, 76, 60, 0.5); }
+.app-confirmation-dialog-warning .app-confirmation-confirm { color: var(--priority-medium); border-color: rgba(243, 156, 18, 0.5); }
 
 /* Generic Layout Utilities */
 .dashboard-grid {
@@ -658,7 +690,32 @@ select.input-text {
 .requests-table-container {
   container: request-table / inline-size;
   max-width: 100%;
+  max-height: calc(100vh - 260px);
   overflow-x: hidden;
+  overflow-y: auto;
+  contain: layout paint;
+}
+
+.requests-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.requests-table tbody tr:not(.virtual-spacer-row) {
+  height: 72px;
+}
+
+.requests-table .virtual-spacer-row,
+.requests-table .virtual-spacer-row:hover {
+  height: auto;
+  background: transparent;
+  cursor: default;
+}
+
+.requests-table .virtual-spacer-row td {
+  padding: 0;
+  border: 0;
 }
 
 .requests-table .request-col-select { width: 4%; }
@@ -842,7 +899,7 @@ select.input-text {
 
 @container request-table (max-width: 760px) {
   .requests-table {
-    --request-text-lines: 3;
+    --request-text-lines: 2;
   }
 
   .compact-table.requests-table th,

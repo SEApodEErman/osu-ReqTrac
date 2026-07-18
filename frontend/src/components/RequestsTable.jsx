@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { 
   ArrowUpDown, 
   Search, 
@@ -9,7 +9,9 @@ import {
   X,
   ExternalLink,
   MessageSquare,
-  Tag
+  Tag,
+  RefreshCw,
+  AlertCircle
 } from 'lucide-react';
 
 // osu! official star difficulty spectrum from osu.Game.Rulesets.Osu.Difficulty.OsuColour
@@ -67,6 +69,8 @@ const BEATMAP_STATUS_ORDER = ['Manual', 'WIP', 'Pending', 'Qualified', 'Loved', 
 const REQUEST_STATUS_ORDER = ['Working', 'Accepted', 'Considering', 'Completed', 'Cancelled'];
 const PRIORITY_ORDER = ['High', 'Medium', 'Low'];
 const RANKED_SORT_FIELDS = new Set(['ranked_status', 'request_status', 'priority']);
+const VIRTUAL_ROW_HEIGHT = 72;
+const VIRTUAL_OVERSCAN = 8;
 
 function getOrderedValue(value, order) {
   const normalizedValue = (value || '').toString().toLowerCase();
@@ -165,9 +169,11 @@ export default function RequestsTable({
   onDeleteRequest, 
   onUpdateRequest,
   onBulkUpdateStatus,
+  isBulkStatusUpdating = false,
   onBulkUpdatePriority,
   onBulkUpdateCategory,
   onBulkDelete,
+  onRequestConfirmation = async () => false,
   activeCategory,
   sortBy,
   sortOrder,
@@ -178,6 +184,9 @@ export default function RequestsTable({
   const [priorityFilter, setPriorityFilter] = useState('');
   const [tagFilter, setTagFilter] = useState('');
   const [selectedIds, setSelectedIds] = useState([]);
+  const tableContainerRef = useRef(null);
+  const scrollFrameRef = useRef(null);
+  const [virtualViewport, setVirtualViewport] = useState({ scrollTop: 0, height: 600 });
   
   const toggleSort = (field) => {
     if (sortBy === field) {
@@ -292,6 +301,54 @@ export default function RequestsTable({
 
     return result;
   }, [requestsList, searchTerm, activeCategory, statusFilter, priorityFilter, tagFilter, sortBy, sortOrder]);
+
+  useEffect(() => {
+    const container = tableContainerRef.current;
+    if (!container) return undefined;
+
+    const updateHeight = () => {
+      setVirtualViewport(current => ({ ...current, height: container.clientHeight || 600 }));
+    };
+    updateHeight();
+
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const container = tableContainerRef.current;
+    if (container) container.scrollTop = 0;
+    setVirtualViewport(current => ({ ...current, scrollTop: 0 }));
+  }, [searchTerm, activeCategory, statusFilter, priorityFilter, tagFilter, sortBy, sortOrder]);
+
+  useEffect(() => () => {
+    if (scrollFrameRef.current) cancelAnimationFrame(scrollFrameRef.current);
+  }, []);
+
+  const handleVirtualScroll = useCallback((event) => {
+    const container = event.currentTarget;
+    if (scrollFrameRef.current) return;
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      setVirtualViewport({
+        scrollTop: container.scrollTop,
+        height: container.clientHeight || 600,
+      });
+    });
+  }, []);
+
+  const virtualWindow = useMemo(() => {
+    const visibleCount = Math.ceil(virtualViewport.height / VIRTUAL_ROW_HEIGHT);
+    const start = Math.max(0, Math.floor(virtualViewport.scrollTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_OVERSCAN);
+    const end = Math.min(filteredRequests.length, start + visibleCount + (VIRTUAL_OVERSCAN * 2));
+    return {
+      rows: filteredRequests.slice(start, end),
+      start,
+      topSpacerHeight: start * VIRTUAL_ROW_HEIGHT,
+      bottomSpacerHeight: Math.max(0, (filteredRequests.length - end) * VIRTUAL_ROW_HEIGHT),
+    };
+  }, [filteredRequests, virtualViewport]);
 
   // Bulk select toggles
   const handleSelectAll = (e) => {
@@ -434,13 +491,20 @@ export default function RequestsTable({
       </div>
 
       {/* Main Table Container */}
-      <div className="table-container requests-table-container">
+      <div
+        ref={tableContainerRef}
+        className="table-container requests-table-container"
+        onScroll={handleVirtualScroll}
+      >
         {filteredRequests.length === 0 ? (
           <div style={{ padding: '48px 24px', textAlign: 'center', color: 'var(--text-muted)' }}>
             No requests match your current filters.
           </div>
         ) : (
-          <table className={`compact-table requests-table${showTags ? ' requests-table-with-tags' : ''}`}>
+          <table
+            className={`compact-table requests-table${showTags ? ' requests-table-with-tags' : ''}`}
+            aria-rowcount={filteredRequests.length}
+          >
             <colgroup>
               <col className="request-col-select" />
               <col className="request-col-cover" />
@@ -479,9 +543,16 @@ export default function RequestsTable({
               </tr>
             </thead>
             <tbody>
-              {filteredRequests.map(req => {
+              {virtualWindow.topSpacerHeight > 0 && (
+                <tr className="virtual-spacer-row" aria-hidden="true">
+                  <td colSpan={showTags ? 11 : 10} style={{ height: `${virtualWindow.topSpacerHeight}px` }} />
+                </tr>
+              )}
+              {virtualWindow.rows.map((req, virtualIndex) => {
                 const deadlineInfo = getDeadlineInfo(req.deadline);
                 const isChecked = selectedIds.includes(req.id);
+                const isMetadataPending = req.metadata_sync_status === 'Pending' || req.metadata_sync_status === 'Processing';
+                const metadataFailed = req.metadata_sync_status === 'Failed';
                 
 
 
@@ -489,6 +560,7 @@ export default function RequestsTable({
                   <tr 
                     key={req.id} 
                     onClick={() => onOpenRequest(req)}
+                    aria-rowindex={virtualWindow.start + virtualIndex + 2}
                     style={{ backgroundColor: isChecked ? 'var(--hover-bg)' : '' }}
                   >
                     {/* Checkbox */}
@@ -509,6 +581,8 @@ export default function RequestsTable({
                         alt="cover" 
                         width={56}
                         height={32}
+                        loading="lazy"
+                        decoding="async"
                         onError={(e) => {
                           e.target.src = '/uploads/covers/default.jpg';
                         }}
@@ -523,7 +597,7 @@ export default function RequestsTable({
                             className="request-title"
                             title={req.title}
                           >
-                            {req.title}
+                            {req.title || (isMetadataPending ? 'Syncing metadata...' : `Beatmapset ${req.beatmapset_id}`)}
                           </span>
                           <StarRatingBadge stars={req.highest_stars} />
                           {req.priority === 'High' && (
@@ -537,7 +611,7 @@ export default function RequestsTable({
                           )}
                         </div>
                         <div className="request-song-subtitle">
-                          {req.artist} • <span style={{ color: 'var(--text-main)' }}>{req.creator}</span>
+                          {isMetadataPending && !req.artist ? 'Background sync in progress' : <>{req.artist || 'Unknown artist'} • <span style={{ color: 'var(--text-main)' }}>{req.creator || 'Unknown creator'}</span></>}
                         </div>
                       </div>
                     </td>
@@ -581,8 +655,10 @@ export default function RequestsTable({
 
                     {/* Beatmap Status */}
                     <td>
-                      <span className={`badge request-beatmap-badge badge-${(req.ranked_status || 'Manual').toLowerCase()}`}>
-                        {req.ranked_status || 'Manual'}
+                      <span title={metadataFailed ? req.metadata_sync_error : undefined} className={`badge request-beatmap-badge badge-${metadataFailed ? 'cancelled' : isMetadataPending ? 'pending' : (req.ranked_status || 'Manual').toLowerCase()}`}>
+                        {isMetadataPending && <RefreshCw size={10} className="spin" style={{ marginRight: '4px' }} />}
+                        {metadataFailed && <AlertCircle size={10} style={{ marginRight: '4px' }} />}
+                        {metadataFailed ? 'Sync failed' : isMetadataPending ? 'Syncing' : (req.ranked_status || 'Manual')}
                       </span>
                     </td>
 
@@ -697,8 +773,13 @@ export default function RequestsTable({
                           <Edit3 size={14} />
                         </button>
                         <button 
-                          onClick={() => {
-                            if (confirm('Delete this request?')) onDeleteRequest(req.id);
+                          onClick={async () => {
+                            const confirmed = await onRequestConfirmation({
+                              title: 'Delete request?',
+                              message: 'This request and its associated categories will be permanently deleted.',
+                              confirmLabel: 'Delete request',
+                            });
+                            if (confirmed) onDeleteRequest(req.id);
                           }} 
                           title="Delete"
                           style={{ padding: '6px', borderRadius: '4px', color: 'var(--text-muted)', cursor: 'pointer' }}
@@ -719,6 +800,11 @@ export default function RequestsTable({
                   </tr>
                 );
               })}
+              {virtualWindow.bottomSpacerHeight > 0 && (
+                <tr className="virtual-spacer-row" aria-hidden="true">
+                  <td colSpan={showTags ? 11 : 10} style={{ height: `${virtualWindow.bottomSpacerHeight}px` }} />
+                </tr>
+              )}
             </tbody>
           </table>
         )}
@@ -746,7 +832,7 @@ export default function RequestsTable({
           zIndex: 100,
         }} className="bulk-action-bar">
           <span style={{ fontSize: '13px', fontWeight: '600' }}>
-            {selectedIds.length} requests selected
+            {selectedIds.length} requests selected{isBulkStatusUpdating ? ' · updating...' : ''}
           </span>
           
           <div style={{ width: '1px', height: '24px', backgroundColor: 'var(--border)' }} />
@@ -757,11 +843,14 @@ export default function RequestsTable({
             <select
               onChange={(e) => {
                 if (e.target.value) {
-                  onBulkUpdateStatus(selectedIds, e.target.value);
-                  setSelectedIds([]);
+                  const updatedIds = [...selectedIds];
+                  void onBulkUpdateStatus(updatedIds, e.target.value).then(started => {
+                    if (started) setSelectedIds(current => current.filter(id => !updatedIds.includes(id)));
+                  });
                   e.target.value = '';
                 }
               }}
+              disabled={isBulkStatusUpdating}
               className="input-text"
               style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
             >
@@ -785,6 +874,7 @@ export default function RequestsTable({
                   e.target.value = '';
                 }
               }}
+              disabled={isBulkStatusUpdating}
               className="input-text"
               style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
             >
@@ -800,6 +890,7 @@ export default function RequestsTable({
             <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Type:</span>
             <select
               onChange={(e) => handleBulkCategoryAction(e, 'move')}
+              disabled={isBulkStatusUpdating}
               className="input-text"
               style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
             >
@@ -811,6 +902,7 @@ export default function RequestsTable({
             </select>
             <select
               onChange={(e) => handleBulkCategoryAction(e, 'add')}
+              disabled={isBulkStatusUpdating}
               className="input-text"
               style={{ padding: '4px 8px', fontSize: '12px', width: '105px' }}
             >
@@ -823,8 +915,14 @@ export default function RequestsTable({
           </div>
 
           <button
-            onClick={() => {
-              if (confirm(`Are you sure you want to delete ${selectedIds.length} requests?`)) {
+            disabled={isBulkStatusUpdating}
+            onClick={async () => {
+              const confirmed = await onRequestConfirmation({
+                title: `Delete ${selectedIds.length} requests?`,
+                message: 'The selected requests and their associated categories will be permanently deleted.',
+                confirmLabel: 'Delete requests',
+              });
+              if (confirmed) {
                 onBulkDelete(selectedIds);
                 setSelectedIds([]);
               }

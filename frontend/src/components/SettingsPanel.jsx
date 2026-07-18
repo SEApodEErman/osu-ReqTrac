@@ -11,19 +11,24 @@ import {
   Monitor,
   AlertCircle,
   CheckCircle,
-  RefreshCw
+  RefreshCw,
+  Trash2
 } from 'lucide-react';
+import SpreadsheetImportModal from './SpreadsheetImportModal';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 
 export default function SettingsPanel({ 
   settingsData, 
   theme,
   onThemeChange,
-  onSaveCredentials, 
-  onDisconnect, 
+  onSaveCredentials,
+  onDisconnect,
+  onDeleteAllData,
   onImportJson,
+  onSpreadsheetImported = async () => {},
   onNotify = () => {},
+  onRequestConfirmation = async () => false,
   showFirstLaunchSetup = false,
   onDismissFirstLaunchSetup
 }) {
@@ -70,6 +75,9 @@ export default function SettingsPanel({
 
   // Refresh request dates state
   const [isRefreshingDates, setIsRefreshingDates] = useState(false);
+  const [isSpreadsheetImportOpen, setIsSpreadsheetImportOpen] = useState(false);
+  const [metadataSyncStatus, setMetadataSyncStatus] = useState(null);
+  const [isRetryingMetadata, setIsRetryingMetadata] = useState(false);
 
   // Google Sheets publishing state
   const [googleStatus, setGoogleStatus] = useState(null);
@@ -84,9 +92,26 @@ export default function SettingsPanel({
     }
   }, []);
 
+  const loadMetadataSyncStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/beatmaps/sync/status');
+      if (res.ok) setMetadataSyncStatus(await res.json());
+    } catch (e) {
+      console.error('Failed to load metadata sync status:', e);
+    }
+  }, []);
+
   useEffect(() => {
     void loadGoogleStatus();
-  }, [loadGoogleStatus]);
+    void loadMetadataSyncStatus();
+  }, [loadGoogleStatus, loadMetadataSyncStatus]);
+
+  const hasActiveMetadataSync = (metadataSyncStatus?.Pending || 0) + (metadataSyncStatus?.Processing || 0) > 0;
+  useEffect(() => {
+    if (!hasActiveMetadataSync) return undefined;
+    const intervalId = window.setInterval(() => void loadMetadataSyncStatus(), 3000);
+    return () => window.clearInterval(intervalId);
+  }, [hasActiveMetadataSync, loadMetadataSyncStatus]);
 
   useEffect(() => {
     const refreshWhenFocused = () => {
@@ -138,7 +163,12 @@ export default function SettingsPanel({
   };
 
   const disconnectGoogle = async () => {
-    if (!confirm('Disconnect Google Sheets? The existing sheet will remain in your Drive.')) return;
+    const confirmed = await onRequestConfirmation({
+      title: 'Disconnect Google Sheets?',
+      message: 'The existing sheet will remain in your Drive, but ReqTrac will no longer be connected to it.',
+      confirmLabel: 'Disconnect',
+    });
+    if (!confirmed) return;
     setIsGoogleBusy(true);
     try {
       const res = await fetch('/api/google/disconnect', { method: 'POST' });
@@ -152,8 +182,12 @@ export default function SettingsPanel({
   };
 
   const handleRefreshDates = async () => {
-    const confirmRefresh = confirm('This will overwrite the "Date Added" of all osu! link requests with each map\'s ranked/loved date, or its last updated date when it is not Ranked or Loved. Continue?');
-    if (!confirmRefresh) return;
+    const confirmed = await onRequestConfirmation({
+      title: 'Overwrite request dates?',
+      message: 'This will replace the "Date Added" of all osu! link requests with each map\'s ranked/loved date, or its last updated date when it is not Ranked or Loved.',
+      confirmLabel: 'Refresh dates',
+    });
+    if (!confirmed) return;
 
     setIsRefreshingDates(true);
     try {
@@ -172,9 +206,27 @@ export default function SettingsPanel({
     }
   };
 
+  const retryFailedMetadata = async () => {
+    setIsRetryingMetadata(true);
+    try {
+      const res = await fetch('/api/beatmaps/sync/retry', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to retry metadata synchronization.');
+      onNotify(data.message, 'success');
+      await loadMetadataSyncStatus();
+    } catch (e) {
+      onNotify(e.message, 'error');
+    } finally {
+      setIsRetryingMetadata(false);
+    }
+  };
+
   // JSON Backup upload state
   const [jsonFile, setJsonFile] = useState(null);
   const [isRestoringJson, setIsRestoringJson] = useState(false);
+  const [isDeletingAllData, setIsDeletingAllData] = useState(false);
+  const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+  const [deleteConfirmationText, setDeleteConfirmationText] = useState('');
 
   const handleSaveCredentials = async (e) => {
     e.preventDefault();
@@ -204,8 +256,12 @@ export default function SettingsPanel({
     e.preventDefault();
     if (!jsonFile) return;
 
-    const confirmRestore = confirm('WARNING: Importing backup data will overwrite all existing requests, categories, and settings. Proceed?');
-    if (!confirmRestore) return;
+    const confirmed = await onRequestConfirmation({
+      title: 'Restore backup and replace existing data?',
+      message: 'Importing this backup will replace all existing requests, categories, metadata, settings, and cached data. Backups may contain osu! and Google credentials, so only restore a trusted private backup.',
+      confirmLabel: 'Restore backup',
+    });
+    if (!confirmed) return;
 
     setIsRestoringJson(true);
     try {
@@ -227,6 +283,36 @@ export default function SettingsPanel({
       console.error(e);
     } finally {
       setIsRestoringJson(false);
+    }
+  };
+
+  const openDeleteConfirmation = () => {
+    if (isDeletingAllData) return;
+    setDeleteConfirmationText('');
+    setIsDeleteConfirmOpen(true);
+  };
+
+  const cancelDeleteConfirmation = () => {
+    if (isDeletingAllData) return;
+    setDeleteConfirmationText('');
+    setIsDeleteConfirmOpen(false);
+  };
+
+  const handleDeleteAllData = async (event) => {
+    event.preventDefault();
+    if (isDeletingAllData || deleteConfirmationText !== 'DELETE') return;
+
+    setIsDeletingAllData(true);
+    try {
+      await onDeleteAllData();
+      setIsDeleteConfirmOpen(false);
+      setDeleteConfirmationText('');
+      onNotify('All local application data was deleted.', 'success');
+    } catch (error) {
+      console.error(error);
+      onNotify(error.message || 'Failed to delete all application data.', 'error');
+    } finally {
+      setIsDeletingAllData(false);
     }
   };
 
@@ -355,6 +441,26 @@ export default function SettingsPanel({
           </form>
         </div>
 
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '12px', border: '1px solid rgba(231, 76, 60, 0.45)' }}>
+          <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--priority-high)' }}>
+            <Trash2 size={18} />
+            Delete All Data
+          </h3>
+          <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+            Permanently remove all local requests, history, tags, cached osu! metadata, downloaded covers, credentials, and Google Sheets connection data. Google Sheets already published to Drive will remain there.
+          </p>
+          <button
+            type="button"
+            onClick={openDeleteConfirmation}
+            className="btn-secondary"
+            disabled={isDeletingAllData}
+            style={{ width: 'fit-content', color: 'var(--priority-high)', borderColor: 'rgba(231, 76, 60, 0.5)' }}
+          >
+            <Trash2 size={14} />
+            <span>{isDeletingAllData ? 'Deleting...' : 'Delete All Data'}</span>
+          </button>
+        </div>
+
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
             <FileSpreadsheet size={18} style={{ color: 'var(--req-completed)' }} />
@@ -404,6 +510,32 @@ export default function SettingsPanel({
         </div>
 
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <FileSpreadsheet size={18} style={{ color: 'var(--req-completed)' }} />
+            Import Requests from Spreadsheet
+          </h3>
+          <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+            Migrate CSV, Excel, or public Google Sheets data while mapping columns such as remarks to request notes. You can review mappings and validation before importing.
+          </p>
+          {metadataSyncStatus && <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', fontSize: '11px', color: 'var(--text-muted)' }}>
+            <span>Pending: <strong style={{ color: 'var(--text-main)' }}>{metadataSyncStatus.Pending}</strong></span>
+            <span>Processing: <strong style={{ color: 'var(--text-main)' }}>{metadataSyncStatus.Processing}</strong></span>
+            <span>Completed: <strong style={{ color: 'var(--text-main)' }}>{metadataSyncStatus.Completed}</strong></span>
+            <span>Failed: <strong style={{ color: metadataSyncStatus.Failed ? 'var(--priority-high)' : 'var(--text-main)' }}>{metadataSyncStatus.Failed}</strong></span>
+          </div>}
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <button type="button" className="btn-secondary" onClick={() => setIsSpreadsheetImportOpen(true)} style={{ width: 'fit-content' }}>
+              <Upload size={14} />
+              <span>Import Spreadsheet</span>
+            </button>
+            {(metadataSyncStatus?.Failed || 0) > 0 && <button type="button" className="btn-secondary" onClick={retryFailedMetadata} disabled={isRetryingMetadata} style={{ width: 'fit-content' }}>
+              <RefreshCw size={14} className={isRetryingMetadata ? 'spin' : ''} />
+              <span>{isRetryingMetadata ? 'Retrying...' : 'Retry Failed Metadata'}</span>
+            </button>}
+          </div>
+        </div>
+
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           <h4 style={{ fontSize: '13px', fontWeight: '600' }}>Refresh Added Dates</h4>
           <p style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
             Set the &quot;Date Added&quot; of each osu! link request to the map&apos;s ranked/loved date, or its last updated date when it is not Ranked or Loved. Useful after importing from a spreadsheet. Runs in the background and may take a while due to API rate limiting.
@@ -428,6 +560,9 @@ export default function SettingsPanel({
           <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
             Export all requests, tags, history logs, settings, and cached metadata to a consolidated backup file, or restore from a previously exported <code>backup.json</code> file.
           </p>
+          <div style={{ padding: '12px', borderRadius: '8px', border: '1px solid rgba(231, 76, 60, 0.4)', backgroundColor: 'rgba(231, 76, 60, 0.1)', color: 'var(--text-muted)', fontSize: '12px' }}>
+            <strong style={{ color: 'var(--priority-high)' }}>Treat backup.json like a key.</strong> It contains your request database and configured osu!/Google credentials. Never upload it to a public repository, issue, chat, or file-sharing link. Store it privately and share it only through a trusted, secure channel.
+          </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
             
@@ -560,6 +695,80 @@ export default function SettingsPanel({
         </div>
 
       </div>
+
+      {isDeleteConfirmOpen && (
+        <div
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) cancelDeleteConfirmation();
+          }}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '24px',
+            backgroundColor: 'rgba(0, 0, 0, 0.65)'
+          }}
+        >
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-all-data-title"
+            onSubmit={handleDeleteAllData}
+            className="card"
+            style={{ width: '100%', maxWidth: '520px', display: 'flex', flexDirection: 'column', gap: '16px', border: '1px solid rgba(231, 76, 60, 0.65)', boxShadow: 'var(--shadow-lg)' }}
+          >
+            <div>
+              <h2 id="delete-all-data-title" style={{ fontSize: '18px', color: 'var(--priority-high)', marginBottom: '8px' }}>Delete all local data?</h2>
+              <p style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                This permanently deletes all requests, history, tags, cached osu! metadata, downloaded cover images, saved credentials, and Google Sheets connection data. Google Sheets already published to Drive will remain there.
+              </p>
+            </div>
+            <div>
+              <label htmlFor="delete-all-data-confirmation" style={{ display: 'block', fontSize: '12px', fontWeight: '600', marginBottom: '6px' }}>
+                Type <code>DELETE</code> to confirm
+              </label>
+              <input
+                id="delete-all-data-confirmation"
+                type="text"
+                className="input-text"
+                value={deleteConfirmationText}
+                onChange={(event) => setDeleteConfirmationText(event.target.value)}
+                autoFocus
+                autoComplete="off"
+                spellCheck="false"
+                disabled={isDeletingAllData}
+              />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+              <button type="button" className="btn-secondary" onClick={cancelDeleteConfirmation} disabled={isDeletingAllData}>Cancel</button>
+              <button
+                type="submit"
+                className="btn-secondary"
+                disabled={isDeletingAllData || deleteConfirmationText !== 'DELETE'}
+                style={{ color: 'var(--priority-high)', borderColor: 'rgba(231, 76, 60, 0.5)' }}
+              >
+                <Trash2 size={14} />
+                <span>{isDeletingAllData ? 'Deleting...' : 'Delete Everything'}</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {isSpreadsheetImportOpen && (
+        <SpreadsheetImportModal
+          onClose={() => setIsSpreadsheetImportOpen(false)}
+          onImported={async () => {
+            await onSpreadsheetImported();
+            await loadMetadataSyncStatus();
+          }}
+          onNotify={onNotify}
+        />
+      )}
 
       <footer style={{
         borderTop: '1px solid var(--border)',

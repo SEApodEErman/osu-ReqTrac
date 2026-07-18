@@ -126,6 +126,7 @@ export default function RequestDetailModal({
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isRefreshingMetadata, setIsRefreshingMetadata] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const isMetadataPending = request.metadata_sync_status === 'Pending' || request.metadata_sync_status === 'Processing';
   
   // Local editable states
   const [requestStatus, setRequestStatus] = useState(request.request_status);
@@ -361,10 +362,10 @@ export default function RequestDetailModal({
           {/* Heading metadata */}
           <div style={{ color: 'white' }}>
             <h2 style={{ fontSize: '24px', fontWeight: '800', fontFamily: 'var(--font-display)', textShadow: '0 2px 4px rgba(0,0,0,0.5)' }}>
-              {request.title}
+              {request.title || (isMetadataPending ? 'Syncing beatmap metadata...' : `Beatmapset ${request.beatmapset_id}`)}
             </h2>
             <p style={{ opacity: 0.9, fontSize: '14px', textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>
-              by {request.artist} • Mapped by {request.creator}
+              {request.artist ? `by ${request.artist} • Mapped by ${request.creator || 'Unknown'}` : 'Metadata will appear when background synchronization completes.'}
             </p>
           </div>
         </div>
@@ -383,14 +384,14 @@ export default function RequestDetailModal({
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                   <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
                     <span className={`badge badge-${(request.ranked_status || 'Graveyard').toLowerCase()}`}>
-                      {request.ranked_status}
+                      {isMetadataPending ? 'Syncing' : request.metadata_sync_status === 'Failed' ? 'Sync failed' : request.ranked_status}
                     </span>
                     <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                       Beatmapset ID: {request.beatmapset_id}
                     </span>
                     <button
                       onClick={handleMetadataRefresh}
-                      disabled={isRefreshingMetadata}
+                      disabled={isRefreshingMetadata || isMetadataPending}
                       style={{ 
                         fontSize: '11px', 
                         color: 'var(--osu-pink)', 
@@ -402,7 +403,7 @@ export default function RequestDetailModal({
                       }}
                     >
                       <RefreshCw size={12} className={isRefreshingMetadata ? 'spin' : ''} />
-                      {isRefreshingMetadata ? 'Refreshing...' : 'Force Refresh API'}
+                      {isMetadataPending ? 'Sync queued' : isRefreshingMetadata ? 'Refreshing...' : 'Force Refresh API'}
                     </button>
                   </div>
 
@@ -470,7 +471,7 @@ export default function RequestDetailModal({
                       })
                     ) : (
                       <span style={{ fontSize: '12px', color: 'var(--text-muted)', gridColumn: '1 / -1' }}>
-                        No difficulty details available.
+                        {isMetadataPending ? 'Difficulty details are syncing in the background.' : 'No difficulty details available.'}
                       </span>
                     )}
                   </div>

@@ -105,7 +105,7 @@ export default function MultipleRequestsImport({
         </div>
 
         <button type="submit" className="btn-primary" disabled={isImportingLinks || !linksText.trim()} style={{ width: 'fit-content' }}>
-          {isImportingLinks ? 'Importing & Syncing...' : 'Import Requests'}
+          {isImportingLinks ? 'Importing...' : 'Import Requests'}
         </button>
       </form>
     </div>

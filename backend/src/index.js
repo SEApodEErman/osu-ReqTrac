@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const { getDatabase, coversDir } = require('./db');
+const { waitForBackupUnlock } = require('./utils/backupLock');
 
 // Load local backend/.env when running outside a process manager.
 try {
@@ -12,6 +13,7 @@ try {
 
 const app = express();
 const isElectron = process.env.ELECTRON_RUN === '1';
+const REQUEST_BODY_LIMIT = '50mb';
 // In Electron production we bind to an OS-assigned free port (0) to avoid conflicts.
 // In standalone/dev we keep the fixed port for the Vite proxy.
 const PORT = process.env.PORT || (isElectron ? 0 : 3001);
@@ -28,8 +30,9 @@ app.use(cors({
 }));
 
 // Body parsing middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: REQUEST_BODY_LIMIT }));
+app.use(waitForBackupUnlock);
 
 // Serve cover images statically from the SQLite data folder
 app.use('/uploads/covers', express.static(coversDir));
@@ -76,6 +79,9 @@ if (isElectron && process.env.FRONTEND_DIST) {
 // Global error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: `Request payload exceeds the ${REQUEST_BODY_LIMIT} limit.` });
+  }
   res.status(500).json({ error: err.message || 'Internal Server Error' });
 });
 
@@ -116,6 +122,8 @@ function fsWriteFileSync(p, c) {
 // Electron main process can point the window at the right URL.
 async function startServer() {
   await getDatabase();
+  const { initializeMetadataSyncWorker } = require('./services/beatmapMetadataSync');
+  await initializeMetadataSyncWorker();
   console.log('Database initialized successfully.');
 
   return new Promise((resolve, reject) => {

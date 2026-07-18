@@ -1,12 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db');
-const { fetchBeatmapset, fetchUser, downloadCover, updateApiJob } = require('../osuApi');
+const { fetchBeatmapset, fetchUser, downloadCover, addApiJobWork, updateApiJob } = require('../osuApi');
 
 // Fetch and cache a user profile (used for beatmap creators / requesters)
-async function cacheUser(db, userIdOrUsername) {
+async function cacheUser(db, userIdOrUsername, includedUser = null) {
   try {
-    const userData = await fetchUser(userIdOrUsername);
+    const userData = includedUser || await fetchUser(userIdOrUsername);
     if (userData) {
       await db.run(`
         INSERT OR REPLACE INTO users_cache (id, username, avatar_url, country_code, last_updated)
@@ -68,9 +68,12 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
     };
   });
 
-  // Cache the creator's user profile (name + avatar) to avoid repeat API calls
-  if (apiJobId) updateApiJob(apiJobId, 1);
-  await cacheUser(db, mapsetData.user_id);
+  // Get Beatmapset normally embeds its creator, avoiding another API request.
+  if (!mapsetData.user && apiJobId) {
+    addApiJobWork(apiJobId, 1);
+    updateApiJob(apiJobId, 1);
+  }
+  await cacheUser(db, mapsetData.user_id, mapsetData.user);
 
   const cacheEntry = {
     beatmapset_id: mapsetData.id,
@@ -90,8 +93,8 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
 
   await db.run(`
     INSERT OR REPLACE INTO beatmap_cache (
-      beatmapset_id, artist, title, creator, creator_id, cover_url, local_cover_path, ranked_status, difficulties_json, ranked_date, osu_last_updated, last_updated
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      beatmapset_id, artist, title, creator, creator_id, cover_url, local_cover_path, ranked_status, difficulties_json, ranked_date, osu_last_updated, submitted_date, metadata_complete, last_updated
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
   `, [
     cacheEntry.beatmapset_id,
     cacheEntry.artist,
@@ -104,11 +107,40 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
     cacheEntry.difficulties_json,
     cacheEntry.ranked_date,
     cacheEntry.osu_last_updated,
+    cacheEntry.submitted_date,
     cacheEntry.last_updated
   ]);
+  await db.run(`
+    UPDATE beatmap_metadata_sync
+    SET status = 'Completed', last_error = NULL, next_attempt_at = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE beatmapset_id = ?
+  `, beatmapsetId);
 
   return cacheEntry;
 }
+
+// GET /api/beatmaps/sync/status - persistent background metadata progress.
+router.get('/sync/status', async (req, res, next) => {
+  try {
+    const db = await getDatabase();
+    const { getMetadataSyncStatus } = require('../services/beatmapMetadataSync');
+    res.json(await getMetadataSyncStatus(db));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/beatmaps/sync/retry - retry entries that exhausted automatic attempts.
+router.post('/sync/retry', async (req, res, next) => {
+  try {
+    const db = await getDatabase();
+    const { retryFailedMetadata } = require('../services/beatmapMetadataSync');
+    const retried = await retryFailedMetadata(db);
+    res.json({ success: true, retried, message: `Queued ${retried} failed beatmapsets for retry.` });
+  } catch (error) {
+    next(error);
+  }
+});
 
 // GET /api/beatmaps/:id - query details for a beatmapset
 router.get('/:id', async (req, res, next) => {
@@ -122,11 +154,19 @@ router.get('/:id', async (req, res, next) => {
     let cached = await db.get('SELECT * FROM beatmap_cache WHERE beatmapset_id = ?', beatmapsetId);
 
     if (cached) {
+      if (req.query.cacheOnly === '1') {
+        cached.difficulties = JSON.parse(cached.difficulties_json || '[]');
+        return res.json(cached);
+      }
+
       const status = cached.ranked_status.toLowerCase();
       let needsRefresh = false;
 
+      if (!cached.metadata_complete) {
+        needsRefresh = true;
+      }
       // Rule: Ranked/Loved never automatically update
-      if (status === 'ranked' || status === 'loved') {
+      else if (status === 'ranked' || status === 'loved') {
         needsRefresh = false;
       }
       // Rule: Pending/WIP are updated on request status change or manual refresh (handled elsewhere)
