@@ -1,18 +1,19 @@
 import React from 'react';
 import { Activity, ChevronRight, Menu, Minus, Square, X } from 'lucide-react';
 
-function getSectionName(activeTab) {
+function getSectionName(activeTab, categoryDefinitions) {
   if (activeTab === 'dashboard') return 'Dashboard';
   if (activeTab === 'settings') return 'Settings';
   if (activeTab.startsWith('requests-')) {
     const category = activeTab.replace('requests-', '');
-    return category === 'All' ? 'All Requests' : category;
+    if (category === 'all') return 'All Requests';
+    return categoryDefinitions.find(item => item.id === Number(category))?.name || 'Requests';
   }
   return 'Workspace';
 }
 
-export default function TopBar({ activeTab, connectedAccount, isSidebarOpen, onToggleSidebar }) {
-  const sectionName = getSectionName(activeTab);
+export default function TopBar({ activeTab, connectedAccount, isSidebarOpen, onToggleSidebar, categoryDefinitions = [] }) {
+  const sectionName = getSectionName(activeTab, categoryDefinitions);
   const controls = window.electronAPI?.windowControls;
 
   const toggleMaximize = () => {

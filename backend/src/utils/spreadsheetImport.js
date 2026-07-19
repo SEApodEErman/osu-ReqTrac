@@ -66,10 +66,10 @@ function normalizeDate(value) {
   return date.toISOString().slice(0, 10);
 }
 
-function parseCategoryList(value, defaults) {
+function parseCategoryList(value, defaults, validCategories = VALID_CATEGORIES) {
   const suppliedCategories = cleanText(value)
     .split(/[,|;]/)
-    .map(category => normalizeChoice(category, VALID_CATEGORIES))
+    .map(category => normalizeChoice(category, validCategories))
     .filter(Boolean);
   return suppliedCategories.length > 0 ? [...new Set(suppliedCategories)] : defaults;
 }
@@ -128,7 +128,7 @@ function parseWorkbook(buffer) {
   });
 }
 
-function normalizeRows(headers, rows, mapping, defaultCategories = ['Hitsounds']) {
+function normalizeRows(headers, rows, mapping, defaultCategories = ['Hitsounds'], validCategories = VALID_CATEGORIES) {
   const { mapping: normalizedMapping, errors: mappingErrors } = validateMapping(headers, mapping);
   if (mappingErrors.length > 0) return { records: [], errors: mappingErrors };
 
@@ -161,8 +161,8 @@ function normalizeRows(headers, rows, mapping, defaultCategories = ['Hitsounds']
     }
 
     const suppliedCategory = cleanText(record.category);
-    record.categories = parseCategoryList(record.category, defaultCategories);
-    if (suppliedCategory && !suppliedCategory.split(/[,|;]/).some(category => normalizeChoice(category, VALID_CATEGORIES))) {
+    record.categories = parseCategoryList(record.category, defaultCategories, validCategories);
+    if (suppliedCategory && !suppliedCategory.split(/[,|;]/).some(category => normalizeChoice(category, validCategories))) {
       errors.push('Category must contain a supported request category.');
     }
     delete record.category;

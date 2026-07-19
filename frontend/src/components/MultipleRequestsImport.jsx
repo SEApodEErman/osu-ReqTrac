@@ -1,21 +1,15 @@
 import React, { useState } from 'react';
 import { FileSpreadsheet, X } from 'lucide-react';
 
-const IMPORT_CATEGORY_NAMES = ['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others'];
-
 export default function MultipleRequestsImport({
   onImportBeatmapLinks,
   onNotify = () => {},
   onToggle,
-  defaultCategory = 'All'
+  defaultCategory = 'All',
+  categoryDefinitions = [],
 }) {
   const getDefaultCategories = () => {
-    const defaults = {
-      Hitsounds: true,
-      'Guest Difficulties': false,
-      Storyboards: false,
-      Others: false
-    };
+    const defaults = Object.fromEntries(categoryDefinitions.map(category => [category.name, category.system_key === 'hitsounds']));
     if (defaultCategory !== 'All' && defaultCategory in defaults) {
       defaults[defaultCategory] = true;
     }
@@ -30,7 +24,7 @@ export default function MultipleRequestsImport({
     event.preventDefault();
     if (!linksText.trim()) return;
 
-    const selectedCategories = IMPORT_CATEGORY_NAMES.filter((category) => importCategories[category]);
+    const selectedCategories = categoryDefinitions.map(category => category.name).filter((category) => importCategories[category]);
     if (selectedCategories.length === 0) {
       onNotify('Please select at least one request category.', 'warning');
       return;
@@ -87,8 +81,8 @@ export default function MultipleRequestsImport({
             Request Categories
           </span>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px' }}>
-            {IMPORT_CATEGORY_NAMES.map((category) => (
-              <label key={category} className="checkbox-container">
+            {categoryDefinitions.map(({ id, name: category }) => (
+              <label key={id} className="checkbox-container">
                 <input
                   type="checkbox"
                   checked={importCategories[category]}

@@ -1,18 +1,16 @@
 const express = require('express');
 const multer = require('multer');
 const router = express.Router();
-const { getDatabase } = require('../db');
+const { getDatabase, coversDir, BUILTIN_CATEGORIES } = require('../db');
 const { fetchBeatmaps } = require('../osuApi');
 const { createApiJob, addApiJobWork, updateApiJob, finishApiJob } = require('../osuApi');
 const { parseOsuLink } = require('../utils/requestUtils');
-const { parseWorkbook, suggestMapping, validateMapping, normalizeRows, VALID_CATEGORIES } = require('../utils/spreadsheetImport');
+const { parseWorkbook, suggestMapping, validateMapping, normalizeRows } = require('../utils/spreadsheetImport');
 const { initializeMetadataSyncWorker, pauseMetadataSyncWorker, queueBeatmapMetadata } = require('../services/beatmapMetadataSync');
-const { coversDir } = require('../db');
 const { BACKUP_VERSION, readCoverFiles, validateBackup, writeCoverFiles } = require('../utils/backup');
 const { acquireBackupLock } = require('../utils/backupLock');
 const { waitForBackgroundTasks } = require('../utils/backgroundTasks');
 
-const IMPORT_CATEGORY_NAMES = new Set(['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others']);
 const spreadsheetUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 function readJson(value, fallback) {
@@ -56,9 +54,12 @@ function spreadsheetForName(worksheets, name) {
   return worksheet;
 }
 
-function importableCategories(values) {
-  const categories = Array.isArray(values) ? values.filter(value => VALID_CATEGORIES.has(value)) : [];
-  return categories.length > 0 ? [...new Set(categories)] : ['Hitsounds'];
+function importableCategories(values, categoryNames) {
+  const byName = new Map(categoryNames.map(name => [name.toLowerCase(), name]));
+  const categories = Array.isArray(values)
+    ? values.map(value => byName.get(String(value).toLowerCase())).filter(Boolean)
+    : [];
+  return categories.length > 0 ? [...new Set(categories)] : [byName.get('hitsounds') || categoryNames[0]];
 }
 
 // GET /api/migration/export - Export backup JSON
@@ -73,7 +74,9 @@ router.get('/export', async (req, res, next) => {
     await db.exec('BEGIN');
     transactionStarted = true;
     const requests = await db.all('SELECT * FROM requests');
+    const categories = await db.all('SELECT * FROM categories');
     const request_categories = await db.all('SELECT * FROM request_categories');
+    const request_guest_difficulties = await db.all('SELECT * FROM request_guest_difficulties');
     const beatmap_cache = await db.all('SELECT * FROM beatmap_cache');
     const users_cache = await db.all('SELECT * FROM users_cache');
     const beatmap_metadata_sync = await db.all('SELECT * FROM beatmap_metadata_sync');
@@ -88,7 +91,9 @@ router.get('/export', async (req, res, next) => {
       version: BACKUP_VERSION,
       exported_at: new Date().toISOString(),
       requests,
+      categories,
       request_categories,
+      request_guest_difficulties,
       beatmap_cache,
       users_cache,
       beatmap_metadata_sync,
@@ -144,6 +149,7 @@ router.post('/import-json', async (req, res, next) => {
 
     // Clear existing tables
     await db.run('DELETE FROM request_categories');
+    await db.run('DELETE FROM request_guest_difficulties');
     await db.run('DELETE FROM request_tags');
     await db.run('DELETE FROM history');
     await db.run('DELETE FROM requests');
@@ -152,6 +158,31 @@ router.post('/import-json', async (req, res, next) => {
     await db.run('DELETE FROM users_cache');
     await db.run('DELETE FROM tags');
     await db.run('DELETE FROM settings');
+
+    if (backup.version === BACKUP_VERSION) {
+      await db.run('DELETE FROM categories');
+      for (const category of backup.categories) {
+        await db.run(`
+          INSERT INTO categories (id, name, system_key, view_type, sort_order, is_active, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `, category.id, category.name, category.system_key, category.view_type, category.sort_order,
+        category.is_active, category.created_at, category.updated_at);
+      }
+    } else {
+      await db.run('DELETE FROM categories WHERE system_key IS NULL');
+      for (const [name, systemKey, viewType, sortOrder] of BUILTIN_CATEGORIES) {
+        await db.run(`
+          UPDATE categories SET name = ?, view_type = ?, sort_order = ?, is_active = 1, updated_at = CURRENT_TIMESTAMP
+          WHERE system_key = ?
+        `, name, viewType, sortOrder, systemKey);
+      }
+      for (const categoryName of new Set((backup.request_categories || []).map(row => row.category_name).filter(Boolean))) {
+        await db.run(`
+          INSERT OR IGNORE INTO categories (name, view_type, sort_order, is_active)
+          VALUES (?, 'tagged', (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM categories), 1)
+        `, categoryName);
+      }
+    }
 
     // Insert requests
     for (const r of backup.requests || []) {
@@ -163,10 +194,32 @@ router.post('/import-json', async (req, res, next) => {
 
     // Insert request_categories
     for (const rc of backup.request_categories || []) {
+      const category = rc.category_id
+        ? await db.get('SELECT id, name FROM categories WHERE id = ?', rc.category_id)
+        : await db.get('SELECT id, name FROM categories WHERE name = ? COLLATE NOCASE', rc.category_name);
+      if (!category) throw new Error(`Backup references an unknown category: ${rc.category_name || rc.category_id}`);
       await db.run(`
-        INSERT INTO request_categories (id, request_id, category_name, other_text, status)
-        VALUES (?, ?, ?, ?, ?)
-      `, [rc.id, rc.request_id, rc.category_name, rc.other_text, rc.status]);
+        INSERT INTO request_categories (id, request_id, category_id, category_name, other_text, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, [rc.id, rc.request_id, category.id, category.name, rc.other_text, rc.status]);
+    }
+
+    if (backup.version === BACKUP_VERSION) {
+      for (const gd of backup.request_guest_difficulties) {
+        await db.run(`
+          INSERT INTO request_guest_difficulties (
+            id, request_id, beatmap_id, difficulty_name, gamemode, target_sr, sort_order, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, gd.id, gd.request_id, gd.beatmap_id, gd.difficulty_name, gd.gamemode || 'osu', gd.target_sr,
+        gd.sort_order || 0, gd.created_at, gd.updated_at);
+      }
+    } else {
+      await db.run(`
+        INSERT INTO request_guest_difficulties (request_id, difficulty_name, gamemode, target_sr, sort_order)
+        SELECT id, guest_difficulty_name, 'osu', guest_difficulty_target_sr, 0
+        FROM requests
+        WHERE guest_difficulty_name IS NOT NULL OR guest_difficulty_target_sr IS NOT NULL
+      `);
     }
 
     // Insert beatmap_cache
@@ -201,13 +254,20 @@ router.post('/import-json', async (req, res, next) => {
     }
 
     // Insert tags
+    const restoredTagIds = new Map();
     for (const t of backup.tags || []) {
-      await db.run('INSERT INTO tags (id, name) VALUES (?, ?)', [t.id, t.name]);
+      const existingTag = await db.get('SELECT id FROM tags WHERE name = ? COLLATE NOCASE', t.name);
+      if (existingTag) {
+        restoredTagIds.set(t.id, existingTag.id);
+      } else {
+        await db.run('INSERT INTO tags (id, name) VALUES (?, ?)', [t.id, t.name]);
+        restoredTagIds.set(t.id, t.id);
+      }
     }
 
     // Insert request_tags
     for (const rt of backup.request_tags || []) {
-      await db.run('INSERT INTO request_tags (request_id, tag_id) VALUES (?, ?)', [rt.request_id, rt.tag_id]);
+      await db.run('INSERT OR IGNORE INTO request_tags (request_id, tag_id) VALUES (?, ?)', [rt.request_id, restoredTagIds.get(rt.tag_id) || rt.tag_id]);
     }
 
     // Insert settings
@@ -265,9 +325,11 @@ router.post('/import-beatmap-links', async (req, res, next) => {
       return res.status(400).json({ error: 'linksText is required in request body' });
     }
 
-    const importCategories = Array.isArray(categories)
-      ? [...new Set(categories.filter(category => IMPORT_CATEGORY_NAMES.has(category)))]
-      : ['Hitsounds'];
+    db = await getDatabase();
+    const categoryCatalog = await db.all('SELECT * FROM categories WHERE is_active = 1 ORDER BY sort_order, id');
+    const importCategoryNames = importableCategories(categories, categoryCatalog.map(category => category.name));
+    const categoryByName = new Map(categoryCatalog.map(category => [category.name, category]));
+    const importCategories = importCategoryNames.map(name => categoryByName.get(name)).filter(Boolean);
     if (importCategories.length === 0) {
       return res.status(400).json({ error: 'Select at least one valid request category.' });
     }
@@ -287,7 +349,6 @@ router.post('/import-beatmap-links', async (req, res, next) => {
       });
     }
 
-    db = await getDatabase();
     await db.exec('BEGIN TRANSACTION');
     transactionStarted = true;
     let importCount = 0;
@@ -363,11 +424,11 @@ router.post('/import-beatmap-links', async (req, res, next) => {
 
       const requestId = result.lastID;
 
-      for (const categoryName of importCategories) {
+      for (const category of importCategories) {
         await db.run(`
-          INSERT INTO request_categories (request_id, category_name, other_text, status)
-          VALUES (?, ?, ?, ?)
-        `, [requestId, categoryName, null, 'Pending']);
+          INSERT INTO request_categories (request_id, category_id, category_name, other_text, status)
+          VALUES (?, ?, ?, ?, ?)
+        `, [requestId, category.id, category.name, null, 'Pending']);
       }
 
       // Create history
@@ -432,8 +493,14 @@ router.post('/import-spreadsheet', spreadsheetUpload.single('file'), async (req,
       return res.status(400).json({ error: mappingResult.errors.join(' ') });
     }
 
-    const defaultCategories = importableCategories(readJson(req.body.defaultCategories, ['Hitsounds']));
-    const { records, errors } = normalizeRows(worksheet.headers, worksheet.rows, mappingResult.mapping, defaultCategories);
+    db = await getDatabase();
+    const categoryCatalog = await db.all('SELECT * FROM categories WHERE is_active = 1 ORDER BY sort_order, id');
+    const categoryNames = categoryCatalog.map(category => category.name);
+    const categoryByName = new Map(categoryCatalog.map(category => [category.name, category]));
+    const defaultCategories = importableCategories(readJson(req.body.defaultCategories, ['Hitsounds']), categoryNames);
+    const { records, errors } = normalizeRows(
+      worksheet.headers, worksheet.rows, mappingResult.mapping, defaultCategories, new Set(categoryNames)
+    );
     if (errors.length > 0) return res.status(400).json({ error: errors.join(' ') });
 
     const invalidRecords = records.filter(record => record.errors.length > 0);
@@ -470,7 +537,6 @@ router.post('/import-spreadsheet', spreadsheetUpload.single('file'), async (req,
     });
     updateApiJob(apiJobId, beatmapBatchCount);
     let fetchedBeatmapIndex = 0;
-    db = await getDatabase();
     await db.exec('BEGIN TRANSACTION');
     transactionStarted = true;
     const result = {
@@ -548,13 +614,14 @@ router.post('/import-spreadsheet', spreadsheetUpload.single('file'), async (req,
           record.discordLink || null, record.osuProfileLink || null, record.addedDate || null, record.completedDate || null, existing.id
         ]);
         for (const category of record.categories) {
+          const categoryDefinition = categoryByName.get(category);
           await db.run(`
-            INSERT INTO request_categories (request_id, category_name, other_text, status)
-            SELECT ?, ?, NULL, 'Pending'
+            INSERT INTO request_categories (request_id, category_id, category_name, other_text, status)
+            SELECT ?, ?, ?, NULL, 'Pending'
             WHERE NOT EXISTS (
-              SELECT 1 FROM request_categories WHERE request_id = ? AND category_name = ?
+              SELECT 1 FROM request_categories WHERE request_id = ? AND category_id = ?
             )
-          `, existing.id, category, existing.id, category);
+          `, existing.id, categoryDefinition.id, categoryDefinition.name, existing.id, categoryDefinition.id);
         }
         result.updated++;
         const metadataState = await queueBeatmapMetadata(db, beatmapsetId, provisional);
@@ -583,9 +650,10 @@ router.post('/import-spreadsheet', spreadsheetUpload.single('file'), async (req,
       ]);
 
       for (const category of record.categories) {
+        const categoryDefinition = categoryByName.get(category);
         await db.run(
-          'INSERT INTO request_categories (request_id, category_name, other_text, status) VALUES (?, ?, ?, ?)',
-          [insertResult.lastID, category, null, 'Pending']
+          'INSERT INTO request_categories (request_id, category_id, category_name, other_text, status) VALUES (?, ?, ?, ?, ?)',
+          [insertResult.lastID, categoryDefinition.id, categoryDefinition.name, null, 'Pending']
         );
       }
       await db.run('INSERT INTO history (request_id, action_type, details) VALUES (?, ?, ?)', [

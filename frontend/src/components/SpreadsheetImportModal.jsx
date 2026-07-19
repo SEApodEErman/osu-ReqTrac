@@ -20,9 +20,9 @@ const FIELD_OPTIONS = [
   ['category', 'Category']
 ];
 
-const CATEGORY_NAMES = ['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others'];
-
-export default function SpreadsheetImportModal({ onClose, onImported, onNotify = () => {} }) {
+export default function SpreadsheetImportModal({ onClose, onImported, onNotify = () => {}, categoryDefinitions = [] }) {
+  const categoryNames = categoryDefinitions.map(category => category.name);
+  const defaultCategoryName = categoryDefinitions.find(category => category.system_key === 'hitsounds')?.name || categoryNames[0] || '';
   const [file, setFile] = useState(null);
   const [sourceUrl, setSourceUrl] = useState('');
   const [worksheet, setWorksheet] = useState('');
@@ -30,7 +30,7 @@ export default function SpreadsheetImportModal({ onClose, onImported, onNotify =
   const [headers, setHeaders] = useState([]);
   const [sampleRows, setSampleRows] = useState([]);
   const [mapping, setMapping] = useState({});
-  const [defaultCategories, setDefaultCategories] = useState(['Hitsounds']);
+  const [defaultCategories, setDefaultCategories] = useState(defaultCategoryName ? [defaultCategoryName] : []);
   const [duplicateMode, setDuplicateMode] = useState('skip');
   const [step, setStep] = useState('source');
   const [preview, setPreview] = useState(null);
@@ -76,7 +76,7 @@ export default function SpreadsheetImportModal({ onClose, onImported, onNotify =
       setHeaders(data.headers);
       setSampleRows(data.sampleRows);
       setMapping(data.suggestedMapping);
-      if (CATEGORY_NAMES.includes(data.worksheet)) setDefaultCategories([data.worksheet]);
+      if (categoryNames.includes(data.worksheet)) setDefaultCategories([data.worksheet]);
       setStep('mapping');
     } catch (requestError) {
       setError(requestError.message);
@@ -190,7 +190,7 @@ export default function SpreadsheetImportModal({ onClose, onImported, onNotify =
           </div>
           <div>
             <span style={{ display: 'block', fontSize: '12px', fontWeight: '600', marginBottom: '7px' }}>Default categories for rows without a Category column</span>
-            <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>{CATEGORY_NAMES.map(category => <label key={category} className="checkbox-container"><input type="checkbox" checked={defaultCategories.includes(category)} onChange={() => toggleCategory(category)} /><span className="checkmark" /><span style={{ fontSize: '12px' }}>{category}</span></label>)}</div>
+            <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>{categoryNames.map(category => <label key={category} className="checkbox-container"><input type="checkbox" checked={defaultCategories.includes(category)} onChange={() => toggleCategory(category)} /><span className="checkmark" /><span style={{ fontSize: '12px' }}>{category}</span></label>)}</div>
           </div>
           <label style={{ fontSize: '12px', fontWeight: '600' }}>Existing beatmaps<select className="input-text" value={duplicateMode} onChange={(event) => setDuplicateMode(event.target.value)} style={{ display: 'block', marginTop: '5px' }}><option value="skip">Skip existing requests</option><option value="update">Update existing request details</option></select></label>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}><button type="button" className="btn-secondary" onClick={() => setStep('source')} disabled={isBusy}>Back</button><button type="button" className="btn-primary" onClick={showPreview} disabled={isBusy || !hasRequiredMapping || defaultCategories.length === 0}>{isBusy ? 'Validating...' : 'Review import'}</button></div>

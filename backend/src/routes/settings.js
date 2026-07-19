@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getDatabase, coversDir } = require('../db');
+const { getDatabase, coversDir, BUILTIN_CATEGORIES } = require('../db');
 const { getCredentials, fetchBeatmapset, fetchUser, clearAccessToken } = require('../osuApi');
 const { acquireBackupLock } = require('../utils/backupLock');
 const { waitForBackgroundTasks } = require('../utils/backgroundTasks');
@@ -116,6 +116,7 @@ router.post('/delete-all-data', async (req, res, next) => {
     // Delete child tables before requests/tags while foreign-key enforcement is on.
     for (const table of [
       'request_categories',
+      'request_guest_difficulties',
       'request_tags',
       'history',
       'requests',
@@ -126,6 +127,13 @@ router.post('/delete-all-data', async (req, res, next) => {
       'settings'
     ]) {
       await db.run(`DELETE FROM ${table}`);
+    }
+    await db.run('DELETE FROM categories WHERE system_key IS NULL');
+    for (const [name, systemKey, viewType, sortOrder] of BUILTIN_CATEGORIES) {
+      await db.run(`
+        UPDATE categories SET name = ?, view_type = ?, sort_order = ?, is_active = 1, updated_at = CURRENT_TIMESTAMP
+        WHERE system_key = ?
+      `, name, viewType, sortOrder, systemKey);
     }
     await db.run('DELETE FROM sqlite_sequence');
 

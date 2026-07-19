@@ -1,5 +1,6 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Plus, Link, AlertCircle, X, Loader2, UserCheck } from 'lucide-react';
+import TagInput from './TagInput';
 
 const OSU_BEATMAP_LINK_PATTERN = /osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i;
 
@@ -11,7 +12,9 @@ export default function QuickAdd({
   isOpen,
   onToggle,
   defaultCategory = 'All',
-  onNotify
+  onNotify,
+  categoryDefinitions = [],
+  tagSuggestions = [],
 }) {
   const [inputVal, setInputVal] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -27,18 +30,31 @@ export default function QuickAdd({
   const [notes, setNotes] = useState('');
   const [priority, setPriority] = useState('Low');
   const [deadline, setDeadline] = useState('');
-  const [tags, setTags] = useState('');
+  const [tags, setTags] = useState([]);
+  const [guestDifficulties, setGuestDifficulties] = useState([{ gamemode: 'osu', difficulty_name: '', target_sr: '' }]);
   
   // Categories Checklist
   const getDefaultCategories = () => {
-    const saved = localStorage.getItem('lastRequestCategories');
-    const defaults = saved ? JSON.parse(saved) : { Hitsounds: true, 'Guest Difficulties': false, Storyboards: false, Others: false };
-    if (defaultCategory !== 'All' && defaultCategory in defaults) defaults[defaultCategory] = true;
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('lastRequestCategories') || '{}'); } catch { saved = {}; }
+    const defaults = Object.fromEntries(categoryDefinitions.map(category => [category.id, Boolean(saved[category.id] ?? saved[category.name] ?? category.system_key === 'hitsounds')]));
+    const activeDefinition = categoryDefinitions.find(category => category.name === defaultCategory || category.id === Number(defaultCategory));
+    if (activeDefinition) defaults[activeDefinition.id] = true;
     return defaults;
   };
   const [categories, setCategories] = useState(getDefaultCategories);
   const [otherText, setOtherText] = useState('');
   const isOsuBeatmapLink = OSU_BEATMAP_LINK_PATTERN.test(inputVal);
+
+  useEffect(() => {
+    setCategories(current => {
+      const next = getDefaultCategories();
+      categoryDefinitions.forEach(category => {
+        if (current[category.id] !== undefined) next[category.id] = current[category.id];
+      });
+      return next;
+    });
+  }, [categoryDefinitions, defaultCategory]);
 
   // Fetch beatmap info from osu! API
   const fetchBeatmapInfo = async (link) => {
@@ -74,6 +90,15 @@ export default function QuickAdd({
     setCategories(prev => ({ ...prev, [cat]: !prev[cat] }));
   };
 
+  const buildCategoryPayload = () => categoryDefinitions
+    .filter(category => categories[category.id])
+    .map(category => ({
+      category_id: category.id,
+      name: category.name,
+      other_text: category.system_key === 'others' ? otherText : null,
+      status: 'Pending'
+    }));
+
   const resetForm = () => {
     setInputVal('');
     setArtist('');
@@ -84,7 +109,8 @@ export default function QuickAdd({
     setNotes('');
     setPriority('Low');
     setDeadline('');
-    setTags('');
+    setTags([]);
+    setGuestDifficulties([{ gamemode: 'osu', difficulty_name: '', target_sr: '' }]);
     localStorage.setItem('lastRequestCategories', JSON.stringify(categories));
     setCategories(getDefaultCategories());
     setOtherText('');
@@ -95,13 +121,7 @@ export default function QuickAdd({
     if (isSubmitting) return;
 
     // Build categories payload
-    const catsPayload = Object.entries(categories)
-      .filter(([_, checked]) => checked)
-      .map(([name, _]) => ({
-        name,
-        other_text: name === 'Others' ? otherText : null,
-        status: 'Pending'
-      }));
+    const catsPayload = buildCategoryPayload();
 
     if (catsPayload.length === 0) {
       onNotify?.('Please select at least one request category.', 'warning');
@@ -113,7 +133,10 @@ export default function QuickAdd({
       priority,
       deadline: deadline || null,
       notes: notes || null,
-      tags: tags ? tags.split(',').map(t => t.trim()).filter(Boolean) : []
+      tags,
+      guest_difficulties: catsPayload.some(category => categoryDefinitions.find(definition => definition.id === category.category_id)?.system_key === 'guest_difficulties')
+        ? guestDifficulties
+        : [],
     };
 
     if (isOsuBeatmapLink) {
@@ -136,9 +159,8 @@ export default function QuickAdd({
 
     setIsSubmitting(true);
     try {
-      await onAddRequest(payload, resetForm);
-      // Close form on successful submission
-      onToggle(false);
+      const result = await onAddRequest(payload, resetForm);
+      if (result?.ok) onToggle(false);
     } finally {
       setIsSubmitting(false);
     }
@@ -155,7 +177,7 @@ export default function QuickAdd({
       flexDirection: 'column', 
       gap: '16px', 
       borderLeft: '4px solid var(--osu-pink)',
-      maxHeight: isOpen ? '1000px' : '0',
+      maxHeight: isOpen ? '2400px' : '0',
       overflow: 'hidden',
       opacity: isOpen ? 1 : 0,
       transition: 'max-height 0.3s ease, opacity 0.2s ease, padding 0.2s ease, margin 0.2s ease',
@@ -192,7 +214,7 @@ export default function QuickAdd({
 
           {/* Duplicate warning prompt */}
           {duplicateError && (
-            <div style={{
+            <div data-duplicate-warning style={{
               backgroundColor: 'rgba(243, 156, 18, 0.15)',
               border: '1px solid var(--priority-medium)',
               borderRadius: '8px',
@@ -211,15 +233,9 @@ export default function QuickAdd({
               </p>
               <div style={{ display: 'flex', gap: '8px' }}>
                 <button
-                  onClick={() => {
-                    const catsPayload = Object.entries(categories)
-                      .filter(([_, checked]) => checked)
-                      .map(([name, _]) => ({
-                        name,
-                        other_text: name === 'Others' ? otherText : null,
-                        status: 'Pending'
-                      }));
-                    onResolveDuplicate(duplicateError.requestId, catsPayload, resetForm);
+                  onClick={async () => {
+                    const result = await onResolveDuplicate(duplicateError.requestId, buildCategoryPayload(), resetForm);
+                    if (result?.ok) onToggle(false);
                   }}
                   className="btn-primary"
                   style={{ padding: '6px 12px', fontSize: '12px', backgroundColor: 'var(--priority-medium)' }}
@@ -227,20 +243,15 @@ export default function QuickAdd({
                   Add to Existing Request
                 </button>
                 <button
-                  onClick={() => {
-                    const catsPayload = Object.entries(categories)
-                      .filter(([_, checked]) => checked)
-                      .map(([name, _]) => ({
-                        name,
-                        other_text: name === 'Others' ? otherText : null,
-                        status: 'Pending'
-                      }));
+                  onClick={async () => {
+                    const catsPayload = buildCategoryPayload();
                     const payload = {
                       categories: catsPayload,
                       priority,
                       deadline: deadline || null,
                       notes: notes || null,
-                      tags: tags ? tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+                      tags,
+                      guest_difficulties: guestDifficulties,
                       force: true
                     };
                     if (isOsuBeatmapLink) {
@@ -254,7 +265,8 @@ export default function QuickAdd({
                       payload.difficulty = difficulty.trim() || null;
                       payload.requester_username = requester.trim() || creator.trim() || 'Anonymous';
                     }
-                    onAddRequest(payload, resetForm);
+                    const result = await onAddRequest(payload, resetForm);
+                    if (result?.ok) onToggle(false);
                   }}
                   className="btn-secondary"
                   style={{ padding: '6px 12px', fontSize: '12px' }}
@@ -317,20 +329,20 @@ export default function QuickAdd({
                 Request Categories
               </span>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px' }}>
-                {Object.keys(categories).map((cat) => (
-                  <label key={cat} className="checkbox-container">
+                {categoryDefinitions.map((category) => (
+                  <label key={category.id} className="checkbox-container">
                     <input
                       type="checkbox"
-                      checked={categories[cat]}
-                      onChange={() => toggleCategory(cat)}
+                      checked={Boolean(categories[category.id])}
+                      onChange={() => toggleCategory(category.id)}
                     />
                     <span className="checkmark"></span>
-                    <span style={{ fontSize: '13px' }}>{cat}</span>
+                    <span style={{ fontSize: '13px' }}>{category.name}</span>
                   </label>
                 ))}
               </div>
 
-              {categories.Others && (
+              {categoryDefinitions.some(category => category.system_key === 'others' && categories[category.id]) && (
                 <input
                   type="text"
                   className="input-text"
@@ -339,6 +351,24 @@ export default function QuickAdd({
                   onChange={(e) => setOtherText(e.target.value)}
                   style={{ marginTop: '8px' }}
                 />
+              )}
+
+              {categoryDefinitions.some(category => category.system_key === 'guest_difficulties' && categories[category.id]) && (
+                <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '7px' }}>
+                  {guestDifficulties.map((guestDifficulty, index) => (
+                    <div key={index} style={{ display: 'grid', gridTemplateColumns: '110px minmax(140px, 1fr) 110px auto', gap: '6px', alignItems: 'center' }}>
+                      <select className="input-text" value={guestDifficulty.gamemode} onChange={event => setGuestDifficulties(rows => rows.map((row, rowIndex) => rowIndex === index ? { ...row, gamemode: event.target.value } : row))}>
+                        <option value="osu">osu!</option><option value="taiko">Taiko</option><option value="fruits">Catch</option><option value="mania">Mania</option>
+                      </select>
+                      <input className="input-text" placeholder="Difficulty name" value={guestDifficulty.difficulty_name} onChange={event => setGuestDifficulties(rows => rows.map((row, rowIndex) => rowIndex === index ? { ...row, difficulty_name: event.target.value } : row))} />
+                      <input className="input-text" type="number" min="0" step="0.01" placeholder="Target SR" value={guestDifficulty.target_sr} onChange={event => setGuestDifficulties(rows => rows.map((row, rowIndex) => rowIndex === index ? { ...row, target_sr: event.target.value } : row))} />
+                      <button type="button" className="btn-secondary" disabled={guestDifficulties.length === 1} onClick={() => setGuestDifficulties(rows => rows.filter((_, rowIndex) => rowIndex !== index))}><X size={14} /></button>
+                    </div>
+                  ))}
+                  <button type="button" className="btn-secondary" style={{ width: 'fit-content' }} onClick={() => setGuestDifficulties(rows => [...rows, { gamemode: 'osu', difficulty_name: '', target_sr: '' }])}>
+                    <Plus size={14} /> Add guest difficulty
+                  </button>
+                </div>
               )}
             </div>
 
@@ -400,8 +430,8 @@ export default function QuickAdd({
 
                 {/* Tags */}
                 <div>
-                  <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>Tags (comma-separated)</label>
-                  <input type="text" className="input-text" value={tags} onChange={(e) => setTags(e.target.value)} placeholder="e.g. tournament, metal, fast" />
+                  <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', display: 'block', marginBottom: '4px' }}>Tags</label>
+                  <TagInput value={tags} onChange={setTags} suggestions={tagSuggestions} placeholder="Type or select existing tags" />
                 </div>
 
                 {/* Notes (spanning full row) */}

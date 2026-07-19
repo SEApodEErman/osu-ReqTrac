@@ -14,7 +14,9 @@ function completeBackup(overrides = {}) {
   return {
     version: BACKUP_VERSION,
     requests: [],
+    categories: [],
     request_categories: [],
+    request_guest_difficulties: [],
     beatmap_cache: [],
     beatmap_metadata_sync: [],
     users_cache: [],

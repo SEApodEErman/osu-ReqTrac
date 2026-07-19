@@ -47,6 +47,8 @@ export default function App() {
   const [requestSort, setRequestSort] = useState({ sortBy: 'added_date', sortOrder: 'desc' });
   const [statsData, setStatsData] = useState({});
   const [settingsData, setSettingsData] = useState({});
+  const [categoryDefinitions, setCategoryDefinitions] = useState([]);
+  const [tagCatalog, setTagCatalog] = useState([]);
   const [selectedRequest, setSelectedRequest] = useState(null);
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
   const [isMultipleImportOpen, setIsMultipleImportOpen] = useState(false);
@@ -101,7 +103,8 @@ export default function App() {
       await Promise.all([
         fetchRequests(),
         fetchStats(),
-        fetchSettings()
+        fetchSettings(),
+        fetchCatalogs()
       ]);
     } catch (e) {
       console.error('Failed to load initial data:', e);
@@ -138,6 +141,19 @@ export default function App() {
       }
     } catch (e) {
       console.error('Error fetching stats:', e);
+    }
+  }, []);
+
+  const fetchCatalogs = useCallback(async () => {
+    try {
+      const [categoriesResponse, tagsResponse] = await Promise.all([
+        fetchWithTimeout('/api/categories'),
+        fetchWithTimeout('/api/tags'),
+      ]);
+      if (categoriesResponse.ok) setCategoryDefinitions(await categoriesResponse.json());
+      if (tagsResponse.ok) setTagCatalog(await tagsResponse.json());
+    } catch (error) {
+      console.error('Failed to load categories or tags:', error);
     }
   }, []);
 
@@ -192,6 +208,8 @@ export default function App() {
           }
         }
       }),
+      fetch('/api/categories').then(async res => { if (res.ok) setCategoryDefinitions(await res.json()); }),
+      fetch('/api/tags').then(async res => { if (res.ok) setTagCatalog(await res.json()); }),
     ]).catch((error) => {
       console.error('Failed to load initial data:', error);
     });
@@ -307,25 +325,29 @@ export default function App() {
           requestId: errData.requestId,
           message: errData.message
         });
-        return;
+        showToast(errData.message || 'This beatmapset already exists.', 'warning');
+        window.setTimeout(() => document.querySelector('[data-duplicate-warning]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 0);
+        return { ok: false, reason: 'duplicate', requestId: errData.requestId };
       }
 
       if (res.ok) {
-        await Promise.all([fetchRequests(), fetchStats()]);
+        await Promise.all([fetchRequests(), fetchStats(), fetchCatalogs()]);
         if (callback) callback();
+        return { ok: true };
       } else {
         const errData = await res.json();
         showToast(`Failed to add request: ${errData.error || 'Server Error'}`, 'error');
+        return { ok: false, reason: 'server' };
       }
     } catch (e) {
       console.error(e);
       showToast('Network Error. Failed to add request.', 'error');
+      return { ok: false, reason: 'network' };
     }
   };
 
   // Resolve duplicate by adding categories to existing request
   const handleResolveDuplicate = async (requestId, categories, callback) => {
-    setDuplicateError(null);
     try {
       const res = await fetch('/api/requests', {
         method: 'POST',
@@ -337,16 +359,20 @@ export default function App() {
       });
 
       if (res.ok) {
-        await Promise.all([fetchRequests(), fetchStats()]);
+        setDuplicateError(null);
+        await Promise.all([fetchRequests(), fetchStats(), fetchCatalogs()]);
         if (callback) callback();
         showToast('Categories successfully added to the existing request!', 'success');
+        return { ok: true };
       } else {
         const errData = await res.json();
         showToast(`Failed to resolve duplicate: ${errData.error}`, 'error');
+        return { ok: false };
       }
     } catch (e) {
       console.error(e);
       showToast('Network Error.', 'error');
+      return { ok: false };
     }
   };
 
@@ -360,7 +386,7 @@ export default function App() {
       });
 
       if (res.ok) {
-        await Promise.all([fetchRequests(), fetchStats()]);
+        await Promise.all([fetchRequests(), fetchStats(), fetchCatalogs()]);
         showToast('Request updated successfully.', 'success');
         return true;
       } else {
@@ -490,22 +516,47 @@ export default function App() {
   };
 
   // Bulk category/type update
-  const handleBulkUpdateCategory = async (ids, categoryName, mode) => {
+  const handleBulkUpdateCategory = async (ids, categoryId, mode) => {
+    const category = categoryDefinitions.find(item => item.id === Number(categoryId));
+    if (!category) return;
     try {
       for (const batch of requestIdBatches(ids)) {
         const response = await fetch('/api/requests/bulk', {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids: batch, categoryName, mode })
+          body: JSON.stringify({ ids: batch, categoryId: category.id, mode })
         });
         if (!response.ok) throw new Error('One or more category updates failed');
       }
 
       await Promise.all([fetchRequests(), fetchStats()]);
-      showToast(`${mode === 'move' ? 'Moved' : 'Added'} ${ids.length} requests ${mode === 'move' ? 'to' : 'into'} "${categoryName}".`, 'success');
+      showToast(`${mode === 'move' ? 'Moved' : 'Added'} ${ids.length} requests ${mode === 'move' ? 'to' : 'into'} "${category.name}".`, 'success');
     } catch (e) {
       console.error(e);
       showToast('Failed to update request types for some requests.', 'error');
+    }
+  };
+
+  const handleBulkAddTags = async (ids, tags) => {
+    try {
+      let changed = 0;
+      for (const batch of requestIdBatches(ids)) {
+        const response = await fetch('/api/requests/bulk', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: batch, add_tags: tags })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Bulk tag update failed');
+        changed += result.updated || 0;
+      }
+      await Promise.all([fetchRequests(), fetchCatalogs()]);
+      showToast(`Added tags to ${changed} request${changed === 1 ? '' : 's'}.`, 'success');
+      return true;
+    } catch (error) {
+      console.error(error);
+      showToast(error.message || 'Failed to add tags.', 'error');
+      return false;
     }
   };
 
@@ -620,7 +671,7 @@ export default function App() {
   };
 
   const handleSpreadsheetImported = async () => {
-    await Promise.all([fetchRequests(), fetchStats()]);
+    await Promise.all([fetchRequests(), fetchStats(), fetchCatalogs()]);
   };
 
   // Render correct main view
@@ -649,6 +700,8 @@ export default function App() {
           onDeleteAllData={handleDeleteAllData}
           onImportJson={handleImportJson}
           onSpreadsheetImported={handleSpreadsheetImported}
+          categoryDefinitions={categoryDefinitions}
+          onCategoriesChanged={fetchCatalogs}
            onNotify={showToast}
            onRequestConfirmation={requestConfirmation}
         />
@@ -656,7 +709,11 @@ export default function App() {
     }
 
     if (activeTab.startsWith('requests-')) {
-      const activeCategory = activeTab.replace('requests-', '');
+      const activeCategoryKey = activeTab.replace('requests-', '');
+      const activeCategoryDefinition = activeCategoryKey === 'all'
+        ? null
+        : categoryDefinitions.find(category => category.id === Number(activeCategoryKey));
+      const activeCategory = activeCategoryDefinition?.name || 'All';
       return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', padding: '24px 0 0 0' }}>
 
@@ -699,6 +756,8 @@ export default function App() {
                 onToggle={() => setIsQuickAddOpen(false)}
                 defaultCategory={activeCategory}
                 onNotify={showToast}
+                categoryDefinitions={categoryDefinitions}
+                tagSuggestions={tagCatalog}
               />
             )}
             {isMultipleImportOpen && (
@@ -707,6 +766,7 @@ export default function App() {
                 onNotify={showToast}
                 onToggle={() => setIsMultipleImportOpen(false)}
                 defaultCategory={activeCategory}
+                categoryDefinitions={categoryDefinitions}
               />
             )}
           </div>
@@ -721,9 +781,13 @@ export default function App() {
             isBulkStatusUpdating={isBulkStatusUpdating}
             onBulkUpdatePriority={handleBulkUpdatePriority}
             onBulkUpdateCategory={handleBulkUpdateCategory}
+            onBulkAddTags={handleBulkAddTags}
              onBulkDelete={handleBulkDelete}
              onRequestConfirmation={requestConfirmation}
             activeCategory={activeCategory}
+            activeCategoryDefinition={activeCategoryDefinition}
+            categoryDefinitions={categoryDefinitions}
+            tagSuggestions={tagCatalog}
             sortBy={requestSort.sortBy}
             sortOrder={requestSort.sortOrder}
             onSortChange={(sortBy, sortOrder) => setRequestSort({ sortBy, sortOrder })}
@@ -742,6 +806,7 @@ export default function App() {
         connectedAccount={settingsData.connectedAccount}
         isSidebarOpen={isSidebarOpen}
         onToggleSidebar={() => setIsSidebarOpen(open => !open)}
+        categoryDefinitions={categoryDefinitions}
       />
       <div className="app-container">
 
@@ -752,6 +817,7 @@ export default function App() {
           connectedAccount={settingsData.connectedAccount}
           onDisconnect={handleDisconnect}
           isSidebarOpen={isSidebarOpen}
+          categoryDefinitions={categoryDefinitions}
         />
 
         {/* RIGHT MAIN LAYOUT */}
@@ -771,6 +837,8 @@ export default function App() {
           onForceRefreshBeatmap={fetchRequests}
           connectedAccount={settingsData.connectedAccount}
           onNotify={showToast}
+          categoryDefinitions={categoryDefinitions}
+          tagSuggestions={tagCatalog}
         />
       )}
 

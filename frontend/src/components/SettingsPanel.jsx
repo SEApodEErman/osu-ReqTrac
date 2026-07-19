@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import SpreadsheetImportModal from './SpreadsheetImportModal';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 
 export default function SettingsPanel({ 
   settingsData, 
@@ -29,12 +29,57 @@ export default function SettingsPanel({
   onSpreadsheetImported = async () => {},
   onNotify = () => {},
   onRequestConfirmation = async () => false,
+  categoryDefinitions = [],
+  onCategoriesChanged = async () => {},
   showFirstLaunchSetup = false,
   onDismissFirstLaunchSetup
 }) {
   const { isConfigured, connectedAccount, userId } = settingsData || {};
   const [oauthValidation, setOauthValidation] = useState(null);
   const [isValidatingOauth, setIsValidatingOauth] = useState(false);
+  const [allCategories, setAllCategories] = useState(categoryDefinitions);
+  const [newCategoryName, setNewCategoryName] = useState('');
+
+  const refreshCategories = useCallback(async () => {
+    const response = await fetch('/api/categories?includeArchived=1');
+    if (response.ok) setAllCategories(await response.json());
+  }, []);
+
+  useEffect(() => { void refreshCategories(); }, [refreshCategories]);
+
+  const updateCategory = async (category, updates) => {
+    const response = await fetch(`/api/categories/${category.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    const result = await response.json();
+    if (!response.ok) return onNotify(result.error || 'Failed to update category.', 'error');
+    await Promise.all([refreshCategories(), onCategoriesChanged()]);
+  };
+
+  const createCategory = async (event) => {
+    event.preventDefault();
+    const response = await fetch('/api/categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newCategoryName }),
+    });
+    const result = await response.json();
+    if (!response.ok) return onNotify(result.error || 'Failed to create category.', 'error');
+    setNewCategoryName('');
+    await Promise.all([refreshCategories(), onCategoriesChanged()]);
+    onNotify(`Created category “${result.name}”.`, 'success');
+  };
+
+  const moveCategory = async (category, direction) => {
+    const active = allCategories.filter(item => item.is_active).sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
+    const index = active.findIndex(item => item.id === category.id);
+    const swap = active[index + direction];
+    if (!swap) return;
+    await updateCategory(category, { sort_order: swap.sort_order });
+    await updateCategory(swap, { sort_order: category.sort_order });
+  };
 
   const validateOauthConfig = useCallback(async () => {
     if (!isConfigured) {
@@ -339,6 +384,51 @@ export default function SettingsPanel({
             <button type="button" className="btn-secondary" onClick={onDismissFirstLaunchSetup}>Got it</button>
           </div>
         )}
+
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+          <div>
+            <h3 style={{ fontSize: '15px', fontWeight: '700', marginBottom: '4px' }}>Request Categories</h3>
+            <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+              Create, rename, reorder, or archive categories. Built-in category behavior follows its internal type even if you rename it.
+            </p>
+          </div>
+          <form onSubmit={createCategory} style={{ display: 'flex', gap: '8px' }}>
+            <input className="input-text" value={newCategoryName} onChange={event => setNewCategoryName(event.target.value)} placeholder="New category name" maxLength={80} />
+            <button type="submit" className="btn-primary" disabled={!newCategoryName.trim()}>Create</button>
+          </form>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
+            {[...allCategories].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id).map(category => (
+              <div key={category.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(160px, 1fr) auto auto', gap: '7px', alignItems: 'center', padding: '8px', border: '1px solid var(--border)', borderRadius: '7px', opacity: category.is_active ? 1 : 0.65 }}>
+                <form onSubmit={event => {
+                  event.preventDefault();
+                  const name = new FormData(event.currentTarget).get('name');
+                  void updateCategory(category, { name });
+                }} style={{ display: 'flex', gap: '6px', minWidth: 0 }}>
+                  <input name="name" className="input-text" defaultValue={category.name} key={`${category.id}:${category.name}`} disabled={!category.is_active} style={{ padding: '5px 8px' }} />
+                  <button type="submit" className="btn-secondary" disabled={!category.is_active} style={{ padding: '5px 8px' }}>Save</button>
+                </form>
+                <div style={{ display: 'flex', gap: '4px' }}>
+                  <button type="button" className="btn-secondary" disabled={!category.is_active} onClick={() => void moveCategory(category, -1)} aria-label={`Move ${category.name} up`}>↑</button>
+                  <button type="button" className="btn-secondary" disabled={!category.is_active} onClick={() => void moveCategory(category, 1)} aria-label={`Move ${category.name} down`}>↓</button>
+                </div>
+                {category.system_key ? (
+                  <span style={{ fontSize: '10px', color: 'var(--text-muted)', minWidth: '64px', textAlign: 'center' }}>Built-in</span>
+                ) : category.is_active ? (
+                  <button type="button" className="btn-secondary" onClick={async () => {
+                    const confirmed = await onRequestConfirmation({ title: `Archive ${category.name}?`, message: 'Existing requests keep this category, but it will be hidden from new selections.', confirmLabel: 'Archive' });
+                    if (!confirmed) return;
+                    const response = await fetch(`/api/categories/${category.id}`, { method: 'DELETE' });
+                    const result = await response.json();
+                    if (!response.ok) return onNotify(result.error || 'Failed to archive category.', 'error');
+                    await Promise.all([refreshCategories(), onCategoriesChanged()]);
+                  }}>Archive</button>
+                ) : (
+                  <button type="button" className="btn-secondary" onClick={() => void updateCategory(category, { is_active: true })}>Restore</button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
         
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
           <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -767,6 +857,7 @@ export default function SettingsPanel({
             await loadMetadataSyncStatus();
           }}
           onNotify={onNotify}
+          categoryDefinitions={categoryDefinitions}
         />
       )}
 

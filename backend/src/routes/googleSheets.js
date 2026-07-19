@@ -153,13 +153,40 @@ async function authorized(db, stored, url, options = {}) {
   }
 }
 
-const CATEGORY_SHEETS = ['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others'];
-const CATEGORY_LAYOUTS = {
-  Hitsounds: { metricHeader: 'Highest Stars', metricKey: 'highestStars' },
-  'Guest Difficulties': { metricHeader: 'GD Star Rating', metricKey: 'guestStars' },
-  Storyboards: { metricHeader: 'Tags', metricKey: 'tags' },
-  Others: { metricHeader: 'Tags', metricKey: 'tags' }
-};
+function safeSheetTitle(value, usedTitles = new Set()) {
+  const base = String(value || 'Category')
+    .replace(/[\[\]:*?\/\\]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100) || 'Category';
+  let title = base;
+  let suffix = 2;
+  while (usedTitles.has(title.toLowerCase()) || title.toLowerCase() === 'dashboard') {
+    const marker = ` (${suffix++})`;
+    title = `${base.slice(0, 100 - marker.length)}${marker}`;
+  }
+  usedTitles.add(title.toLowerCase());
+  return title;
+}
+
+function categorySheetModels(snapshot) {
+  const used = new Set();
+  return (snapshot.categoryDefinitions || []).map(category => {
+    let layout = { metricHeader: 'Tags', metricKey: 'tags' };
+    if (category.system_key === 'hitsounds' || category.view_type === 'standard') {
+      layout = { metricHeader: 'Highest Stars', metricKey: 'highestStars' };
+    }
+    if (category.system_key === 'guest_difficulties' || category.view_type === 'guest_difficulties') {
+      layout = { metricHeader: 'GD Stars / Gamemodes', metricKey: 'guestStars', includeModes: true };
+    }
+    const preferredTitle = category.system_key ? category.name : `ReqTrac - ${category.name}`;
+    return { name: category.name, title: safeSheetTitle(preferredTitle, used), layout };
+  });
+}
+
+function quotedSheetTitle(title) {
+  return `'${String(title).replace(/'/g, "''")}'`;
+}
 
 function sheetDate(value) {
   if (!value) return '';
@@ -169,8 +196,8 @@ function sheetDate(value) {
   return (Date.UTC(year, month - 1, day) - Date.UTC(1899, 11, 30)) / 86400000;
 }
 
-function categoryRows(snapshot, category) {
-  const layout = CATEGORY_LAYOUTS[category];
+function categoryRows(snapshot, categoryModel) {
+  const { name: category, layout } = categoryModel;
   const headers = ['Artist', 'Title', 'Creator', 'Difficulties', layout.metricHeader, 'Map Status', 'Request Status', 'Priority', 'Deadline', 'Added Date', 'Completed Date', 'Notes', 'osu! Link'];
   const rows = snapshot.requests
     .filter((request) => request.categories.includes(category))
@@ -181,6 +208,13 @@ function categoryRows(snapshot, category) {
       request.mapStatus || 'Manual', request.status || '', request.priority || '',
       sheetDate(request.deadline), sheetDate(request.addedDate), sheetDate(request.completedDate), request.notes || '', request.osuUrl || ''
     ]);
+  if (layout.includeModes) {
+    const categoryRequests = snapshot.requests.filter(request => request.categories.includes(category));
+    rows.forEach((row, index) => {
+      const modes = categoryRequests[index]?.gamemodes || [];
+      if (modes.length > 0) row[4] = `${row[4]} · ${modes.join(', ')}`;
+    });
+  }
   return [headers, ...rows];
 }
 
@@ -416,10 +450,11 @@ async function syncSheet(db, stored, snapshot, theme) {
   let spreadsheetId = stored.google_sheet_id;
   let spreadsheet;
   const sheetFields = 'sheets.properties,sheets.bandedRanges,sheets.conditionalFormats';
+  const categoryModels = categorySheetModels(snapshot);
   if (!spreadsheetId) {
     spreadsheet = await authorized(db, stored, SHEETS_URL, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ properties: { title: 'osu!ReqTrac Public Table' }, sheets: [{ properties: { title: 'Dashboard' } }, ...CATEGORY_SHEETS.map((title) => ({ properties: { title } }))] })
+      body: JSON.stringify({ properties: { title: 'osu!ReqTrac Public Table' }, sheets: [{ properties: { title: 'Dashboard' } }, ...categoryModels.map(({ title }) => ({ properties: { title } }))] })
     });
     spreadsheetId = spreadsheet.spreadsheetId;
     await save(db, 'google_sheet_id', spreadsheetId);
@@ -430,8 +465,7 @@ async function syncSheet(db, stored, snapshot, theme) {
   const existingSheets = new Map((spreadsheet.sheets || []).map((sheet) => [sheet.properties.title, sheet]));
   const structureChanges = [];
   if (!existingSheets.has('Dashboard')) structureChanges.push({ addSheet: { properties: { title: 'Dashboard' } } });
-  CATEGORY_SHEETS.filter((title) => !existingSheets.has(title)).forEach((title) => structureChanges.push({ addSheet: { properties: { title } } }));
-  if (existingSheets.has('Requests')) structureChanges.push({ deleteSheet: { sheetId: existingSheets.get('Requests').properties.sheetId } });
+  categoryModels.filter(({ title }) => !existingSheets.has(title)).forEach(({ title }) => structureChanges.push({ addSheet: { properties: { title } } }));
   if (structureChanges.length) {
     await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}:batchUpdate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: structureChanges }) });
     spreadsheet = await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}?fields=${sheetFields}`, { method: 'GET' });
@@ -441,19 +475,19 @@ async function syncSheet(db, stored, snapshot, theme) {
   const dashboardSheet = sheetMap.get('Dashboard');
   const dashboardModel = dashboardRows(snapshot);
   const dashboard = dashboardModel.rows;
-  const categoryData = new Map(CATEGORY_SHEETS.map((category) => [category, categoryRows(snapshot, category)]));
+  const categoryData = new Map(categoryModels.map((category) => [category.title, categoryRows(snapshot, category)]));
   const formattingRequests = dashboardFormatting(dashboardSheet.properties.sheetId, dashboard.length, dashboardModel.layout, theme);
-  CATEGORY_SHEETS.forEach((category) => {
-    const rows = categoryData.get(category);
-    formattingRequests.push(...categoryFormatting(sheetMap.get(category), rows.length, theme, rows, CATEGORY_LAYOUTS[category]));
+  categoryModels.forEach((category) => {
+    const rows = categoryData.get(category.title);
+    formattingRequests.push(...categoryFormatting(sheetMap.get(category.title), rows.length, theme, rows, category.layout));
   });
 
   await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}:batchUpdate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: formattingRequests }) });
   await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}/values/${encodeURIComponent("'Dashboard'!A1:D" + dashboard.length)}?valueInputOption=USER_ENTERED`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ range: `'Dashboard'!A1:D${dashboard.length}`, majorDimension: 'ROWS', values: dashboard }) });
 
-  for (const category of CATEGORY_SHEETS) {
-    const rows = categoryData.get(category);
-    const range = `'${category}'!A1:M${Math.max(rows.length, 1)}`;
+  for (const category of categoryModels) {
+    const rows = categoryData.get(category.title);
+    const range = `${quotedSheetTitle(category.title)}!A1:M${Math.max(rows.length, 1)}`;
     await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ range, majorDimension: 'ROWS', values: rows }) });
   }
 

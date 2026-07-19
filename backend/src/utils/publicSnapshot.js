@@ -1,4 +1,5 @@
 const { getDatabase } = require('../db');
+const { findUserDifficulties, normalizeGamemode } = require('./requestUtils');
 
 function formatDrainTime(seconds) {
   if (!seconds || Number.isNaN(seconds)) return '0 hours';
@@ -20,7 +21,9 @@ function effectiveYear(request) {
 async function buildPublicSnapshot() {
   const db = await getDatabase();
   const connectedUsernameRow = await db.get('SELECT value FROM settings WHERE key = ?', 'connected_username');
+  const connectedUserIdRow = await db.get('SELECT value FROM settings WHERE key = ?', 'connected_user_id');
   const connectedUsername = connectedUsernameRow?.value || '';
+  const connectedUserId = Number(connectedUserIdRow?.value) || null;
   const isConnectedUser = (username) => Boolean(connectedUsername && username
     && String(username).toLowerCase() === String(connectedUsername).toLowerCase());
   const requestRows = await db.all(`
@@ -31,8 +34,16 @@ async function buildPublicSnapshot() {
     LEFT JOIN beatmap_cache b ON r.beatmapset_id = b.beatmapset_id
     ORDER BY r.added_date DESC
   `);
-  const categories = await db.all('SELECT request_id, category_name FROM request_categories ORDER BY id');
+  const categoryDefinitions = await db.all(`
+    SELECT id, name, system_key, view_type, sort_order
+    FROM categories WHERE is_active = 1 ORDER BY sort_order, id
+  `);
+  const categories = await db.all(`
+    SELECT rc.request_id, COALESCE(c.name, rc.category_name) AS category_name
+    FROM request_categories rc LEFT JOIN categories c ON c.id = rc.category_id ORDER BY rc.id
+  `);
   const tags = await db.all('SELECT rt.request_id, t.name FROM request_tags rt JOIN tags t ON t.id = rt.tag_id ORDER BY t.name');
+  const guestRows = await db.all('SELECT * FROM request_guest_difficulties ORDER BY request_id, sort_order, id');
 
   const categoryMap = new Map();
   for (const row of categories) {
@@ -43,6 +54,11 @@ async function buildPublicSnapshot() {
   for (const row of tags) {
     if (!tagMap.has(row.request_id)) tagMap.set(row.request_id, []);
     tagMap.get(row.request_id).push(row.name);
+  }
+  const guestMap = new Map();
+  for (const row of guestRows) {
+    if (!guestMap.has(row.request_id)) guestMap.set(row.request_id, []);
+    guestMap.get(row.request_id).push(row);
   }
 
   // Manual/non-osu entries are intentionally kept local. They may represent
@@ -55,6 +71,39 @@ async function buildPublicSnapshot() {
       difficulties = [];
     }
     const highestStars = difficulties.reduce((max, difficulty) => Math.max(max, Number(difficulty.stars) || 0), 0);
+    const assignments = guestMap.get(row.id) || [];
+    const matchedGuestDifficulties = findUserDifficulties(difficulties, {
+      connectedUserId,
+      connectedUsername,
+      assignments,
+    });
+    const matchedIds = new Set(matchedGuestDifficulties.map(difficulty => Number(difficulty.id)));
+    const matchedKeys = new Set(matchedGuestDifficulties.map(difficulty =>
+      `${normalizeGamemode(difficulty.mode)}:${difficulty.name?.toLowerCase()}`
+    ));
+    const unresolvedGuestDifficulties = assignments
+      .filter(assignment => !matchedIds.has(Number(assignment.beatmap_id))
+        && !matchedKeys.has(`${normalizeGamemode(assignment.gamemode)}:${assignment.difficulty_name?.toLowerCase()}`))
+      .map(assignment => ({
+        name: assignment.difficulty_name,
+        mode: normalizeGamemode(assignment.gamemode),
+        stars: assignment.target_sr,
+        pending: true,
+      }));
+    const myGuestDifficulties = [
+      ...matchedGuestDifficulties.map(difficulty => ({
+        id: difficulty.id,
+        name: difficulty.name,
+        mode: normalizeGamemode(difficulty.mode),
+        stars: difficulty.stars,
+        pending: false,
+      })),
+      ...unresolvedGuestDifficulties,
+    ];
+    const guestStars = myGuestDifficulties.reduce(
+      (maximum, difficulty) => Math.max(maximum, Number(difficulty.stars) || 0),
+      0
+    );
     const drainSeconds = difficulties.reduce((max, difficulty) => Math.max(max, Number(difficulty.drain) || 0), 0);
     const requester = row.requester_id || (row.requester_username && row.requester_username.toLowerCase() !== 'anonymous')
       ? row.requester_username
@@ -75,7 +124,9 @@ async function buildPublicSnapshot() {
       mapStatus: row.ranked_status,
       numDifficulties: difficulties.length,
       highestStars,
-      guestStars: row.guest_difficulty_target_sr || highestStars,
+      guestStars,
+      guestDifficulties: myGuestDifficulties,
+      gamemodes: [...new Set(myGuestDifficulties.map(difficulty => difficulty.mode))],
       drainSeconds,
       rankedDate: row.ranked_date,
       osuLastUpdated: row.osu_last_updated,
@@ -145,9 +196,10 @@ async function buildPublicSnapshot() {
   const totalDrainSeconds = completedRequests.reduce((total, request) => total + request.drainSeconds, 0);
 
   return {
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     ownerUsername: connectedUsername,
+    categoryDefinitions,
     requests,
     stats: {
       total: requests.length,

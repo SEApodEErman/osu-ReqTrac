@@ -721,6 +721,7 @@ select.input-text {
 .requests-table .request-col-select { width: 4%; }
 .requests-table .request-col-cover { width: 6%; }
 .requests-table .request-col-song { width: 24%; }
+.requests-table .request-col-modes { width: 9%; }
 .requests-table .request-col-beatmap-status { width: 10%; }
 .requests-table .request-col-request-status { width: 11%; }
 .requests-table .request-col-priority { width: 8%; }
@@ -952,4 +953,35 @@ select.input-text {
 .compact-table tbody tr:hover {
   background-color: var(--hover-bg);
   cursor: pointer;
+}
+.tag-badge {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--hover-bg);
+  color: var(--text-main);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.tag-suggestions button:hover {
+  background: var(--hover-bg);
+}
+
+.request-modal-content,
+.request-modal-content > * {
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .request-modal-content {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .request-modal-settings {
+    border-left: 0 !important;
+    border-top: 1px solid var(--border);
+    padding-left: 0 !important;
+    padding-top: 20px;
+  }
 }

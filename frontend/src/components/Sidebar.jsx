@@ -16,7 +16,8 @@ export default function Sidebar({
   setActiveTab, 
   connectedAccount,
   onDisconnect,
-  isSidebarOpen = true
+  isSidebarOpen = true,
+  categoryDefinitions = [],
 }) {
   const openConnectedProfile = async () => {
     if (!connectedAccount?.id) return;
@@ -28,12 +29,14 @@ export default function Sidebar({
     }
   };
 
+  const iconBySystemKey = { hitsounds: Music, guest_difficulties: UserCheck, storyboards: Film, others: HelpCircle };
   const categories = [
-    { id: 'All', name: 'All Requests', icon: ListTodo },
-    { id: 'Hitsounds', name: 'Hitsounds', icon: Music },
-    { id: 'Guest Difficulties', name: 'Guest Difficulties', icon: UserCheck },
-    { id: 'Storyboards', name: 'Storyboards', icon: Film },
-    { id: 'Others', name: 'Others', icon: HelpCircle },
+    { id: 'all', name: 'All Requests', icon: ListTodo },
+    ...categoryDefinitions.map(category => ({
+      id: category.id,
+      name: category.name,
+      icon: iconBySystemKey[category.system_key] || ListTodo,
+    })),
   ];
 
   return (

@@ -51,6 +51,12 @@ async function getDatabase() {
 
   // Initialize schema
   await dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS requests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       beatmapset_id INTEGER NULL,
@@ -152,6 +158,11 @@ async function getDatabase() {
   await addColumnIfMissing(dbInstance, 'requests', 'guest_difficulty_name', 'TEXT');
   await addColumnIfMissing(dbInstance, 'requests', 'input_link', 'TEXT');
   await migrateRequestSchema(dbInstance);
+  await runApplicationMigrations(dbInstance);
+  const foreignKeyErrors = await dbInstance.all('PRAGMA foreign_key_check');
+  if (foreignKeyErrors.length > 0) {
+    throw new Error(`Database migration integrity check failed (${foreignKeyErrors.length} foreign-key errors).`);
+  }
   await ensureIndexes(dbInstance);
 
   // Persist legacy difficulty refreshes in the normal metadata queue so startup
@@ -171,6 +182,13 @@ async function ensureIndexes(db) {
       ON requests(request_status, deadline);
     CREATE INDEX IF NOT EXISTS idx_request_categories_request_category
       ON request_categories(request_id, category_name);
+    CREATE INDEX IF NOT EXISTS idx_request_categories_category_id
+      ON request_categories(category_id, request_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_request_categories_unique_category
+      ON request_categories(request_id, category_id)
+      WHERE category_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_guest_difficulties_request_sort
+      ON request_guest_difficulties(request_id, sort_order, id);
     CREATE INDEX IF NOT EXISTS idx_history_request_created
       ON history(request_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_request_tags_tag_request
@@ -186,7 +204,7 @@ async function queueDifficultyCreatorMigration(db) {
     SELECT b.beatmapset_id, 'Pending', 0, CURRENT_TIMESTAMP
     FROM beatmap_cache b
     WHERE b.metadata_complete = 1
-      AND b.difficulties_json NOT LIKE '%creator_names%'
+      AND (b.difficulties_json NOT LIKE '%creator_names%' OR b.difficulties_json NOT LIKE '%"mode":%')
       AND EXISTS (SELECT 1 FROM requests r WHERE r.beatmapset_id = b.beatmapset_id)
     ON CONFLICT(beatmapset_id) DO UPDATE SET
       status = CASE
@@ -202,6 +220,116 @@ async function queueDifficultyCreatorMigration(db) {
       END,
       updated_at = CURRENT_TIMESTAMP
   `);
+}
+
+const BUILTIN_CATEGORIES = [
+  ['Hitsounds', 'hitsounds', 'standard', 0],
+  ['Guest Difficulties', 'guest_difficulties', 'guest_difficulties', 1],
+  ['Storyboards', 'storyboards', 'tagged', 2],
+  ['Others', 'others', 'tagged', 3],
+];
+
+async function runApplicationMigrations(db) {
+  const appliedRows = await db.all('SELECT version FROM schema_migrations');
+  const applied = new Set(appliedRows.map(row => row.version));
+
+  if (!applied.has(1)) {
+    await db.exec('BEGIN IMMEDIATE TRANSACTION');
+    try {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS categories (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT COLLATE NOCASE NOT NULL UNIQUE,
+          system_key TEXT UNIQUE,
+          view_type TEXT NOT NULL CHECK(view_type IN ('standard', 'guest_difficulties', 'tagged')) DEFAULT 'tagged',
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS request_guest_difficulties (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          request_id INTEGER NOT NULL,
+          beatmap_id INTEGER,
+          difficulty_name TEXT,
+          gamemode TEXT NOT NULL CHECK(gamemode IN ('osu', 'taiko', 'fruits', 'mania')) DEFAULT 'osu',
+          target_sr REAL,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(request_id) REFERENCES requests(id) ON DELETE CASCADE
+        );
+      `);
+
+      for (const [name, systemKey, viewType, sortOrder] of BUILTIN_CATEGORIES) {
+        await db.run(`
+          INSERT INTO categories (name, system_key, view_type, sort_order, is_active)
+          VALUES (?, ?, ?, ?, 1)
+          ON CONFLICT(name) DO UPDATE SET
+            system_key = COALESCE(categories.system_key, excluded.system_key),
+            view_type = CASE WHEN categories.system_key IS NULL THEN categories.view_type ELSE excluded.view_type END
+        `, name, systemKey, viewType, sortOrder);
+      }
+
+      const requestCategoryColumns = await db.all('PRAGMA table_info(request_categories)');
+      if (!requestCategoryColumns.some(column => column.name === 'category_id')) {
+        await db.run('ALTER TABLE request_categories ADD COLUMN category_id INTEGER REFERENCES categories(id)');
+      }
+
+      await db.run(`
+        INSERT OR IGNORE INTO categories (name, view_type, sort_order, is_active)
+        SELECT DISTINCT trim(category_name), 'tagged',
+          (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM categories), 1
+        FROM request_categories
+        WHERE trim(COALESCE(category_name, '')) <> ''
+      `);
+      await db.run(`
+        UPDATE request_categories
+        SET category_id = (
+          SELECT id FROM categories WHERE name = request_categories.category_name COLLATE NOCASE
+        )
+        WHERE category_id IS NULL
+      `);
+
+      await db.run(`
+        INSERT INTO request_guest_difficulties (
+          request_id, difficulty_name, gamemode, target_sr, sort_order
+        )
+        SELECT id, guest_difficulty_name, 'osu', guest_difficulty_target_sr, 0
+        FROM requests
+        WHERE (guest_difficulty_name IS NOT NULL OR guest_difficulty_target_sr IS NOT NULL)
+          AND NOT EXISTS (
+            SELECT 1 FROM request_guest_difficulties gd WHERE gd.request_id = requests.id
+          )
+      `);
+
+      // Merge legacy tags that differ only by case before enforcing catalog uniqueness.
+      await db.run(`
+        INSERT OR IGNORE INTO request_tags (request_id, tag_id)
+        SELECT rt.request_id, canonical.id
+        FROM request_tags rt
+        JOIN tags duplicate ON duplicate.id = rt.tag_id
+        JOIN tags canonical ON lower(canonical.name) = lower(duplicate.name)
+          AND canonical.id = (SELECT MIN(t2.id) FROM tags t2 WHERE lower(t2.name) = lower(duplicate.name))
+      `);
+      await db.run(`
+        DELETE FROM tags
+        WHERE id NOT IN (SELECT MIN(id) FROM tags GROUP BY lower(name))
+      `);
+      await db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name_nocase ON tags(name COLLATE NOCASE)');
+
+      await db.run(
+        'INSERT INTO schema_migrations (version, name) VALUES (?, ?)',
+        1,
+        'dynamic categories, guest difficulty rows, and case-insensitive tags'
+      );
+      await db.exec('COMMIT');
+    } catch (error) {
+      await db.exec('ROLLBACK');
+      throw error;
+    }
+  }
 }
 
 // Add a column to a table if it does not already exist
@@ -296,5 +424,7 @@ async function migrateRequestSchema(db) {
 module.exports = {
   getDatabase,
   dbPath,
-  coversDir
+  coversDir,
+  BUILTIN_CATEGORIES,
+  runApplicationMigrations,
 };

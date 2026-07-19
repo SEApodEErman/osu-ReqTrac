@@ -61,6 +61,7 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
       ar: b.ar,
       od: b.accuracy,
       hp: b.drain,
+      mode: b.mode || (b.mode_int === 1 ? 'taiko' : b.mode_int === 2 ? 'fruits' : b.mode_int === 3 ? 'mania' : 'osu'),
       creator_id: creatorIds[0] ?? b.user_id,
       creator_ids: creatorIds.length > 0 ? creatorIds : (b.user_id ? [b.user_id] : []),
       creator_name: creatorNames[0] || mapsetData.creator,

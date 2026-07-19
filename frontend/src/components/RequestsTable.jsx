@@ -13,6 +13,7 @@ import {
   RefreshCw,
   AlertCircle
 } from 'lucide-react';
+import TagInput from './TagInput';
 
 // osu! official star difficulty spectrum from osu.Game.Rulesets.Osu.Difficulty.OsuColour
 // https://github.com/ppy/osu/blob/master/osu.Game.Rulesets.Osu/Difficulty/OsuColour.cs
@@ -172,9 +173,13 @@ export default function RequestsTable({
   isBulkStatusUpdating = false,
   onBulkUpdatePriority,
   onBulkUpdateCategory,
+  onBulkAddTags,
   onBulkDelete,
   onRequestConfirmation = async () => false,
   activeCategory,
+  activeCategoryDefinition,
+  categoryDefinitions = [],
+  tagSuggestions = [],
   sortBy,
   sortOrder,
   onSortChange,
@@ -184,6 +189,7 @@ export default function RequestsTable({
   const [priorityFilter, setPriorityFilter] = useState('');
   const [tagFilter, setTagFilter] = useState('');
   const [selectedIds, setSelectedIds] = useState([]);
+  const [bulkTags, setBulkTags] = useState([]);
   const tableContainerRef = useRef(null);
   const scrollFrameRef = useRef(null);
   const [virtualViewport, setVirtualViewport] = useState({ scrollTop: 0, height: 600 });
@@ -383,19 +389,13 @@ export default function RequestsTable({
   };
 
   // Helper to determine which columns to show based on active category
-  const getCategoryColumns = () => {
-    switch (activeCategory) {
-      case 'Guest Difficulties':
-        return { showTags: false };
-      case 'Storyboards':
-      case 'Others':
-        return { showTags: true };
-      default: // All Requests, Hitsounds
-        return { showTags: false };
-    }
-  };
+  const getCategoryColumns = () => ({
+    showTags: activeCategoryDefinition?.view_type === 'tagged',
+    showModes: activeCategoryDefinition?.view_type === 'guest_difficulties' || activeCategoryDefinition?.system_key === 'guest_difficulties',
+  });
 
-  const { showTags } = getCategoryColumns();
+  const { showTags, showModes } = getCategoryColumns();
+  const columnCount = 10 + Number(showTags) + Number(showModes);
 
   return (
     <div style={{ padding: '0 24px 24px 24px', display: 'flex', flexDirection: 'column', gap: '16px', position: 'relative' }}>
@@ -510,6 +510,7 @@ export default function RequestsTable({
               <col className="request-col-cover" />
               <col className="request-col-song" />
               {showTags && <col className="request-col-tags" />}
+              {showModes && <col className="request-col-modes" />}
               <col className="request-col-beatmap-status" />
               <col className="request-col-request-status" />
               <col className="request-col-priority" />
@@ -533,6 +534,7 @@ export default function RequestsTable({
                 {showTags && (
                   <th>Tags</th>
                 )}
+                {showModes && <th>Gamemode</th>}
                 <SortableHeader label="Beatmap Status" onSort={() => toggleSort('ranked_status')} />
                 <SortableHeader label="Request Status" onSort={() => toggleSort('request_status')} />
                 <SortableHeader label="Priority" onSort={() => toggleSort('priority')} />
@@ -545,7 +547,7 @@ export default function RequestsTable({
             <tbody>
               {virtualWindow.topSpacerHeight > 0 && (
                 <tr className="virtual-spacer-row" aria-hidden="true">
-                  <td colSpan={showTags ? 11 : 10} style={{ height: `${virtualWindow.topSpacerHeight}px` }} />
+                  <td colSpan={columnCount} style={{ height: `${virtualWindow.topSpacerHeight}px` }} />
                 </tr>
               )}
               {virtualWindow.rows.map((req, virtualIndex) => {
@@ -599,7 +601,7 @@ export default function RequestsTable({
                           >
                             {req.title || (isMetadataPending ? 'Syncing metadata...' : `Beatmapset ${req.beatmapset_id}`)}
                           </span>
-                          <StarRatingBadge stars={req.highest_stars} />
+                          <StarRatingBadge stars={showModes ? req.my_guest_highest_stars : req.highest_stars} />
                           {req.priority === 'High' && (
                             <span style={{ 
                               width: '6px', 
@@ -650,6 +652,16 @@ export default function RequestsTable({
                         ) : (
                           <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>—</span>
                         )}
+                      </td>
+                    )}
+
+                    {showModes && (
+                      <td>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                          {(req.gamemodes || []).length > 0
+                            ? req.gamemodes.map(mode => <span key={mode} className="badge badge-pending">{mode === 'fruits' ? 'catch' : mode}</span>)
+                            : <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>â€”</span>}
+                        </div>
                       </td>
                     )}
 
@@ -802,7 +814,7 @@ export default function RequestsTable({
               })}
               {virtualWindow.bottomSpacerHeight > 0 && (
                 <tr className="virtual-spacer-row" aria-hidden="true">
-                  <td colSpan={showTags ? 11 : 10} style={{ height: `${virtualWindow.bottomSpacerHeight}px` }} />
+                  <td colSpan={columnCount} style={{ height: `${virtualWindow.bottomSpacerHeight}px` }} />
                 </tr>
               )}
             </tbody>
@@ -895,10 +907,7 @@ export default function RequestsTable({
               style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
             >
               <option value="">Move to...</option>
-              <option value="Hitsounds">Hitsounds</option>
-              <option value="Guest Difficulties">Guest Difficulties</option>
-              <option value="Storyboards">Storyboards</option>
-              <option value="Others">Others</option>
+              {categoryDefinitions.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}
             </select>
             <select
               onChange={(e) => handleBulkCategoryAction(e, 'add')}
@@ -907,11 +916,29 @@ export default function RequestsTable({
               style={{ padding: '4px 8px', fontSize: '12px', width: '105px' }}
             >
               <option value="">Add to...</option>
-              <option value="Hitsounds">Hitsounds</option>
-              <option value="Guest Difficulties">Guest Difficulties</option>
-              <option value="Storyboards">Storyboards</option>
-              <option value="Others">Others</option>
+              {categoryDefinitions.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}
             </select>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: '6px', flexShrink: 0, minWidth: '230px' }}>
+            <div style={{ minWidth: '160px', flex: 1 }}>
+              <TagInput value={bulkTags} onChange={setBulkTags} suggestions={tagSuggestions} placeholder="Add tags…" compact />
+            </div>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={isBulkStatusUpdating || bulkTags.length === 0}
+              onClick={async () => {
+                const success = await onBulkAddTags(selectedIds, bulkTags);
+                if (success) {
+                  setBulkTags([]);
+                  setSelectedIds([]);
+                }
+              }}
+              style={{ padding: '6px 9px', fontSize: '12px' }}
+            >
+              Add tags
+            </button>
           </div>
 
           <button

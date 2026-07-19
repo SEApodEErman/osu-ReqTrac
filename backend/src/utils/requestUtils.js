@@ -39,6 +39,49 @@ function findUserDifficulty(difficulties, { connectedUserId, connectedUsername, 
   ) || null;
 }
 
+function normalizeGamemode(mode) {
+  if (mode === 1 || mode === '1' || mode === 'taiko') return 'taiko';
+  if (mode === 2 || mode === '2' || mode === 'fruits' || mode === 'catch') return 'fruits';
+  if (mode === 3 || mode === '3' || mode === 'mania') return 'mania';
+  return 'osu';
+}
+
+function findUserDifficulties(difficulties, {
+  connectedUserId,
+  connectedUsername,
+  assignments = [],
+} = {}) {
+  if (!Array.isArray(difficulties)) return [];
+  const username = connectedUsername?.toLowerCase();
+  const assignmentList = Array.isArray(assignments) ? assignments : [];
+  const matches = difficulties.filter(difficulty => {
+    const creatorMatch = Boolean(
+      (connectedUserId && (
+        difficulty.creator_id === connectedUserId || difficulty.creator_ids?.includes(connectedUserId)
+      )) ||
+      (username && (
+        difficulty.creator_name?.toLowerCase() === username ||
+        difficulty.creator_names?.some(name => name?.toLowerCase() === username)
+      ))
+    );
+    const assignmentMatch = assignmentList.some(assignment => {
+      if (assignment.beatmap_id && Number(assignment.beatmap_id) === Number(difficulty.id)) return true;
+      const assignedName = assignment.difficulty_name?.toLowerCase();
+      return assignedName && assignedName === difficulty.name?.toLowerCase()
+        && normalizeGamemode(assignment.gamemode) === normalizeGamemode(difficulty.mode);
+    });
+    return creatorMatch || assignmentMatch;
+  });
+
+  const seen = new Set();
+  return matches.filter(difficulty => {
+    const key = difficulty.id || `${normalizeGamemode(difficulty.mode)}:${difficulty.name?.toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function isGuestDifficulty(difficulty, beatmapsetCreatorId) {
   if (!difficulty?.creator_id || !beatmapsetCreatorId) return false;
 
@@ -51,7 +94,9 @@ function isGuestDifficulty(difficulty, beatmapsetCreatorId) {
 
 module.exports = {
   findUserDifficulty,
+  findUserDifficulties,
   isGuestDifficulty,
+  normalizeGamemode,
   parseOsuLink,
   parseOsuUserLink,
 };

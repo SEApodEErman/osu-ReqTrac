@@ -1,11 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 
-const BACKUP_VERSION = '2.0.0';
-const LEGACY_BACKUP_VERSION = '1.0.0';
+const BACKUP_VERSION = '3.0.0';
+const LEGACY_BACKUP_VERSIONS = new Set(['1.0.0', '2.0.0']);
 const DATA_TABLES = [
   'requests',
+  'categories',
   'request_categories',
+  'request_guest_difficulties',
   'beatmap_cache',
   'beatmap_metadata_sync',
   'users_cache',
@@ -19,15 +21,19 @@ function validateBackup(backup) {
   if (!backup || typeof backup !== 'object' || Array.isArray(backup)) {
     throw new Error('Invalid backup JSON structure.');
   }
-  if (![BACKUP_VERSION, LEGACY_BACKUP_VERSION].includes(backup.version)) {
-    throw new Error(`Unsupported backup version. Expected ${BACKUP_VERSION} or ${LEGACY_BACKUP_VERSION}.`);
+  if (backup.version !== BACKUP_VERSION && !LEGACY_BACKUP_VERSIONS.has(backup.version)) {
+    throw new Error(`Unsupported backup version. Expected ${BACKUP_VERSION}, 2.0.0, or 1.0.0.`);
   }
-  for (const table of DATA_TABLES.filter(table => table !== 'beatmap_metadata_sync' || backup.version === BACKUP_VERSION)) {
+  for (const table of DATA_TABLES.filter(table => {
+    if (['categories', 'request_guest_difficulties'].includes(table)) return backup.version === BACKUP_VERSION;
+    if (table === 'beatmap_metadata_sync') return backup.version !== '1.0.0';
+    return true;
+  })) {
     if (!Array.isArray(backup[table])) {
       throw new Error(`Backup is incomplete: missing ${table} data.`);
     }
   }
-  if (backup.version === LEGACY_BACKUP_VERSION && backup.beatmap_metadata_sync !== undefined && !Array.isArray(backup.beatmap_metadata_sync)) {
+  if (backup.version === '1.0.0' && backup.beatmap_metadata_sync !== undefined && !Array.isArray(backup.beatmap_metadata_sync)) {
     throw new Error('Backup beatmap_metadata_sync must be an array.');
   }
   if (backup.cover_files !== undefined && !Array.isArray(backup.cover_files)) {
@@ -39,6 +45,8 @@ function validateBackup(backup) {
   return {
     ...backup,
     _hasCoverFiles: Array.isArray(backup.cover_files),
+    categories: backup.categories || [],
+    request_guest_difficulties: backup.request_guest_difficulties || [],
     beatmap_metadata_sync: backup.beatmap_metadata_sync || [],
     cover_files: backup.cover_files || [],
     sqlite_sequence: backup.sqlite_sequence || []

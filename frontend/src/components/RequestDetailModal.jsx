@@ -4,7 +4,6 @@ import {
   ExternalLink, 
   Calendar, 
   AlertCircle, 
-  Tag, 
   Link,
   MessageSquare,
   RefreshCw,
@@ -13,6 +12,7 @@ import {
   Clock
 } from 'lucide-react';
 import { countryCodeToFlag } from '../utils/countryFlag';
+import TagInput from './TagInput';
 
 // osu! official star difficulty spectrum from osu.Game.Rulesets.Osu.Difficulty.OsuColour
 // https://github.com/ppy/osu/blob/master/osu.Game.Rulesets.Osu/Difficulty/OsuColour.cs
@@ -119,7 +119,9 @@ export default function RequestDetailModal({
   onUpdateRequest,
   onForceRefreshBeatmap,
   connectedAccount,
-  onNotify
+  onNotify,
+  categoryDefinitions = [],
+  tagSuggestions = [],
 }) {
   const [activeRequest, setActiveRequest] = useState(request);
   const [historyLogs, setHistoryLogs] = useState([]);
@@ -140,28 +142,61 @@ export default function RequestDetailModal({
   const [requesterUsername, setRequesterUsername] = useState(request.requester_username || '');
   const deadlineInputRef = useRef(null);
   const addedDateInputRef = useRef(null);
-  const [guestDifficultyTargetSR, setGuestDifficultyTargetSR] = useState(request.guest_difficulty_target_sr || '');
-  const [guestDifficultyName, setGuestDifficultyName] = useState(request.guest_difficulty_name || '');
+  const [guestDifficulties, setGuestDifficulties] = useState(() => request.guest_difficulties?.length
+    ? request.guest_difficulties.map(row => ({ ...row, target_sr: row.target_sr ?? '' }))
+    : [{ gamemode: 'osu', difficulty_name: request.guest_difficulty_name || '', target_sr: request.guest_difficulty_target_sr || '' }]);
   const [isEditingDate, setIsEditingDate] = useState(false);
   const [isEditingDeadline, setIsEditingDeadline] = useState(false);
   const [notes, setNotes] = useState(request.notes || '');
   const [discordLink, setDiscordLink] = useState(request.discord_link || '');
   const [profileLink, setProfileLink] = useState(request.osu_profile_link || '');
-  const [newTag, setNewTag] = useState('');
   const [tags, setTags] = useState(request.tags || []);
   
   // Category progress state
   const [categories, setCategories] = useState(
-    ['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others'].map(name => {
-      const match = request.categories.find(c => c.category_name === name);
+    categoryDefinitions.map(definition => {
+      const match = request.categories.find(c => c.category_id === definition.id || c.category_name === definition.name);
       return {
-        name,
+        id: definition.id,
+        name: definition.name,
+        systemKey: definition.system_key,
+        viewType: definition.view_type,
         checked: !!match,
         status: match ? match.status : 'Pending',
         otherText: match ? match.other_text : ''
       };
     })
   );
+
+  useEffect(() => {
+    const definitions = [...categoryDefinitions];
+    request.categories.forEach(requestCategory => {
+      if (!definitions.some(definition => definition.id === requestCategory.category_id)) {
+        definitions.push({
+          id: requestCategory.category_id,
+          name: requestCategory.category_name,
+          system_key: requestCategory.system_key,
+          view_type: requestCategory.view_type || 'tagged',
+          archived: requestCategory.is_active === 0,
+        });
+      }
+    });
+    setCategories(current => definitions.map(definition => {
+      const existing = current.find(category => category.id === definition.id);
+      if (existing) return { ...existing, name: definition.name, systemKey: definition.system_key, viewType: definition.view_type };
+      const match = request.categories.find(category => category.category_id === definition.id || category.category_name === definition.name);
+      return {
+        id: definition.id,
+        name: definition.name,
+        systemKey: definition.system_key,
+        viewType: definition.view_type,
+        checked: Boolean(match),
+        status: match?.status || 'Pending',
+        otherText: match?.other_text || '',
+        archived: Boolean(definition.archived),
+      };
+    }));
+  }, [categoryDefinitions, request.categories]);
 
   const fetchHistory = useCallback(async () => {
     setIsLoadingHistory(true);
@@ -226,39 +261,26 @@ export default function RequestDetailModal({
     }));
   };
 
-  const handleAddTag = (e) => {
-    e.preventDefault();
-    const cleanTag = newTag.trim();
-    if (cleanTag && !tags.includes(cleanTag)) {
-      setTags(prev => [...prev, cleanTag]);
-      setNewTag('');
-    }
-  };
-
-  const handleRemoveTag = (tagToRemove) => {
-    setTags(prev => prev.filter(t => t !== tagToRemove));
-  };
-
   const handleSave = async () => {
     if (isSaving) return;
 
     const catsPayload = categories
       .filter(c => c.checked)
       .map(c => ({
+        category_id: c.id,
         category_name: c.name,
-        other_text: c.name === 'Others' ? c.otherText : null,
+        other_text: c.systemKey === 'others' ? c.otherText : null,
         status: c.status || 'Pending',
       }));
 
-    const guestDiffTargetSR = categories.some(c => c.checked && c.name === 'Guest Difficulties') ? (parseFloat(guestDifficultyTargetSR) || null) : null;
+    const hasGuestCategory = categories.some(c => c.checked && (c.systemKey === 'guest_difficulties' || c.viewType === 'guest_difficulties'));
 
     const payload = {
       request_status: requestStatus,
       priority,
       deadline: deadline || null,
       added_date: addedDate || null,
-      guest_difficulty_target_sr: guestDiffTargetSR,
-      guest_difficulty_name: guestDifficultyName || null,
+      guest_difficulties: hasGuestCategory ? guestDifficulties : [],
       notes: notes || null,
       discord_link: discordLink || null,
       osu_profile_link: profileLink || null,
@@ -371,10 +393,10 @@ export default function RequestDetailModal({
         </div>
 
         {/* Modal Main Content (Scrollable) */}
-        <div style={{ overflowY: 'auto', padding: '24px', display: 'grid', gridTemplateColumns: '1.1fr 0.9fr', gap: '24px' }}>
+        <div className="request-modal-content" style={{ overflowY: 'auto', padding: '24px', display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 0.9fr)', gap: '24px' }}>
           
           {/* LEFT COLUMN: Beatmap Information */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', minWidth: 0 }}>
             <div>
               <h3 style={{ fontSize: '14px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.5px', marginBottom: '12px' }}>
                 Beatmap Info
@@ -498,10 +520,10 @@ export default function RequestDetailModal({
               )}
             </div>
 
-            {request.categories.some(c => c.category_name === 'Guest Difficulties') && (
-                <div style={{ marginTop: '20px' }}>
+            {request.categories.some(c => c.system_key === 'guest_difficulties' || c.view_type === 'guest_difficulties' || c.category_name === 'Guest Difficulties') && (
+                <div style={{ marginTop: '20px', minWidth: 0, maxHeight: '360px', overflowY: 'auto', paddingRight: '4px' }}>
                   <h3 style={{ fontSize: '14px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.5px', marginBottom: '12px' }}>
-                    My Guest Difficulty
+                    My Guest Difficulties
                   </h3>
                   {request.user_difficulty ? (
                     // Show the detected difficulty belonging to the connected user
@@ -530,7 +552,7 @@ export default function RequestDetailModal({
                               color: textColor,
                               border: `1px solid rgba(${r}, ${g}, ${b}, 1)`,
                             }}>
-                              ★ {diff.stars.toFixed(2)}
+                              ★ {Number(diff.stars || 0).toFixed(2)}
                             </span>
                             <span style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={diff.name}>
                               {diff.name}
@@ -596,6 +618,14 @@ export default function RequestDetailModal({
                       )}
                     </div>
                   )}
+                  {(request.my_guest_difficulties || []).slice(1).map((difficulty, index) => (
+                    <div key={difficulty.id || difficulty.assignment_id || `${difficulty.mode}-${difficulty.name}-${index}`} style={{ marginTop: '7px', padding: '9px 11px', backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: '7px', display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                      <span className="badge badge-pending">{difficulty.mode === 'fruits' ? 'catch' : difficulty.mode || 'osu'}</span>
+                      <span title={difficulty.name} style={{ fontSize: '12px', fontWeight: '600', minWidth: 0, overflowWrap: 'anywhere', flex: 1 }}>{difficulty.name || 'Unnamed difficulty'}</span>
+                      <span style={{ fontSize: '11px', color: 'var(--osu-pink)', fontWeight: '700', flexShrink: 0 }}>★ {Number(difficulty.stars || 0).toFixed(2)}</span>
+                      {difficulty.pending && <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>pending</span>}
+                    </div>
+                  ))}
                 </div>
               )}
 
@@ -746,7 +776,7 @@ export default function RequestDetailModal({
           </div>
 
           {/* RIGHT COLUMN: Request Settings */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', borderLeft: '1px solid var(--border)', paddingLeft: '24px' }}>
+          <div className="request-modal-settings" style={{ display: 'flex', flexDirection: 'column', gap: '20px', borderLeft: '1px solid var(--border)', paddingLeft: '24px', minWidth: 0 }}>
             
             {/* Status Select */}
             <div>
@@ -879,7 +909,7 @@ export default function RequestDetailModal({
                       </label>
                     </div>
 
-                    {cat.name === 'Others' && cat.checked && (
+                    {cat.systemKey === 'others' && cat.checked && (
                       <input
                         type="text"
                         className="input-text"
@@ -890,41 +920,19 @@ export default function RequestDetailModal({
                       />
                     )}
 
-                    {cat.name === 'Guest Difficulties' && cat.checked && (
-                      <div style={{ marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                        <div>
-                          <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', display: 'block', marginBottom: '4px' }}>
-                            Target SR (if not yet uploaded)
-                          </label>
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="0"
-                            className="input-text"
-                            placeholder="e.g. 6.58"
-                            value={guestDifficultyTargetSR}
-                            onChange={(e) => setGuestDifficultyTargetSR(e.target.value)}
-                            style={{ padding: '4px 8px', fontSize: '12px', backgroundColor: 'var(--bg-card)' }}
-                          />
-                        </div>
-                        {request.is_osu_link && !request.user_difficulty && (
-                          <div>
-                            <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', display: 'block', marginBottom: '4px' }}>
-                              Assign Difficulty Name
-                            </label>
-                            <input
-                              type="text"
-                              className="input-text"
-                              placeholder="e.g. Mahiru's Expert"
-                              value={guestDifficultyName}
-                              onChange={(e) => setGuestDifficultyName(e.target.value)}
-                              style={{ padding: '4px 8px', fontSize: '12px', backgroundColor: 'var(--bg-card)' }}
-                            />
-                            <span style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '3px', display: 'block' }}>
-                              Match a difficulty by name when creator ID isn&apos;t cached yet.
-                            </span>
+                    {(cat.systemKey === 'guest_difficulties' || cat.viewType === 'guest_difficulties') && cat.checked && (
+                      <div style={{ marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '7px' }}>
+                        {guestDifficulties.map((row, rowIndex) => (
+                          <div key={row.id || rowIndex} style={{ display: 'grid', gridTemplateColumns: '95px minmax(0, 1fr) 88px auto', gap: '5px', alignItems: 'center' }}>
+                            <select className="input-text" value={row.gamemode || 'osu'} onChange={event => setGuestDifficulties(items => items.map((item, index) => index === rowIndex ? { ...item, gamemode: event.target.value } : item))} style={{ padding: '5px' }}>
+                              <option value="osu">osu!</option><option value="taiko">Taiko</option><option value="fruits">Catch</option><option value="mania">Mania</option>
+                            </select>
+                            <input className="input-text" placeholder="Difficulty name" value={row.difficulty_name || ''} onChange={event => setGuestDifficulties(items => items.map((item, index) => index === rowIndex ? { ...item, difficulty_name: event.target.value } : item))} style={{ padding: '5px 7px' }} />
+                            <input className="input-text" type="number" step="0.01" min="0" placeholder="SR" value={row.target_sr ?? ''} onChange={event => setGuestDifficulties(items => items.map((item, index) => index === rowIndex ? { ...item, target_sr: event.target.value } : item))} style={{ padding: '5px 7px' }} />
+                            <button type="button" className="btn-secondary" disabled={guestDifficulties.length === 1} onClick={() => setGuestDifficulties(items => items.filter((_, index) => index !== rowIndex))} style={{ padding: '5px' }}><Trash2 size={13} /></button>
                           </div>
-                        )}
+                        ))}
+                        <button type="button" className="btn-secondary" onClick={() => setGuestDifficulties(items => [...items, { gamemode: 'osu', difficulty_name: '', target_sr: '' }])} style={{ width: 'fit-content', padding: '5px 8px', fontSize: '11px' }}><Plus size={12} /> Add difficulty</button>
                       </div>
                     )}
                   </div>
@@ -937,54 +945,7 @@ export default function RequestDetailModal({
               <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>
                 Tags
               </label>
-              
-              {/* Active tags badges */}
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '8px' }}>
-                {tags.map(tag => (
-                  <span 
-                    key={tag}
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '4px',
-                      padding: '2px 8px',
-                      backgroundColor: 'var(--hover-bg)',
-                      border: '1px solid var(--border)',
-                      borderRadius: '4px',
-                      fontSize: '11px',
-                      fontWeight: '600'
-                    }}
-                  >
-                    <Tag size={10} />
-                    {tag}
-                    <button 
-                      onClick={() => handleRemoveTag(tag)}
-                      style={{ color: 'var(--text-muted)', cursor: 'pointer', display: 'inline-flex' }}
-                    >
-                      <X size={10} />
-                    </button>
-                  </span>
-                ))}
-              </div>
-
-              {/* Add tag form */}
-              <form onSubmit={handleAddTag} style={{ display: 'flex', gap: '6px' }}>
-                <input 
-                  type="text" 
-                  className="input-text" 
-                  placeholder="New tag..." 
-                  value={newTag}
-                  onChange={(e) => setNewTag(e.target.value)}
-                  style={{ padding: '4px 8px', fontSize: '12px' }}
-                />
-                <button 
-                  type="submit" 
-                  className="btn-secondary" 
-                  style={{ padding: '4px 10px', display: 'flex', alignItems: 'center' }}
-                >
-                  <Plus size={14} />
-                </button>
-              </form>
+              <TagInput value={tags} onChange={setTags} suggestions={tagSuggestions} placeholder="Type or select existing tags" compact />
             </div>
 
             {/* Notes */}

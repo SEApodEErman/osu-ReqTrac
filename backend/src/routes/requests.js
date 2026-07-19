@@ -4,8 +4,15 @@ const { getDatabase } = require('../db');
 const { fetchBeatmap, fetchBeatmapset, fetchUser, downloadCover } = require('../osuApi');
 const { refreshAndCacheBeatmapset } = require('./beatmaps');
 const { createApiJob, updateApiJob, finishApiJob } = require('../osuApi');
-const { findUserDifficulty, isGuestDifficulty, parseOsuLink, parseOsuUserLink } = require('../utils/requestUtils');
+const { findUserDifficulties, isGuestDifficulty, normalizeGamemode, parseOsuLink, parseOsuUserLink } = require('../utils/requestUtils');
 const { trackBackgroundTask } = require('../utils/backgroundTasks');
+const {
+  ensureTag,
+  normalizeCategories,
+  normalizeGuestDifficulties,
+  replaceGuestDifficulties,
+  resolveCategory,
+} = require('../utils/catalog');
 
 // Helper to update or cache a user profile
 async function fetchAndCacheUser(db, userIdOrUsername) {
@@ -53,13 +60,21 @@ router.get('/', async (req, res, next) => {
     `);
 
     // Fetch all request categories
-    const allCategories = await db.all('SELECT * FROM request_categories');
+    const allCategories = await db.all(`
+      SELECT rc.*, c.name AS catalog_name, c.system_key, c.view_type, c.is_active
+      FROM request_categories rc
+      LEFT JOIN categories c ON c.id = rc.category_id
+    `);
     const categoriesByRequest = new Map();
     for (const category of allCategories) {
       if (!categoriesByRequest.has(category.request_id)) categoriesByRequest.set(category.request_id, []);
       categoriesByRequest.get(category.request_id).push({
         id: category.id,
-        category_name: category.category_name,
+        category_id: category.category_id,
+        category_name: category.catalog_name || category.category_name,
+        system_key: category.system_key || null,
+        view_type: category.view_type || 'tagged',
+        is_active: category.is_active ?? 1,
         other_text: category.other_text,
         status: category.status
       });
@@ -75,6 +90,15 @@ router.get('/', async (req, res, next) => {
     for (const tag of allTags) {
       if (!tagsByRequest.has(tag.request_id)) tagsByRequest.set(tag.request_id, []);
       tagsByRequest.get(tag.request_id).push(tag.name);
+    }
+
+    const allGuestDifficultyRows = await db.all(`
+      SELECT * FROM request_guest_difficulties ORDER BY request_id, sort_order, id
+    `);
+    const guestRowsByRequest = new Map();
+    for (const row of allGuestDifficultyRows) {
+      if (!guestRowsByRequest.has(row.request_id)) guestRowsByRequest.set(row.request_id, []);
+      guestRowsByRequest.get(row.request_id).push(row);
     }
 
     // Fetch all user caches
@@ -95,6 +119,7 @@ router.get('/', async (req, res, next) => {
       
       const categories = categoriesByRequest.get(reqId) || [];
       const tags = tagsByRequest.get(reqId) || [];
+      const assignedGuestDifficulties = guestRowsByRequest.get(reqId) || [];
 
       // Parse difficulties
       let difficulties = [];
@@ -103,6 +128,7 @@ router.get('/', async (req, res, next) => {
       let guestDifficulties = [];
       let highestGuestStars = 0;
       let guestDifficultyCount = 0;
+      let myGuestHighestStars = 0;
 
       if (reqRow.is_osu_link && reqRow.difficulties_json) {
         try {
@@ -128,25 +154,48 @@ router.get('/', async (req, res, next) => {
       }
 
       // Check if this request is a Guest Difficulties request
-      const isGuestDiffRequest = categories.some(c => c.category_name === 'Guest Difficulties');
-      let userDifficulty = null;
+      const isGuestDiffRequest = categories.some(c =>
+        c.system_key === 'guest_difficulties' || c.category_name === 'Guest Difficulties'
+      );
+      let userDifficulties = [];
       
       if (isGuestDiffRequest) {
         // Find if there's any difficulty belonging to the connected user
         if (reqRow.is_osu_link && difficulties.length > 0) {
-          userDifficulty = findUserDifficulty(difficulties, {
+          userDifficulties = findUserDifficulties(difficulties, {
             connectedUserId,
             connectedUsername,
-            assignedName: reqRow.guest_difficulty_name,
+            assignments: assignedGuestDifficulties,
           });
         }
-        
-        if (userDifficulty) {
-          highestStars = userDifficulty.stars;
-        } else {
-          // Fallback to target SR
-          highestStars = reqRow.guest_difficulty_target_sr || 0;
-        }
+
+        const resolvedIds = new Set(userDifficulties.map(difficulty => Number(difficulty.id)));
+        const resolvedKeys = new Set(userDifficulties.map(difficulty =>
+          `${normalizeGamemode(difficulty.mode)}:${difficulty.name?.toLowerCase()}`
+        ));
+        const unresolved = assignedGuestDifficulties
+          .filter(assignment => !resolvedIds.has(Number(assignment.beatmap_id)) &&
+            !resolvedKeys.has(`${normalizeGamemode(assignment.gamemode)}:${assignment.difficulty_name?.toLowerCase()}`))
+          .map(assignment => ({
+            id: null,
+            assignment_id: assignment.id,
+            name: assignment.difficulty_name,
+            mode: normalizeGamemode(assignment.gamemode),
+            stars: assignment.target_sr,
+            pending: true,
+          }));
+        userDifficulties = [
+          ...userDifficulties.map(difficulty => ({
+            ...difficulty,
+            mode: normalizeGamemode(difficulty.mode),
+            pending: false,
+          })),
+          ...unresolved,
+        ];
+        myGuestHighestStars = userDifficulties.reduce(
+          (maximum, difficulty) => Math.max(maximum, Number(difficulty.stars) || 0),
+          0
+        );
       }
 
       // Requester cache info
@@ -218,7 +267,11 @@ router.get('/', async (req, res, next) => {
         guest_difficulty_count: guestDifficultyCount,
         guest_difficulty_target_sr: reqRow.guest_difficulty_target_sr,
         guest_difficulty_name: reqRow.guest_difficulty_name,
-        user_difficulty: userDifficulty || null
+        guest_difficulties: assignedGuestDifficulties,
+        my_guest_difficulties: userDifficulties,
+        my_guest_highest_stars: myGuestHighestStars,
+        gamemodes: [...new Set(userDifficulties.map(difficulty => normalizeGamemode(difficulty.mode)))],
+        user_difficulty: userDifficulties[0] || null
       };
     });
 
@@ -314,10 +367,18 @@ router.post('/', async (req, res, next) => {
       tags = [],
       force = false,
       add_to_existing_id = null,
-      guest_difficulty_target_sr
+      guest_difficulty_target_sr,
+      guest_difficulty_name,
+      guest_difficulties,
     } = req.body;
 
     const db = await getDatabase();
+    const normalizedCategories = await normalizeCategories(db, categories || []);
+    const normalizedGuestRows = normalizeGuestDifficulties(guest_difficulties, {
+      guest_difficulty_target_sr,
+      guest_difficulty_name,
+      guest_difficulties,
+    });
     const parsedLink = parseOsuLink(link);
 
     let beatmapsetId = null;
@@ -330,26 +391,34 @@ router.post('/', async (req, res, next) => {
         return res.status(404).json({ error: 'Request not found' });
       }
 
+      await db.exec('BEGIN TRANSACTION');
+      try {
       // Add categories
-      for (const cat of categories) {
+      for (const cat of normalizedCategories) {
         // Check if category already exists for this request
         const dupCat = await db.get(
-          'SELECT id FROM request_categories WHERE request_id = ? AND category_name = ?',
-          existing.id, cat.name
+          'SELECT id FROM request_categories WHERE request_id = ? AND category_id = ?',
+          existing.id, cat.id
         );
         if (!dupCat) {
           await db.run(`
-            INSERT INTO request_categories (request_id, category_name, other_text, status)
-            VALUES (?, ?, ?, ?)
-          `, [existing.id, cat.name, cat.other_text || null, cat.status || 'Pending']);
+            INSERT INTO request_categories (request_id, category_id, category_name, other_text, status)
+            VALUES (?, ?, ?, ?, ?)
+          `, [existing.id, cat.id, cat.name, cat.other_text || null, cat.status || 'Pending']);
         }
       }
 
       await db.run('INSERT INTO history (request_id, action_type, details) VALUES (?, ?, ?)',
-        existing.id, 'category_added', `Added categories: ${categories.map(c => c.name).join(', ')}`
+        existing.id, 'category_added', `Added categories: ${normalizedCategories.map(c => c.name).join(', ')}`
       );
 
+      await db.exec('COMMIT');
+
       return res.json({ success: true, message: 'Categories added to existing request', requestId: existing.id });
+      } catch (error) {
+        await db.exec('ROLLBACK').catch(() => {});
+        throw error;
+      }
     }
 
     if (parsedLink) {
@@ -422,7 +491,9 @@ router.post('/', async (req, res, next) => {
       }
     }
 
-    // Insert Request
+    // Persist the request and all child rows atomically.
+    await db.exec('BEGIN TRANSACTION');
+    try {
     const result = await db.run(`
       INSERT INTO requests (
         beatmapset_id, is_osu_link, non_osu_artist, non_osu_title, non_osu_creator, non_osu_difficulty,
@@ -451,14 +522,16 @@ router.post('/', async (req, res, next) => {
     const requestId = result.lastID;
 
     // Insert Categories
-    if (categories && categories.length > 0) {
-      for (const cat of categories) {
+    if (normalizedCategories.length > 0) {
+      for (const cat of normalizedCategories) {
         await db.run(`
-          INSERT INTO request_categories (request_id, category_name, other_text, status)
-          VALUES (?, ?, ?, ?)
-        `, [requestId, cat.name, cat.other_text || null, cat.status || 'Pending']);
+          INSERT INTO request_categories (request_id, category_id, category_name, other_text, status)
+          VALUES (?, ?, ?, ?, ?)
+        `, [requestId, cat.id, cat.name, cat.other_text || null, cat.status || 'Pending']);
       }
     }
+
+    await replaceGuestDifficulties(db, requestId, normalizedGuestRows);
 
     // Insert Tags
     if (tags && tags.length > 0) {
@@ -466,8 +539,7 @@ router.post('/', async (req, res, next) => {
         const cleanTag = tagName.trim();
         if (!cleanTag) continue;
         
-        await db.run('INSERT OR IGNORE INTO tags (name) VALUES (?)', cleanTag);
-        const tagRow = await db.get('SELECT id FROM tags WHERE name = ?', cleanTag);
+        const tagRow = await ensureTag(db, cleanTag);
         if (tagRow) {
           await db.run('INSERT OR IGNORE INTO request_tags (request_id, tag_id) VALUES (?, ?)', requestId, tagRow.id);
         }
@@ -480,11 +552,17 @@ router.post('/', async (req, res, next) => {
       VALUES (?, ?, ?)
     `, [requestId, 'created', 'Request created manually']);
 
+    await db.exec('COMMIT');
+
     res.status(201).json({
       success: true,
       requestId,
       message: 'Request created successfully'
     });
+    } catch (error) {
+      await db.exec('ROLLBACK').catch(() => {});
+      throw error;
+    }
   } catch (error) {
     next(error);
   }
@@ -558,7 +636,34 @@ router.patch('/bulk', async (req, res, next) => {
       return res.json({ success: true, updated });
     }
 
-    if (req.body.priority !== undefined) {
+    if (req.body.add_tags !== undefined) {
+      const tagNames = Array.isArray(req.body.add_tags)
+        ? [...new Set(req.body.add_tags.map(tag => String(tag || '').trim()).filter(Boolean))]
+        : [];
+      if (tagNames.length === 0) {
+        await db.exec('ROLLBACK');
+        transactionStarted = false;
+        return res.status(400).json({ error: 'Provide at least one tag to add.' });
+      }
+      const changedRequests = new Set();
+      for (const tagName of tagNames.slice(0, 50)) {
+        const tag = await ensureTag(db, tagName);
+        for (const requestId of ids) {
+          const insertion = await db.run(
+            'INSERT OR IGNORE INTO request_tags (request_id, tag_id) VALUES (?, ?)',
+            requestId, tag.id
+          );
+          if (insertion.changes) changedRequests.add(requestId);
+        }
+      }
+      updated = changedRequests.size;
+      for (const requestId of changedRequests) {
+        await db.run(
+          'INSERT INTO history (request_id, action_type, details) VALUES (?, ?, ?)',
+          requestId, 'bulk_tags_added', `Tags added: ${tagNames.join(', ')}`
+        );
+      }
+    } else if (req.body.priority !== undefined) {
       const priority = req.body.priority;
       if (!['Low', 'Medium', 'High'].includes(priority)) {
         await db.exec('ROLLBACK');
@@ -580,30 +685,29 @@ router.patch('/bulk', async (req, res, next) => {
           row.id, 'priority_change', `Priority updated: ${row.priority} -> ${priority}`
         );
       }
-    } else if (req.body.categoryName !== undefined) {
-      const categoryName = req.body.categoryName;
+    } else if (req.body.categoryName !== undefined || req.body.categoryId !== undefined) {
+      const category = await resolveCategory(db, {
+        category_id: req.body.categoryId,
+        name: req.body.categoryName,
+      });
+      const categoryName = category.name;
       const mode = req.body.mode === 'add' ? 'add' : 'move';
-      if (!['Hitsounds', 'Guest Difficulties', 'Storyboards', 'Others'].includes(categoryName)) {
-        await db.exec('ROLLBACK');
-        transactionStarted = false;
-        return res.status(400).json({ error: 'Invalid request category.' });
-      }
       if (mode === 'move') {
         await db.run(
-          `DELETE FROM request_categories WHERE request_id IN (${placeholders}) AND category_name <> ?`,
-          ...ids, categoryName
+          `DELETE FROM request_categories WHERE request_id IN (${placeholders}) AND (category_id IS NULL OR category_id <> ?)`,
+          ...ids, category.id
         );
       }
       const insert = await db.run(`
-        INSERT INTO request_categories (request_id, category_name, other_text, status)
-        SELECT r.id, ?, NULL, 'Pending'
+        INSERT INTO request_categories (request_id, category_id, category_name, other_text, status)
+        SELECT r.id, ?, ?, NULL, 'Pending'
         FROM requests r
         WHERE r.id IN (${placeholders})
           AND NOT EXISTS (
             SELECT 1 FROM request_categories c
-            WHERE c.request_id = r.id AND c.category_name = ?
+            WHERE c.request_id = r.id AND c.category_id = ?
           )
-      `, categoryName, ...ids, categoryName);
+      `, category.id, categoryName, ...ids, category.id);
       updated = mode === 'move' ? ids.length : (insert.changes || 0);
       await db.run(`
         INSERT INTO history (request_id, action_type, details)
@@ -660,6 +764,8 @@ router.delete('/bulk', async (req, res, next) => {
 
 // PATCH /api/requests/:id - update request details and categories
 router.patch('/:id', async (req, res, next) => {
+  let db;
+  let transactionStarted = false;
   try {
     const requestId = parseInt(req.params.id, 10);
     const {
@@ -669,6 +775,7 @@ router.patch('/:id', async (req, res, next) => {
       added_date,
       guest_difficulty_target_sr,
       guest_difficulty_name,
+      guest_difficulties,
       notes,
       discord_link,
       osu_profile_link,
@@ -681,13 +788,16 @@ router.patch('/:id', async (req, res, next) => {
       tags // Array of tags to replace existing tags
     } = req.body;
 
-    const db = await getDatabase();
+    db = await getDatabase();
     const oldRequest = await db.get('SELECT * FROM requests WHERE id = ?', requestId);
     if (!oldRequest) {
       return res.status(404).json({ error: 'Request not found' });
     }
 
     const historyLogs = [];
+    let refreshBeatmapsetId = null;
+    await db.exec('BEGIN TRANSACTION');
+    transactionStarted = true;
 
     // Check status change
     if (request_status && request_status !== oldRequest.request_status) {
@@ -710,12 +820,7 @@ router.patch('/:id', async (req, res, next) => {
         if (cachedMap) {
           const mapStatus = cachedMap.ranked_status.toLowerCase();
           if (mapStatus === 'pending' || mapStatus === 'wip' || mapStatus === 'graveyard') {
-            console.log(`Status changed on request with Pending/WIP/Graveyard beatmap ${oldRequest.beatmapset_id}. Refreshing metadata...`);
-            try {
-              await refreshAndCacheBeatmapset(db, oldRequest.beatmapset_id);
-            } catch (err) {
-              console.error('Failed to refresh beatmap on request status change:', err.message);
-            }
+            refreshBeatmapsetId = oldRequest.beatmapset_id;
           }
         }
       }
@@ -801,41 +906,85 @@ router.patch('/:id', async (req, res, next) => {
       await db.run('UPDATE requests SET guest_difficulty_name = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', guest_difficulty_name || null, requestId);
     }
 
+    if (guest_difficulties !== undefined) {
+      const oldRows = await db.all(
+        'SELECT * FROM request_guest_difficulties WHERE request_id = ? ORDER BY sort_order, id',
+        requestId
+      );
+      const nextRows = normalizeGuestDifficulties(guest_difficulties);
+      await replaceGuestDifficulties(db, requestId, nextRows);
+      const comparableOldRows = oldRows.map(row => ({
+        beatmap_id: row.beatmap_id,
+        difficulty_name: row.difficulty_name,
+        gamemode: row.gamemode,
+        target_sr: row.target_sr,
+        sort_order: row.sort_order,
+      }));
+      const sharedCount = Math.min(comparableOldRows.length, nextRows.length);
+      const edited = Array.from({ length: sharedCount }, (_, index) => index)
+        .filter(index => JSON.stringify(comparableOldRows[index]) !== JSON.stringify(nextRows[index])).length;
+      const added = Math.max(0, nextRows.length - comparableOldRows.length);
+      const removed = Math.max(0, comparableOldRows.length - nextRows.length);
+      if (added) {
+        historyLogs.push({ action: 'guest_difficulties_added', details: `${added} guest difficult${added === 1 ? 'y' : 'ies'} added.` });
+      }
+      if (removed) {
+        historyLogs.push({ action: 'guest_difficulties_removed', details: `${removed} guest difficult${removed === 1 ? 'y' : 'ies'} removed.` });
+      }
+      if (edited) {
+        historyLogs.push({
+          action: 'guest_difficulties_edited',
+          details: `${edited} guest difficult${edited === 1 ? 'y' : 'ies'} edited.`
+        });
+      }
+    } else if (guest_difficulty_target_sr !== undefined || guest_difficulty_name !== undefined) {
+      const compatibilityRows = normalizeGuestDifficulties([], {
+        guest_difficulty_target_sr: guest_difficulty_target_sr !== undefined
+          ? guest_difficulty_target_sr
+          : oldRequest.guest_difficulty_target_sr,
+        guest_difficulty_name: guest_difficulty_name !== undefined
+          ? guest_difficulty_name
+          : oldRequest.guest_difficulty_name,
+      });
+      await replaceGuestDifficulties(db, requestId, compatibilityRows);
+    }
+
     // Update Categories
     if (categories) {
       // We will update the categories matching the request ID
       const oldCats = await db.all('SELECT * FROM request_categories WHERE request_id = ?', requestId);
-      
-      for (const cat of categories) {
-        const matched = oldCats.find(c => c.category_name === cat.category_name);
+      const nextCategories = await normalizeCategories(db, categories, { activeOnly: false });
+
+      for (const cat of nextCategories) {
+        const matched = oldCats.find(c => c.category_id === cat.id || c.category_name.toLowerCase() === cat.name.toLowerCase());
         if (matched) {
           const nextStatus = cat.status || matched.status || 'Pending';
           if (matched.status !== nextStatus || matched.other_text !== cat.other_text) {
             historyLogs.push({
               action: 'category_status_change',
-              details: `${cat.category_name} status: ${matched.status} -> ${nextStatus}`
+              details: `${cat.name} status: ${matched.status} -> ${nextStatus}`
             });
             await db.run(
-              'UPDATE request_categories SET status = ?, other_text = ? WHERE id = ?',
-              nextStatus, cat.other_text || null, matched.id
+              'UPDATE request_categories SET category_id = ?, category_name = ?, status = ?, other_text = ? WHERE id = ?',
+              cat.id, cat.name, nextStatus, cat.other_text || null, matched.id
             );
           }
         } else {
           // New category added
           await db.run(
-            'INSERT INTO request_categories (request_id, category_name, other_text, status) VALUES (?, ?, ?, ?)',
-            requestId, cat.category_name, cat.other_text || null, cat.status || 'Pending'
+            'INSERT INTO request_categories (request_id, category_id, category_name, other_text, status) VALUES (?, ?, ?, ?, ?)',
+            requestId, cat.id, cat.name, cat.other_text || null, cat.status || 'Pending'
           );
           historyLogs.push({
             action: 'category_added',
-            details: `Category added: ${cat.category_name} (${cat.status})`
+            details: `Category added: ${cat.name} (${cat.status})`
           });
         }
       }
 
       // Check if any old category was removed
       for (const oldCat of oldCats) {
-        if (!categories.some(c => c.category_name === oldCat.category_name)) {
+        if (!nextCategories.some(c => c.id === oldCat.category_id || c.name.toLowerCase() === oldCat.category_name.toLowerCase())) {
           await db.run('DELETE FROM request_categories WHERE id = ?', oldCat.id);
           historyLogs.push({
             action: 'category_removed',
@@ -854,8 +1003,7 @@ router.patch('/:id', async (req, res, next) => {
         const cleanTag = tagName.trim();
         if (!cleanTag) continue;
 
-        await db.run('INSERT OR IGNORE INTO tags (name) VALUES (?)', cleanTag);
-        const tagRow = await db.get('SELECT id FROM tags WHERE name = ?', cleanTag);
+        const tagRow = await ensureTag(db, cleanTag);
         if (tagRow) {
           await db.run('INSERT OR IGNORE INTO request_tags (request_id, tag_id) VALUES (?, ?)', requestId, tagRow.id);
         }
@@ -870,8 +1018,19 @@ router.patch('/:id', async (req, res, next) => {
       );
     }
 
+    await db.exec('COMMIT');
+    transactionStarted = false;
+    if (refreshBeatmapsetId) {
+      try {
+        const { enqueueBeatmapRefresh } = require('../services/beatmapMetadataSync');
+        await enqueueBeatmapRefresh(db, refreshBeatmapsetId);
+      } catch (error) {
+        console.error('Failed to enqueue beatmap refresh after request status change:', error.message);
+      }
+    }
     res.json({ success: true, message: 'Request updated successfully' });
   } catch (error) {
+    if (transactionStarted) await db.exec('ROLLBACK').catch(() => {});
     next(error);
   }
 });

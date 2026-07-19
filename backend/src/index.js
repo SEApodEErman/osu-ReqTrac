@@ -50,6 +50,8 @@ const migrationRouter = require('./routes/migration');
 const settingsRouter = require('./routes/settings');
 const osuRouter = require('./routes/osu');
 const googleSheetsRouter = require('./routes/googleSheets');
+const categoriesRouter = require('./routes/categories');
+const tagsRouter = require('./routes/tags');
 
 // Mount routes
 app.use('/api/requests', requestsRouter);
@@ -59,6 +61,8 @@ app.use('/api/migration', migrationRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/osu', osuRouter);
 app.use('/api/google', googleSheetsRouter);
+app.use('/api/categories', categoriesRouter);
+app.use('/api/tags', tagsRouter);
 
 // Basic health check
 app.get('/api/health', (req, res) => {
@@ -82,7 +86,7 @@ app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large') {
     return res.status(413).json({ error: `Request payload exceeds the ${REQUEST_BODY_LIMIT} limit.` });
   }
-  res.status(500).json({ error: err.message || 'Internal Server Error' });
+  res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
 });
 
 // Create default cover assets folder and placeholder if not exists
