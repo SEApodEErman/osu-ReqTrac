@@ -1,0 +1,87 @@
+name: Bug report
+description: Report a problem with osu!ReqTrac
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please provide enough detail for us to investigate it.
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have searched the existing issues and could not find a duplicate.
+          required: true
+
+  - type: input
+    id: summary
+    attributes:
+      label: Short summary
+      description: Briefly describe the problem.
+      placeholder: What went wrong?
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe what you observed, including any error messages.
+      placeholder: Tell us what happened.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: What did you expect to happen?
+      placeholder: Tell us what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: List the steps that reproduce the problem. If it is not reproducible or the steps are not obvious, explain that here.
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Click ...
+        4. See ...
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: App version
+      description: Which osu!ReqTrac version are you using?
+      placeholder: e.g. 1.0.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Add screenshots or screen recordings if they help explain the problem.
+      placeholder: Drag and drop screenshots or recordings here.
+
+  - type: textarea
+    id: beatmap-links
+    attributes:
+      label: Relevant osu! beatmap links
+      description: Add any osu! beatmap or request links needed to reproduce or understand the issue.
+      placeholder: Paste relevant links here, or leave this blank if not applicable.
+
+  - type: textarea
+    id: additional-information
+    attributes:
+      label: Additional information
+      description: Add anything else that may help, such as your operating system, logs, or related context.
+      placeholder: Anything else we should know?

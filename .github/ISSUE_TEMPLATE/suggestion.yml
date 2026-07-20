@@ -1,0 +1,59 @@
+name: Suggestion
+description: Suggest an improvement or new feature for osu!ReqTrac
+title: "[Suggestion]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve osu!ReqTrac. Please describe the need behind your suggestion and how you would like it to work.
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have searched the existing issues and could not find a duplicate.
+          required: true
+
+  - type: input
+    id: summary
+    attributes:
+      label: Short summary
+      description: Briefly describe your suggestion.
+      placeholder: What would you like to see added or changed?
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem-or-need
+    attributes:
+      label: What is the problem or need?
+      description: Explain what would be difficult, missing, or improved by this suggestion.
+      placeholder: What problem would this solve, or what need would it address?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: Describe how you think osu!ReqTrac could address the problem or need.
+      placeholder: Explain what you would like osu!ReqTrac to do.
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or mockups
+      description: Add screenshots, sketches, or mockups if they help explain your idea. This is optional.
+      placeholder: Drag and drop screenshots or mockups here.
+
+  - type: textarea
+    id: additional-information
+    attributes:
+      label: Additional information
+      description: Add anything else that may help, such as relevant osu! beatmap links, examples, alternatives considered, or context.
+      placeholder: Anything else we should know?
