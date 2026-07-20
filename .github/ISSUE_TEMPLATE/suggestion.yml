@@ -17,21 +17,12 @@ body:
         - label: I have searched the existing issues and could not find a duplicate.
           required: true
 
-  - type: input
+  - type: textarea
     id: summary
     attributes:
       label: Short summary
-      description: Briefly describe your suggestion.
-      placeholder: What would you like to see added or changed?
-    validations:
-      required: true
-
-  - type: textarea
-    id: problem-or-need
-    attributes:
-      label: What is the problem or need?
-      description: Explain what would be difficult, missing, or improved by this suggestion.
-      placeholder: What problem would this solve, or what need would it address?
+      description: Provide a brief overview of your suggestion.
+      placeholder: What would you like to see added or changed, and what would this improve/what problem would it fix?
     validations:
       required: true
 
@@ -39,21 +30,14 @@ body:
     id: proposed-solution
     attributes:
       label: Proposed solution
-      description: Describe how you think osu!ReqTrac could address the problem or need.
-      placeholder: Explain what you would like osu!ReqTrac to do.
+      description: Write down specific details about how you would like osu!ReqTrac to implement your suggestion. Use a numbered list if you have multiple steps or ideas.
+      placeholder: 1. Explain what you would like osu!ReqTrac to do.
     validations:
       required: true
 
   - type: textarea
-    id: screenshots
+    id: references
     attributes:
-      label: Screenshots or mockups
-      description: Add screenshots, sketches, or mockups if they help explain your idea. This is optional.
-      placeholder: Drag and drop screenshots or mockups here.
-
-  - type: textarea
-    id: additional-information
-    attributes:
-      label: Additional information
-      description: Add anything else that may help, such as relevant osu! beatmap links, examples, alternatives considered, or context.
+      label: References
+      description: Add anything else that may help, such as screenshots, relevant osu! beatmap links, examples, alternatives considered, or context.
       placeholder: Anything else we should know?

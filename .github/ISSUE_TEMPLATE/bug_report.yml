@@ -18,20 +18,20 @@ body:
           required: true
 
   - type: input
-    id: summary
+    id: app-version
     attributes:
-      label: Short summary
-      description: Briefly describe the problem.
-      placeholder: What went wrong?
+      label: App version
+      description: Which osu!ReqTrac version are you using?
+      placeholder: e.g. 1.0.0
     validations:
       required: true
 
   - type: textarea
-    id: what-happened
+    id: summary
     attributes:
-      label: What happened?
-      description: Describe what you observed, including any error messages.
-      placeholder: Tell us what happened.
+      label: Problem summary
+      description: Briefly describe the problem.
+      placeholder: What went wrong?
     validations:
       required: true
 
@@ -56,32 +56,16 @@ body:
     validations:
       required: true
 
-  - type: input
-    id: app-version
-    attributes:
-      label: App version
-      description: Which osu!ReqTrac version are you using?
-      placeholder: e.g. 1.0.0
-    validations:
-      required: true
-
   - type: textarea
-    id: screenshots
+    id: relevant-media
     attributes:
-      label: Screenshots
+      label: Relevant Media
       description: Add screenshots or screen recordings if they help explain the problem.
       placeholder: Drag and drop screenshots or recordings here.
-
-  - type: textarea
-    id: beatmap-links
-    attributes:
-      label: Relevant osu! beatmap links
-      description: Add any osu! beatmap or request links needed to reproduce or understand the issue.
-      placeholder: Paste relevant links here, or leave this blank if not applicable.
 
   - type: textarea
     id: additional-information
     attributes:
       label: Additional information
-      description: Add anything else that may help, such as your operating system, logs, or related context.
+      description: Add anything else that may help, such as your operating system, logs, beatmap links, or related context.
       placeholder: Anything else we should know?
