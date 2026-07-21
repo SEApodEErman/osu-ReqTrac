@@ -2,16 +2,19 @@ const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db');
 const { fetchBeatmapset, fetchUser, downloadCover, addApiJobWork, updateApiJob } = require('../osuApi');
+const {
+  canonicalDifficultyNames,
+  getUnavailableUserIds,
+  recordUnavailableUser,
+  recordUserIdentity,
+} = require('../utils/userIdentity');
 
 // Fetch and cache a user profile (used for beatmap creators / requesters)
 async function cacheUser(db, userIdOrUsername, includedUser = null) {
   try {
     const userData = includedUser || await fetchUser(userIdOrUsername);
     if (userData) {
-      await db.run(`
-        INSERT OR REPLACE INTO users_cache (id, username, avatar_url, country_code, last_updated)
-        VALUES (?, ?, ?, ?, ?)
-      `, [userData.id, userData.username, userData.avatar_url, userData.country_code, new Date().toISOString()]);
+      await recordUserIdentity(db, userData);
       return userData;
     }
   } catch (error) {
@@ -28,6 +31,12 @@ function isCacheExpired(lastUpdatedStr) {
   return diffDays > 7;
 }
 
+async function hydrateDifficultyNames(db, cacheEntry) {
+  const difficulties = JSON.parse(cacheEntry.difficulties_json || '[]');
+  const usersById = new Map((await db.all('SELECT id, username FROM users_cache')).map(user => [user.id, user]));
+  return difficulties.map(difficulty => canonicalDifficultyNames(difficulty, usersById));
+}
+
 // Function to fetch, download cover, and cache a beatmapset
 async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
   if (apiJobId) updateApiJob(apiJobId, 1);
@@ -39,7 +48,11 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
   // Download cover image
   const localCoverPath = await downloadCover(beatmapsetId, mapsetData.covers?.cover);
 
-  // Extract difficulties
+  // Persist the canonical current username rather than the mutable legacy
+  // beatmap metadata creator field.
+  await cacheUser(db, mapsetData.user_id, mapsetData.user);
+
+  // Extract difficulties and record every embedded owner identity.
   const difficulties = mapsetData.beatmaps.map(b => {
     const owners = Array.isArray(b.owners)
       ? b.owners.filter(owner => owner?.username)
@@ -69,18 +82,23 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
     };
   });
 
+  for (const owner of (mapsetData.beatmaps || []).flatMap(beatmap => Array.isArray(beatmap.owners) ? beatmap.owners : [])) {
+    // Owners in the beatmapset response already carry current usernames.
+    await recordUserIdentity(db, owner);
+  }
+
   // Get Beatmapset normally embeds its creator, avoiding another API request.
   if (!mapsetData.user && apiJobId) {
     addApiJobWork(apiJobId, 1);
     updateApiJob(apiJobId, 1);
   }
-  await cacheUser(db, mapsetData.user_id, mapsetData.user);
+  if (!mapsetData.user) await cacheUser(db, mapsetData.user_id);
 
   const cacheEntry = {
     beatmapset_id: mapsetData.id,
     artist: mapsetData.artist,
     title: mapsetData.title,
-    creator: mapsetData.creator,
+    creator: mapsetData.user?.username || mapsetData.creator,
     creator_id: mapsetData.user_id,
     cover_url: mapsetData.covers?.cover || '',
     local_cover_path: localCoverPath,
@@ -120,6 +138,59 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
   return cacheEntry;
 }
 
+// Reconcile older cached creator names by refreshing each distinct stable osu!
+// user ID at most once a week. This is deliberately separate from beatmap
+// metadata refreshes so a rename updates every existing request at once.
+async function refreshKnownCreatorIdentities(db) {
+  const credentials = await db.all("SELECT key FROM settings WHERE key IN ('osu_client_id', 'osu_client_secret')");
+  if (credentials.length < 2) return 0;
+  const caches = await db.all('SELECT creator, creator_id, difficulties_json FROM beatmap_cache');
+  const ids = new Set();
+  const usernamesById = new Map();
+  const addCandidate = (rawId, username = null) => {
+    const id = Number(rawId);
+    if (!Number.isSafeInteger(id) || id <= 0) return;
+    ids.add(id);
+    if (username && !usernamesById.has(id)) usernamesById.set(id, username);
+  };
+  for (const cache of caches) {
+    addCandidate(cache.creator_id, cache.creator);
+    try {
+      for (const difficulty of JSON.parse(cache.difficulties_json || '[]')) {
+        const creatorIds = Array.isArray(difficulty.creator_ids) && difficulty.creator_ids.length > 0
+          ? difficulty.creator_ids
+          : [difficulty.creator_id];
+        const creatorNames = Array.isArray(difficulty.creator_names) && difficulty.creator_names.length > 0
+          ? difficulty.creator_names
+          : [difficulty.creator_name];
+        for (let index = 0; index < creatorIds.length; index++) {
+          addCandidate(creatorIds[index], creatorNames[index]);
+        }
+      }
+    } catch {
+      // A malformed legacy cache will be repaired by its normal metadata sync.
+    }
+  }
+  const existingUsers = new Map((await db.all('SELECT id, last_updated FROM users_cache')).map(user => [user.id, user]));
+  const unavailableUserIds = await getUnavailableUserIds(db);
+  let refreshed = 0;
+  for (const id of ids) {
+    if (unavailableUserIds.has(id)) continue;
+    const cached = existingUsers.get(id);
+    const age = cached?.last_updated ? Date.now() - new Date(cached.last_updated).getTime() : Infinity;
+    if (Number.isFinite(age) && age < 7 * 24 * 60 * 60 * 1000) continue;
+    const user = await fetchUser(id);
+    if (user) {
+      await recordUserIdentity(db, user);
+      refreshed += 1;
+    } else {
+      await recordUnavailableUser(db, id, usernamesById.get(id));
+      unavailableUserIds.add(id);
+    }
+  }
+  return refreshed;
+}
+
 // GET /api/beatmaps/sync/status - persistent background metadata progress.
 router.get('/sync/status', async (req, res, next) => {
   try {
@@ -156,7 +227,7 @@ router.get('/:id', async (req, res, next) => {
 
     if (cached) {
       if (req.query.cacheOnly === '1') {
-        cached.difficulties = JSON.parse(cached.difficulties_json || '[]');
+        cached.difficulties = await hydrateDifficultyNames(db, cached);
         return res.json(cached);
       }
 
@@ -180,7 +251,7 @@ router.get('/:id', async (req, res, next) => {
       }
 
       if (!needsRefresh) {
-        cached.difficulties = JSON.parse(cached.difficulties_json);
+        cached.difficulties = await hydrateDifficultyNames(db, cached);
         return res.json(cached);
       }
     }
@@ -188,7 +259,7 @@ router.get('/:id', async (req, res, next) => {
     // Cache miss or expired: fetch and cache
     console.log(`Cache miss or expired for beatmapset ${beatmapsetId}. Fetching from osu! API...`);
     const freshData = await refreshAndCacheBeatmapset(db, beatmapsetId);
-    freshData.difficulties = JSON.parse(freshData.difficulties_json);
+    freshData.difficulties = await hydrateDifficultyNames(db, freshData);
     res.json(freshData);
   } catch (error) {
     next(error);
@@ -206,7 +277,7 @@ router.post('/refresh', async (req, res, next) => {
     const db = await getDatabase();
     console.log(`Forced manual refresh for beatmapset ${beatmapset_id}...`);
     const freshData = await refreshAndCacheBeatmapset(db, beatmapset_id);
-    freshData.difficulties = JSON.parse(freshData.difficulties_json);
+    freshData.difficulties = await hydrateDifficultyNames(db, freshData);
     
     res.json({
       success: true,
@@ -220,5 +291,6 @@ router.post('/refresh', async (req, res, next) => {
 
 module.exports = {
   router,
-  refreshAndCacheBeatmapset
+  refreshAndCacheBeatmapset,
+  refreshKnownCreatorIdentities
 };

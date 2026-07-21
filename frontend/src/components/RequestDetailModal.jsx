@@ -13,6 +13,13 @@ import {
 } from 'lucide-react';
 import { countryCodeToFlag } from '../utils/countryFlag';
 import TagInput from './TagInput';
+import {
+  addUploadedGuestDifficulty,
+  createManualGuestDifficulty,
+  isDifficultySelected,
+  isUploadedGuestDifficulty,
+  normalizeGamemode,
+} from '../utils/guestDifficulties';
 
 // osu! official star difficulty spectrum from osu.Game.Rulesets.Osu.Difficulty.OsuColour
 // https://github.com/ppy/osu/blob/master/osu.Game.Rulesets.Osu/Difficulty/OsuColour.cs
@@ -113,10 +120,45 @@ function getDifficultyCreatorNames(difficulty, fallback = '') {
   return fallback ? [fallback] : [];
 }
 
+function formatLength(seconds) {
+  if (!seconds) return '0:00';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function DifficultyStatLines({ difficulty }) {
+  const mode = difficulty.mode === 'fruits' ? 'catch' : (difficulty.mode || 'osu');
+  const value = (label, raw) => `${label}: ${raw ?? '—'}`;
+  const modeSettings = mode === 'mania'
+    ? [value('Keys', difficulty.cs), value('OD', difficulty.od), value('HP', difficulty.hp)]
+    : mode === 'taiko'
+      ? [value('OD', difficulty.od), value('HP', difficulty.hp)]
+      : [value('AR', difficulty.ar), value('OD', difficulty.od), value('CS', difficulty.cs), value('HP', difficulty.hp)];
+  return <>
+    <span>Mode: {mode}</span>
+    <span>{modeSettings.join(' • ')}</span>
+    <span>BPM: {difficulty.bpm ?? '—'} • Length: {formatLength(difficulty.drain)}</span>
+  </>;
+}
+
+function DifficultyModeIcon({ mode }) {
+  const normalizedMode = normalizeGamemode(mode);
+  const label = normalizedMode === 'fruits' ? 'catch' : normalizedMode;
+  const shapes = {
+    osu: <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="2.5" fill="currentColor" /></>,
+    taiko: <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /></>,
+    fruits: <><circle cx="9" cy="14" r="4" /><circle cx="15" cy="14" r="4" /><path d="M12 10c0-3 2-4 4-4" /></>,
+    mania: <><rect x="5" y="5" width="4" height="4" /><rect x="10" y="5" width="4" height="4" /><rect x="15" y="5" width="4" height="4" /><rect x="5" y="10" width="4" height="4" /><rect x="10" y="10" width="4" height="4" /><rect x="15" y="10" width="4" height="4" /><rect x="5" y="15" width="4" height="4" /><rect x="10" y="15" width="4" height="4" /><rect x="15" y="15" width="4" height="4" /></>,
+  };
+  return <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" role="img" aria-label={label} title={label}>{shapes[normalizedMode]}</svg>;
+}
+
 export default function RequestDetailModal({ 
   request, 
   onClose, 
   onUpdateRequest,
+  onLinkManualRequest,
   onForceRefreshBeatmap,
   connectedAccount,
   onNotify,
@@ -127,6 +169,10 @@ export default function RequestDetailModal({
   const [historyLogs, setHistoryLogs] = useState([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isRefreshingMetadata, setIsRefreshingMetadata] = useState(false);
+  const [isRefreshingAddedDate, setIsRefreshingAddedDate] = useState(false);
+  const [isLinkingBeatmap, setIsLinkingBeatmap] = useState(false);
+  const [beatmapLink, setBeatmapLink] = useState('');
+  const [isAddingDifficulties, setIsAddingDifficulties] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const isMetadataPending = request.metadata_sync_status === 'Pending' || request.metadata_sync_status === 'Processing';
   
@@ -243,6 +289,34 @@ export default function RequestDetailModal({
     }
   };
 
+  const handleRefreshAddedDate = async () => {
+    if (!request.is_osu_link || !request.beatmapset_id || isRefreshingAddedDate) return;
+    setIsRefreshingAddedDate(true);
+    try {
+      const response = await fetch(`/api/requests/${request.id}/refresh-date`, { method: 'POST' });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not refresh the date.');
+      setAddedDate(dateInputValue(result.added_date));
+      onForceRefreshBeatmap();
+      onNotify?.(result.message, 'success');
+    } catch (error) {
+      onNotify?.(error.message || 'Could not refresh the date.', 'error');
+    } finally {
+      setIsRefreshingAddedDate(false);
+    }
+  };
+
+  const handleLinkBeatmap = async () => {
+    if (!beatmapLink.trim() || isLinkingBeatmap) return;
+    setIsLinkingBeatmap(true);
+    try {
+      const result = await onLinkManualRequest?.(request.id, beatmapLink.trim());
+      if (result?.ok) setBeatmapLink('');
+    } finally {
+      setIsLinkingBeatmap(false);
+    }
+  };
+
   const toggleCategory = (index) => {
     setCategories(prev => prev.map((cat, i) => {
       if (i === index) {
@@ -307,12 +381,15 @@ export default function RequestDetailModal({
     }
   };
 
-  // Duration parser helper (seconds -> mm:ss)
-  const formatLength = (seconds) => {
-    if (!seconds) return '0:00';
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60).toString().padStart(2, '0');
-    return `${m}:${s}`;
+  const uploadedGuestDifficulties = guestDifficulties.filter(isUploadedGuestDifficulty);
+  const manualGuestDifficulties = guestDifficulties.filter(row => !isUploadedGuestDifficulty(row));
+  const hasGuestDifficultyCategory = categories.some(category => category.checked && (
+    category.systemKey === 'guest_difficulties' || category.viewType === 'guest_difficulties'
+  ));
+  const toggleUploadedDifficulty = (difficulty) => {
+    setGuestDifficulties(rows => isDifficultySelected(rows, difficulty.id)
+      ? rows.filter(row => Number(row.beatmap_id) !== Number(difficulty.id))
+      : addUploadedGuestDifficulty(rows, difficulty));
   };
 
   const requesterProfileUrl = request.osu_profile_link || (request.requester_id ? `https://osu.ppy.sh/users/${request.requester_id}` : null);
@@ -338,7 +415,7 @@ export default function RequestDetailModal({
       <div 
         style={{
           width: '100%',
-          maxWidth: '960px',
+          maxWidth: '1280px',
           maxHeight: '90vh',
           backgroundColor: 'var(--bg-card)',
           borderRadius: '16px',
@@ -360,6 +437,7 @@ export default function RequestDetailModal({
           backgroundSize: 'cover',
           backgroundPosition: 'center',
           display: 'flex',
+          flexShrink: 0,
           alignItems: 'flex-end',
           padding: '20px 24px',
           borderBottom: '1px solid var(--border)'
@@ -392,8 +470,10 @@ export default function RequestDetailModal({
           </div>
         </div>
 
-        {/* Modal Main Content (Scrollable) */}
-        <div className="request-modal-content" style={{ overflowY: 'auto', padding: '24px', display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 0.9fr)', gap: '24px' }}>
+        <div className="request-modal-body" style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+          <div className="request-modal-main" style={{ display: 'flex', flex: 1, flexDirection: 'column', minWidth: 0 }}>
+            {/* Modal Main Content (Scrollable) */}
+            <div className="request-modal-content" style={{ overflowY: 'auto', padding: '24px', display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 0.9fr)', gap: '24px' }}>
           
           {/* LEFT COLUMN: Beatmap Information */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', minWidth: 0 }}>
@@ -429,6 +509,15 @@ export default function RequestDetailModal({
                     </button>
                   </div>
 
+                  {hasGuestDifficultyCategory && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Select uploaded difficulties you are responsible for.</span>
+                      <button type="button" className={isAddingDifficulties ? 'btn-primary' : 'btn-secondary'} onClick={() => setIsAddingDifficulties(current => !current)} style={{ marginLeft: 'auto', padding: '5px 8px', fontSize: '11px' }}>
+                        {isAddingDifficulties ? 'Done selecting' : 'Add Difficulties'}
+                      </button>
+                    </div>
+                  )}
+
                   {/* Difficulty Badges / Stars Grid */}
                   <div style={{ 
                     display: 'grid', 
@@ -442,18 +531,34 @@ export default function RequestDetailModal({
                     {request.difficulties && request.difficulties.length > 0 ? (
                       request.difficulties.map((diff, index) => {
                         const creatorLabel = getDifficultyCreatorNames(diff).join(', ');
+                        const selected = isDifficultySelected(guestDifficulties, diff.id);
                         return (
                           <div
                             key={index}
+                            role={isAddingDifficulties && hasGuestDifficultyCategory ? 'button' : undefined}
+                            tabIndex={isAddingDifficulties && hasGuestDifficultyCategory ? 0 : undefined}
+                            aria-pressed={isAddingDifficulties && hasGuestDifficultyCategory ? selected : undefined}
+                            onClick={isAddingDifficulties && hasGuestDifficultyCategory ? () => toggleUploadedDifficulty(diff) : undefined}
+                            onKeyDown={isAddingDifficulties && hasGuestDifficultyCategory ? (event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                toggleUploadedDifficulty(diff);
+                              }
+                            } : undefined}
                             style={{
                               padding: '6px 8px',
-                              backgroundColor: 'var(--bg-card)',
-                              border: '1px solid var(--border)',
+                              backgroundColor: selected ? 'rgba(255, 102, 170, 0.12)' : 'var(--bg-card)',
+                              border: selected ? '1px solid var(--osu-pink)' : '1px solid var(--border)',
                               borderRadius: '6px',
-                              fontSize: '12px'
+                              fontSize: '12px',
+                              cursor: isAddingDifficulties && hasGuestDifficultyCategory ? 'pointer' : 'default',
+                              boxShadow: selected ? '0 0 0 1px rgba(255, 102, 170, 0.18)' : 'none',
                             }}
                           >
                           <div style={{ 
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px',
                             fontWeight: '600', 
                             whiteSpace: 'nowrap', 
                             overflow: 'hidden', 
@@ -461,15 +566,14 @@ export default function RequestDetailModal({
                             color: 'var(--text-main)',
                             marginBottom: '2px'
                           }} title={diff.name}>
+                            <DifficultyModeIcon mode={diff.mode} />
                             {diff.name}
                           </div>
                           <div style={{ color: 'var(--osu-pink)', fontWeight: '700', fontSize: '11px' }}>
                             ★ {diff.stars.toFixed(2)}
                           </div>
                           <div style={{ fontSize: '9px', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column' }}>
-                            <span>AR: {diff.ar} • OD: {diff.od}</span>
-                            <span>CS: {diff.cs} • HP: {diff.hp}</span>
-                            <span>Length: {formatLength(diff.drain)}</span>
+                            <DifficultyStatLines difficulty={diff} />
                             {creatorLabel && (
                               <span
                                 title={`Creator: ${creatorLabel}`}
@@ -497,6 +601,11 @@ export default function RequestDetailModal({
                       </span>
                     )}
                   </div>
+                  {isAddingDifficulties && hasGuestDifficultyCategory && (
+                    <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                      {uploadedGuestDifficulties.length} uploaded {uploadedGuestDifficulties.length === 1 ? 'difficulty' : 'difficulties'} selected. Save the request to persist these changes.
+                    </span>
+                  )}
                 </div>
               ) : (
                 <div style={{
@@ -515,6 +624,16 @@ export default function RequestDetailModal({
                         <input className="input-text" value={value} onChange={(e) => setter(e.target.value)} style={{ marginTop: '4px' }} />
                       </label>
                     ))}
+                    <div style={{ borderTop: '1px solid var(--border)', paddingTop: '10px', display: 'grid', gap: '6px' }}>
+                      <label style={{ color: 'var(--text-muted)', fontSize: '11px' }}>Uploaded osu! beatmap link</label>
+                      <div style={{ display: 'flex', gap: '6px' }}>
+                        <input className="input-text" value={beatmapLink} onChange={(event) => setBeatmapLink(event.target.value)} placeholder="https://osu.ppy.sh/beatmapsets/..." disabled={isLinkingBeatmap} />
+                        <button type="button" className="btn-secondary" onClick={handleLinkBeatmap} disabled={!beatmapLink.trim() || isLinkingBeatmap} style={{ flexShrink: 0 }}>
+                          {isLinkingBeatmap ? 'Linking...' : 'Link to osu!'}
+                        </button>
+                      </div>
+                      <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Preserves this request's tags, statuses, notes, deadline, and categories.</span>
+                    </div>
                   </div>
                 </div>
               )}
@@ -559,9 +678,7 @@ export default function RequestDetailModal({
                             </span>
                           </div>
                           <div style={{ fontSize: '10px', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: '1px' }}>
-                            <span>AR: {diff.ar} • OD: {diff.od}</span>
-                            <span>CS: {diff.cs} • HP: {diff.hp}</span>
-                            <span>Length: {formatLength(diff.drain)}</span>
+                            <DifficultyStatLines difficulty={diff} />
                             <span
                               title={`Creator: ${creatorLabel}`}
                               style={{
@@ -618,14 +735,53 @@ export default function RequestDetailModal({
                       )}
                     </div>
                   )}
-                  {(request.my_guest_difficulties || []).slice(1).map((difficulty, index) => (
-                    <div key={difficulty.id || difficulty.assignment_id || `${difficulty.mode}-${difficulty.name}-${index}`} style={{ marginTop: '7px', padding: '9px 11px', backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: '7px', display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
-                      <span className="badge badge-pending">{difficulty.mode === 'fruits' ? 'catch' : difficulty.mode || 'osu'}</span>
-                      <span title={difficulty.name} style={{ fontSize: '12px', fontWeight: '600', minWidth: 0, overflowWrap: 'anywhere', flex: 1 }}>{difficulty.name || 'Unnamed difficulty'}</span>
-                      <span style={{ fontSize: '11px', color: 'var(--osu-pink)', fontWeight: '700', flexShrink: 0 }}>★ {Number(difficulty.stars || 0).toFixed(2)}</span>
-                      {difficulty.pending && <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>pending</span>}
-                    </div>
-                  ))}
+                  {(request.my_guest_difficulties || []).slice(1).map((difficulty, index) => {
+                    const creatorLabel = getDifficultyCreatorNames(difficulty, connectedAccount?.username || 'You').join(', ');
+                    const color = getStarDifficultyColor(Number(difficulty.stars) || 0);
+                    const textColor = getStarDifficultyTextColor(Number(difficulty.stars) || 0);
+                    const [r, g, b] = [parseInt(color.slice(1, 3), 16), parseInt(color.slice(3, 5), 16), parseInt(color.slice(5, 7), 16)];
+                    return (
+                      <div key={difficulty.id || difficulty.assignment_id || `${difficulty.mode}-${difficulty.name}-${index}`} style={{
+                        marginTop: '7px',
+                        padding: '12px 14px',
+                        backgroundColor: 'var(--bg-sidebar)',
+                        borderRadius: '8px',
+                        border: `1px solid rgba(${r}, ${g}, ${b}, 0.4)`,
+                        minWidth: 0,
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', minWidth: 0 }}>
+                          <span style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            padding: '3px 10px',
+                            borderRadius: '12px',
+                            fontSize: '13px',
+                            fontWeight: '700',
+                            background: `rgba(${r}, ${g}, ${b}, 0.7)`,
+                            color: textColor,
+                            border: `1px solid rgba(${r}, ${g}, ${b}, 1)`,
+                            flexShrink: 0,
+                          }}>
+                            ★ {Number(difficulty.stars || 0).toFixed(2)}
+                          </span>
+                          <span title={difficulty.name} style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {difficulty.name || 'Unnamed difficulty'}
+                          </span>
+                          {difficulty.pending && <span style={{ fontSize: '10px', color: 'var(--text-muted)', marginLeft: 'auto' }}>pending</span>}
+                        </div>
+                        {!difficulty.pending && (
+                          <div style={{ fontSize: '10px', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: '1px' }}>
+                            <DifficultyStatLines difficulty={difficulty} />
+                            {creatorLabel && (
+                              <span title={`Creator: ${creatorLabel}`} style={{ display: 'block', color: 'var(--osu-pink)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                Creator: {creatorLabel}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 
@@ -862,8 +1018,13 @@ export default function RequestDetailModal({
 
             {/* Date Added */}
             <div>
-              <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>
-                Date Added
+              <label style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '7px', marginBottom: '6px' }}>
+                <span>Date Added</span>
+                {request.is_osu_link && (
+                  <button type="button" onClick={handleRefreshAddedDate} disabled={isRefreshingAddedDate} style={{ color: 'var(--osu-pink)', fontSize: '10px', fontWeight: '600', textTransform: 'none', cursor: 'pointer' }}>
+                    {isRefreshingAddedDate ? 'refreshing...' : 'use dates from osu!'}
+                  </button>
+                )}
               </label>
               {isEditingDate ? (
                 <input
@@ -922,17 +1083,34 @@ export default function RequestDetailModal({
 
                     {(cat.systemKey === 'guest_difficulties' || cat.viewType === 'guest_difficulties') && cat.checked && (
                       <div style={{ marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '7px' }}>
-                        {guestDifficulties.map((row, rowIndex) => (
-                          <div key={row.id || rowIndex} style={{ display: 'grid', gridTemplateColumns: '95px minmax(0, 1fr) 88px auto', gap: '5px', alignItems: 'center' }}>
-                            <select className="input-text" value={row.gamemode || 'osu'} onChange={event => setGuestDifficulties(items => items.map((item, index) => index === rowIndex ? { ...item, gamemode: event.target.value } : item))} style={{ padding: '5px' }}>
+                        {uploadedGuestDifficulties.length > 0 && (
+                          <div style={{ display: 'grid', gap: '5px', padding: '8px', backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: '6px' }}>
+                            <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Uploaded selections — change these with Add Difficulties.</span>
+                            {uploadedGuestDifficulties.map(row => (
+                              <div key={row.beatmap_id} style={{ display: 'grid', gridTemplateColumns: '95px minmax(0, 1fr) 88px auto', gap: '5px', alignItems: 'center' }}>
+                                <span className="badge badge-pending">{row.gamemode === 'fruits' ? 'catch' : row.gamemode}</span>
+                                <input className="input-text" value={row.difficulty_name || ''} disabled style={{ padding: '5px 7px' }} />
+                                <input className="input-text" type="number" value={row.target_sr ?? ''} disabled title="Uploaded difficulties use their current osu! star rating." style={{ padding: '5px 7px' }} />
+                                <button type="button" className="btn-secondary" onClick={() => setGuestDifficulties(items => items.filter(item => Number(item.beatmap_id) !== Number(row.beatmap_id)))} style={{ padding: '5px' }} aria-label={`Remove ${row.difficulty_name || 'difficulty'}`}><Trash2 size={13} /></button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Manual / unuploaded difficulties</span>
+                        {manualGuestDifficulties.map((row, index) => {
+                          const rowIndex = guestDifficulties.indexOf(row);
+                          return (
+                          <div key={row.id || index} style={{ display: 'grid', gridTemplateColumns: '95px minmax(0, 1fr) 88px auto', gap: '5px', alignItems: 'center' }}>
+                            <select className="input-text" value={row.gamemode || 'osu'} onChange={event => setGuestDifficulties(items => items.map((item, itemIndex) => itemIndex === rowIndex ? { ...item, gamemode: event.target.value } : item))} style={{ padding: '5px' }}>
                               <option value="osu">osu!</option><option value="taiko">Taiko</option><option value="fruits">Catch</option><option value="mania">Mania</option>
                             </select>
-                            <input className="input-text" placeholder="Difficulty name" value={row.difficulty_name || ''} onChange={event => setGuestDifficulties(items => items.map((item, index) => index === rowIndex ? { ...item, difficulty_name: event.target.value } : item))} style={{ padding: '5px 7px' }} />
-                            <input className="input-text" type="number" step="0.01" min="0" placeholder="SR" value={row.target_sr ?? ''} onChange={event => setGuestDifficulties(items => items.map((item, index) => index === rowIndex ? { ...item, target_sr: event.target.value } : item))} style={{ padding: '5px 7px' }} />
-                            <button type="button" className="btn-secondary" disabled={guestDifficulties.length === 1} onClick={() => setGuestDifficulties(items => items.filter((_, index) => index !== rowIndex))} style={{ padding: '5px' }}><Trash2 size={13} /></button>
+                            <input className="input-text" placeholder="Difficulty name" value={row.difficulty_name || ''} onChange={event => setGuestDifficulties(items => items.map((item, itemIndex) => itemIndex === rowIndex ? { ...item, difficulty_name: event.target.value } : item))} style={{ padding: '5px 7px' }} />
+                            <input className="input-text" type="number" step="0.01" min="0" placeholder="SR" value={row.target_sr ?? ''} onChange={event => setGuestDifficulties(items => items.map((item, itemIndex) => itemIndex === rowIndex ? { ...item, target_sr: event.target.value } : item))} style={{ padding: '5px 7px' }} />
+                            <button type="button" className="btn-secondary" onClick={() => setGuestDifficulties(items => items.filter((_, itemIndex) => itemIndex !== rowIndex))} style={{ padding: '5px' }}><Trash2 size={13} /></button>
                           </div>
-                        ))}
-                        <button type="button" className="btn-secondary" onClick={() => setGuestDifficulties(items => [...items, { gamemode: 'osu', difficulty_name: '', target_sr: '' }])} style={{ width: 'fit-content', padding: '5px 8px', fontSize: '11px' }}><Plus size={12} /> Add difficulty</button>
+                          );
+                        })}
+                        <button type="button" className="btn-secondary" onClick={() => setGuestDifficulties(items => [...items, createManualGuestDifficulty()])} style={{ width: 'fit-content', padding: '5px 8px', fontSize: '11px' }}><Plus size={12} /> Add manual difficulty</button>
                       </div>
                     )}
                   </div>
@@ -966,68 +1144,77 @@ export default function RequestDetailModal({
 
         </div>
 
-        {/* Full-width modal action footer */}
-        <div style={{
-          borderTop: '1px solid var(--border)',
-          padding: '16px 24px',
-          backgroundColor: 'var(--bg-card)'
-        }}>
-          <button
-            onClick={handleSave}
-            className="btn-primary"
-            disabled={isSaving}
-            style={{ width: '100%', justifyContent: 'center' }}
-          >
-            {isSaving ? 'Saving…' : 'Save Changes'}
-          </button>
-        </div>
-
-        {/* BOTTOM SECTION: Activity History Log */}
-        <div style={{ 
-          borderTop: '1px solid var(--border)', 
-          padding: '20px 24px', 
-          backgroundColor: 'var(--bg-sidebar)',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '12px'
-        }}>
-          <h3 style={{ fontSize: '14px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.5px' }}>
-            Activity History Log
-          </h3>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '150px', overflowY: 'auto', paddingRight: '8px' }}>
-            {isLoadingHistory ? (
-              <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Loading history log...</span>
-            ) : historyLogs.length === 0 ? (
-              <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>No logs recorded.</span>
-            ) : (
-              historyLogs.map(log => {
-                const date = new Date(log.created_at);
-                return (
-                  <div 
-                    key={log.id}
-                    style={{ 
-                      display: 'flex', 
-                      gap: '12px', 
-                      fontSize: '12px', 
-                      borderBottom: '1px solid var(--border)', 
-                      paddingBottom: '6px' 
-                    }}
-                  >
-                    <span style={{ color: 'var(--text-muted)', minWidth: '130px', fontWeight: '500' }}>
-                      {date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </span>
-                    <span style={{ color: 'var(--text-main)', fontWeight: '600', textTransform: 'uppercase', fontSize: '10px', minWidth: '80px' }}>
-                      [{log.action_type.replace('_', ' ')}]
-                    </span>
-                    <span style={{ color: 'var(--text-main)' }}>
-                      {log.details}
-                    </span>
-                  </div>
-                );
-              })
-            )}
+            {/* Modal action footer */}
+            <div style={{
+              borderTop: '1px solid var(--border)',
+              padding: '16px 24px',
+              backgroundColor: 'var(--bg-card)',
+              flexShrink: 0
+            }}>
+              <button
+                onClick={handleSave}
+                className="btn-primary"
+                disabled={isSaving}
+                style={{ width: '100%', justifyContent: 'center' }}
+              >
+                {isSaving ? 'Saving…' : 'Save Changes'}
+              </button>
+            </div>
           </div>
+
+          {/* RIGHT SIDEBAR: Activity History Log */}
+          <aside className="request-modal-history" style={{
+            width: '320px',
+            flexShrink: 0,
+            borderLeft: '1px solid var(--border)',
+            padding: '24px 20px',
+            backgroundColor: 'var(--bg-sidebar)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '16px',
+            minHeight: 0
+          }}>
+            <h3 style={{ fontSize: '14px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.5px' }}>
+              Activity History Log
+            </h3>
+
+            <div className="request-modal-history-list" style={{ display: 'flex', flex: 1, flexDirection: 'column', gap: '10px', minHeight: 0, overflowY: 'auto', paddingRight: '8px' }}>
+              {isLoadingHistory ? (
+                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Loading history log...</span>
+              ) : historyLogs.length === 0 ? (
+                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>No logs recorded.</span>
+              ) : (
+                historyLogs.map(log => {
+                  const date = new Date(log.created_at);
+                  return (
+                    <div
+                      key={log.id}
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '5px',
+                        fontSize: '12px',
+                        borderBottom: '1px solid var(--border)',
+                        paddingBottom: '10px'
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap' }}>
+                        <span style={{ color: 'var(--text-muted)', fontWeight: '500' }}>
+                          {date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                        <span style={{ color: 'var(--text-main)', fontWeight: '600', textTransform: 'uppercase', fontSize: '10px' }}>
+                          [{log.action_type.replace('_', ' ')}]
+                        </span>
+                      </div>
+                      <span style={{ color: 'var(--text-main)', lineHeight: 1.4, overflowWrap: 'anywhere' }}>
+                        {log.details}
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </aside>
         </div>
 
       </div>

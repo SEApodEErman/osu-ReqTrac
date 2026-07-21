@@ -12,6 +12,7 @@ let pendingApiRequests = 0;
 let lastApiError = null;
 let lastApiErrorAt = null;
 let nextApiJobId = 1;
+let nextApiRequestId = 1;
 const apiJobs = new Map();
 const RATE_LIMIT_WAIT = 30000;
 const MIN_REQUEST_INTERVAL = 2000;
@@ -40,14 +41,25 @@ async function throttle() {
   }
 }
 
-function queueApiRequest(request) {
+function queueApiRequest(request, description) {
+  const requestId = nextApiRequestId++;
+  const logPrefix = `[osuApi #${requestId}]`;
+  console.log(`${logPrefix} Queued ${description}.`);
+
   const queuedRequest = apiRequestQueue.then(async () => {
     await waitIfRateLimited();
     await throttle();
-    const response = await request();
-    lastRequestTime = Date.now();
-    if (response.status === 429) setRateLimited();
-    return response;
+    console.log(`${logPrefix} Sending ${description}.`);
+    try {
+      const response = await request();
+      lastRequestTime = Date.now();
+      if (response.status === 429) setRateLimited();
+      console.log(`${logPrefix} Completed ${description} with HTTP ${response.status}.`);
+      return response;
+    } catch (error) {
+      console.error(`${logPrefix} Failed ${description}:`, error.message);
+      throw error;
+    }
   });
   apiRequestQueue = queuedRequest.catch(() => {});
   return queuedRequest;
@@ -70,6 +82,28 @@ function clearAccessToken() {
   accessToken = null;
   tokenExpiresAt = null;
   accessTokenRequest = null;
+}
+
+function describeApiRequest(endpoint) {
+  const [path, query] = endpoint.split('?', 2);
+  const beatmapsetMatch = path.match(/^beatmapsets\/(\d+)$/);
+  if (beatmapsetMatch) return `fetch beatmapset ${beatmapsetMatch[1]}`;
+
+  const beatmapMatch = path.match(/^beatmaps\/(\d+)$/);
+  if (beatmapMatch) return `fetch beatmap ${beatmapMatch[1]}`;
+
+  if (path === 'beatmaps') {
+    const ids = [...new URLSearchParams(query || '').getAll('ids[]')];
+    if (ids.length) {
+      const range = ids.length === 1 ? ids[0] : `${ids[0]}–${ids[ids.length - 1]}`;
+      return `fetch ${ids.length} beatmap${ids.length === 1 ? '' : 's'} (IDs ${range})`;
+    }
+  }
+
+  const userMatch = path.match(/^users\/([^/]+)\/osu$/);
+  if (userMatch) return `fetch user ${decodeURIComponent(userMatch[1])}`;
+
+  return `GET ${endpoint}`;
 }
 
 // Credentials are configured in the app settings so development and packaged
@@ -109,7 +143,7 @@ async function requestAccessToken(rateLimitRetries = 0) {
       grant_type: 'client_credentials',
       scope: 'public'
     })
-  }));
+  }), 'POST OAuth client-credentials token');
 
   if (response.status === 429) {
     if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
@@ -128,6 +162,7 @@ async function requestAccessToken(rateLimitRetries = 0) {
   accessToken = data.access_token;
   // Expire 1 minute early to be safe
   tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
+  console.log('[osuApi] OAuth token acquired.');
   return accessToken;
 }
 
@@ -146,6 +181,7 @@ async function getAccessToken() {
 // Helper to make authenticated requests to osu! API
 async function apiFetch(endpoint, rateLimitRetries = 0) {
   pendingApiRequests++;
+  const requestDescription = describeApiRequest(endpoint);
   try {
     const token = await getAccessToken();
     const url = endpoint.startsWith('http') ? endpoint : `https://osu.ppy.sh/api/v2/${endpoint.replace(/^\//, '')}`;
@@ -156,7 +192,7 @@ async function apiFetch(endpoint, rateLimitRetries = 0) {
         'Accept': 'application/json',
         'x-api-version': '20220705'
       }
-    }));
+    }), requestDescription);
 
     if (response.status === 429) {
       if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
@@ -178,6 +214,7 @@ async function apiFetch(endpoint, rateLimitRetries = 0) {
   } catch (error) {
     lastApiError = error.message;
     lastApiErrorAt = Date.now();
+    console.error(`[osuApi] ${requestDescription} failed:`, error.message);
     throw error;
   } finally {
     pendingApiRequests--;

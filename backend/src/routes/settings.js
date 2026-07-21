@@ -5,7 +5,7 @@ const { getCredentials, fetchBeatmapset, fetchUser, clearAccessToken } = require
 const { acquireBackupLock } = require('../utils/backupLock');
 const { waitForBackgroundTasks } = require('../utils/backgroundTasks');
 const { pauseMetadataSyncWorker, initializeMetadataSyncWorker } = require('../services/beatmapMetadataSync');
-const { readCoverFiles, writeCoverFiles } = require('../utils/backup');
+const { getCoverStorageUsage, readCoverFiles, writeCoverFiles } = require('../utils/backup');
 
 // Get redirect URI from environment or use default
 function getRedirectUri() {
@@ -37,6 +37,16 @@ router.get('/', async (req, res, next) => {
       oauthConfigured: isConfigured,
       redirectUri: getRedirectUri()
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/settings/data-usage - retrieve downloaded cover cache size
+router.get('/data-usage', async (req, res, next) => {
+  try {
+    const { bytes, fileCount } = await getCoverStorageUsage(coversDir);
+    res.json({ coverCacheBytes: bytes, coverCount: fileCount });
   } catch (error) {
     next(error);
   }
@@ -122,6 +132,8 @@ router.post('/delete-all-data', async (req, res, next) => {
       'requests',
       'beatmap_cache',
       'beatmap_metadata_sync',
+      'user_username_history',
+      'unavailable_osu_users',
       'users_cache',
       'tags',
       'settings'

@@ -20,6 +20,7 @@ const API_REQUEST_TIMEOUT_MS = 30000;
 const METADATA_STATUS_POLL_MS = 3000;
 const METADATA_LIST_REFRESH_MS = 15000;
 const BULK_REQUEST_BATCH_SIZE = 400;
+const BULK_DATE_REFRESH_POLL_MS = 1000;
 
 function requestIdBatches(ids) {
   const batches = [];
@@ -46,6 +47,8 @@ export default function App() {
   const [requestsList, setRequestsList] = useState([]);
   const [requestSort, setRequestSort] = useState({ sortBy: 'added_date', sortOrder: 'desc' });
   const [statsData, setStatsData] = useState({});
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [dashboardCategoryId, setDashboardCategoryId] = useState('all');
   const [settingsData, setSettingsData] = useState({});
   const [categoryDefinitions, setCategoryDefinitions] = useState([]);
   const [tagCatalog, setTagCatalog] = useState([]);
@@ -58,9 +61,12 @@ export default function App() {
   const [toastNotice, setToastNotice] = useState(null);
   const [confirmationRequest, setConfirmationRequest] = useState(null);
   const [isBulkStatusUpdating, setIsBulkStatusUpdating] = useState(false);
+  const [isBulkDateRefreshing, setIsBulkDateRefreshing] = useState(false);
   const toastIdRef = useRef(0);
   const bulkStatusUpdateRef = useRef(false);
   const metadataProgressRef = useRef({ settled: null, lastListRefresh: 0 });
+  const dashboardCategoryIdRef = useRef('all');
+  const statsRequestIdRef = useRef(0);
 
   // QuickAdd duplicate check state
   const [duplicateError, setDuplicateError] = useState(null);
@@ -132,17 +138,32 @@ export default function App() {
     }
   }, []);
 
-  const fetchStats = useCallback(async () => {
+  const fetchStats = useCallback(async (categoryId = dashboardCategoryIdRef.current) => {
+    const normalizedCategoryId = categoryId === 'all' ? 'all' : String(categoryId);
+    const requestId = ++statsRequestIdRef.current;
+    const endpoint = normalizedCategoryId === 'all'
+      ? '/api/stats'
+      : `/api/stats?categoryId=${encodeURIComponent(normalizedCategoryId)}`;
+    setStatsLoading(true);
     try {
-      const res = await fetchWithTimeout('/api/stats');
-      if (res.ok) {
-        const data = await res.json();
-        setStatsData(data);
-      }
+      const res = await fetchWithTimeout(endpoint);
+      if (!res.ok) throw new Error(`Statistics request failed (${res.status}).`);
+      const data = await res.json();
+      if (requestId === statsRequestIdRef.current) setStatsData(data);
     } catch (e) {
       console.error('Error fetching stats:', e);
+    } finally {
+      if (requestId === statsRequestIdRef.current) setStatsLoading(false);
     }
   }, []);
+
+  const handleDashboardCategoryChange = useCallback((categoryId) => {
+    const normalizedCategoryId = categoryId === 'all' ? 'all' : String(categoryId);
+    dashboardCategoryIdRef.current = normalizedCategoryId;
+    setDashboardCategoryId(normalizedCategoryId);
+    setStatsData({});
+    void fetchStats(normalizedCategoryId);
+  }, [fetchStats]);
 
   const fetchCatalogs = useCallback(async () => {
     try {
@@ -194,9 +215,7 @@ export default function App() {
       fetch('/api/requests').then(async (res) => {
         if (res.ok) setRequestsList(await res.json());
       }),
-      fetch('/api/stats').then(async (res) => {
-        if (res.ok) setStatsData(await res.json());
-      }),
+      fetchStats('all'),
       fetch('/api/settings').then(async (res) => {
         if (res.ok) {
           const data = await res.json();
@@ -213,7 +232,15 @@ export default function App() {
     ]).catch((error) => {
       console.error('Failed to load initial data:', error);
     });
-  }, []);
+  }, [fetchStats]);
+
+  useEffect(() => {
+    if (dashboardCategoryId === 'all' || categoryDefinitions.length === 0) return;
+    const categoryStillExists = categoryDefinitions.some(
+      category => String(category.id) === dashboardCategoryId
+    );
+    if (!categoryStillExists) handleDashboardCategoryChange('all');
+  }, [categoryDefinitions, dashboardCategoryId, handleDashboardCategoryChange]);
 
   const hasPendingMetadata = requestsList.some(request =>
     request.metadata_sync_status === 'Pending' || request.metadata_sync_status === 'Processing'
@@ -410,6 +437,33 @@ export default function App() {
     }
   };
 
+  const handleLinkManualRequest = async (id, link) => {
+    try {
+      const response = await fetchWithTimeout(`/api/requests/${id}/link-beatmap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ link })
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        showToast(result.error || 'Could not link this request to osu!.', 'error');
+        return { ok: false, duplicateRequestId: result.requestId };
+      }
+      await Promise.all([fetchRequests(), fetchStats()]);
+      const beatmapResponse = await fetchWithTimeout(`/api/beatmaps/${result.beatmapset_id}?cacheOnly=1`);
+      const beatmap = beatmapResponse.ok ? await beatmapResponse.json() : null;
+      setSelectedRequest(current => current?.id === id
+        ? { ...current, is_osu_link: true, beatmapset_id: result.beatmapset_id, difficulties: beatmap?.difficulties || [] }
+        : current);
+      showToast(result.message, 'success');
+      return { ok: true };
+    } catch (error) {
+      console.error('Failed to link manual request:', error);
+      showToast('Could not reach the local server to link this request.', 'error');
+      return { ok: false };
+    }
+  };
+
   // DELETE Request
   const handleDeleteRequest = async (id) => {
     try {
@@ -493,6 +547,69 @@ export default function App() {
     } finally {
       bulkStatusUpdateRef.current = false;
       setIsBulkStatusUpdating(false);
+    }
+  };
+
+  const summarizeRefreshDateResult = (result = {}) => {
+    const parts = [`Refreshed ${result.updated || 0} request date${result.updated === 1 ? '' : 's'}.`];
+    if (result.skippedManual?.length) parts.push(`Skipped ${result.skippedManual.length} manual request${result.skippedManual.length === 1 ? '' : 's'}.`);
+    if (result.skippedNoUsableDate?.length) {
+      const names = result.skippedNoUsableDate.slice(0, 3).map(item => item.title || `Request ${item.id}`).join(', ');
+      const remainder = result.skippedNoUsableDate.length - 3;
+      parts.push(`No usable osu! date: ${names}${remainder > 0 ? `, and ${remainder} more` : ''}.`);
+    }
+    if (result.failed?.length) parts.push(`${result.failed.length} request${result.failed.length === 1 ? '' : 's'} failed to refresh.`);
+    return parts.join(' ');
+  };
+
+  const handleBulkRefreshDates = async (ids) => {
+    if (!ids.length || isBulkDateRefreshing) return false;
+    setIsBulkDateRefreshing(true);
+    const trackerId = ++toastIdRef.current;
+    try {
+      const response = await fetchWithTimeout('/api/requests/refresh-dates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids })
+      });
+      const started = await response.json();
+      if (!response.ok) throw new Error(started.error || 'Could not start the date refresh.');
+      if (started.completed) {
+        showToast(summarizeRefreshDateResult(started.result), started.result?.skippedManual?.length ? 'warning' : 'info');
+        return true;
+      }
+
+      setToastNotice({
+        id: trackerId,
+        type: 'progress',
+        persistent: true,
+        message: `Refreshing 0 of ${started.total} selected osu! request dates...`,
+        progress: { completed: 0, total: started.total }
+      });
+
+      let status = started;
+      while (status.status !== 'completed') {
+        await new Promise(resolve => window.setTimeout(resolve, BULK_DATE_REFRESH_POLL_MS));
+        const pollResponse = await fetchWithTimeout(`/api/requests/refresh-dates/status/${started.jobId}`);
+        status = await pollResponse.json();
+        if (!pollResponse.ok) throw new Error(status.error || 'Could not retrieve date refresh progress.');
+        setToastNotice(current => current?.id === trackerId ? {
+          ...current,
+          message: `Refreshing ${status.processed} of ${status.total} selected osu! request dates...`,
+          progress: { completed: status.processed, total: status.total }
+        } : current);
+      }
+
+      await Promise.all([fetchRequests(), fetchStats()]);
+      const hasWarnings = status.result.skippedManual?.length || status.result.skippedNoUsableDate?.length || status.result.failed?.length;
+      showToast(summarizeRefreshDateResult(status.result), hasWarnings ? 'warning' : 'success');
+      return true;
+    } catch (error) {
+      console.error('Failed to refresh selected request dates:', error);
+      showToast(error.message || 'Could not refresh the selected request dates.', 'error');
+      return false;
+    } finally {
+      setIsBulkDateRefreshing(false);
     }
   };
 
@@ -616,8 +733,11 @@ export default function App() {
     }
 
     setSelectedRequest(null);
+    dashboardCategoryIdRef.current = 'all';
+    setDashboardCategoryId('all');
+    setStatsData({});
     localStorage.removeItem('credentialsSetupPromptShown');
-    await Promise.all([fetchRequests(), fetchStats(), fetchSettings()]);
+    await Promise.all([fetchRequests(), fetchStats('all'), fetchSettings(), fetchCatalogs()]);
   };
 
   // Beatmap link migration
@@ -657,6 +777,9 @@ export default function App() {
       const data = await res.json();
       if (res.ok) {
         showToast('Backup database successfully restored!', 'success');
+        dashboardCategoryIdRef.current = 'all';
+        setDashboardCategoryId('all');
+        setStatsData({});
         await fetchData();
         return true;
       } else {
@@ -680,9 +803,13 @@ export default function App() {
       return (
         <Dashboard
           statsData={statsData}
+          statsLoading={statsLoading}
           requestsList={requestsList}
           onOpenRequest={handleOpenRequest}
           connectedAccount={settingsData.connectedAccount}
+          categoryDefinitions={categoryDefinitions}
+          selectedCategoryId={dashboardCategoryId}
+          onCategoryChange={handleDashboardCategoryChange}
         />
       );
     }
@@ -758,6 +885,7 @@ export default function App() {
                 onNotify={showToast}
                 categoryDefinitions={categoryDefinitions}
                 tagSuggestions={tagCatalog}
+                connectedAccount={settingsData.connectedAccount}
               />
             )}
             {isMultipleImportOpen && (
@@ -779,6 +907,8 @@ export default function App() {
             onUpdateRequest={handleUpdateRequest}
             onBulkUpdateStatus={handleBulkUpdateStatus}
             isBulkStatusUpdating={isBulkStatusUpdating}
+            onBulkRefreshDates={handleBulkRefreshDates}
+            isBulkDateRefreshing={isBulkDateRefreshing}
             onBulkUpdatePriority={handleBulkUpdatePriority}
             onBulkUpdateCategory={handleBulkUpdateCategory}
             onBulkAddTags={handleBulkAddTags}
@@ -834,6 +964,7 @@ export default function App() {
           request={selectedRequest}
           onClose={() => setSelectedRequest(null)}
           onUpdateRequest={handleUpdateRequest}
+          onLinkManualRequest={handleLinkManualRequest}
           onForceRefreshBeatmap={fetchRequests}
           connectedAccount={settingsData.connectedAccount}
           onNotify={showToast}

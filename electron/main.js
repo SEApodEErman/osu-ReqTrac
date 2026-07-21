@@ -63,6 +63,7 @@ ipcMain.handle('window:toggle-maximize', () => {
   }
   return mainWindow.isMaximized();
 });
+ipcMain.handle('window:is-maximized', () => mainWindow?.isMaximized() ?? false);
 ipcMain.handle('window:close', () => mainWindow?.close());
 ipcMain.handle('window:flash-frame', () => {
   if (process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed() || mainWindow.isFocused()) return false;
@@ -102,6 +103,14 @@ async function createWindow() {
     mainWindow.show();
   });
 
+  const sendMaximizedState = () => {
+    if (!mainWindow?.isDestroyed()) {
+      mainWindow.webContents.send('window:maximized-change', mainWindow.isMaximized());
+    }
+  };
+  mainWindow.on('maximize', sendMaximizedState);
+  mainWindow.on('unmaximize', sendMaximizedState);
+
   // Keep external sites in the user's default browser instead of opening an
   // Electron child window, including links opened with target="_blank".
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -116,6 +125,15 @@ async function createWindow() {
     if (/^https?:\/\//i.test(url) && !/^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\//i.test(url)) {
       event.preventDefault();
       void shell.openExternal(url);
+    }
+  });
+
+  // Removing Electron's native menu also removes its normal Ctrl+R reload
+  // accelerator. Restore it for the focused app window only.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key.toLowerCase() === 'r' && (input.control || input.meta)) {
+      event.preventDefault();
+      mainWindow.reload();
     }
   });
 

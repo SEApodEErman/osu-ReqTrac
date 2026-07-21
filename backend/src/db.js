@@ -330,6 +330,98 @@ async function runApplicationMigrations(db) {
       throw error;
     }
   }
+
+  if (!applied.has(2)) {
+    await db.exec('BEGIN IMMEDIATE TRANSACTION');
+    try {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS user_username_history (
+          user_id INTEGER NOT NULL,
+          username TEXT COLLATE NOCASE NOT NULL,
+          first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+          last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (user_id, username)
+        );
+      `);
+      const usersCacheTable = await db.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'users_cache'");
+      if (usersCacheTable) {
+        await db.run(`
+          INSERT OR IGNORE INTO user_username_history (user_id, username, first_seen, last_seen)
+          SELECT id, username, last_updated, last_updated FROM users_cache
+          WHERE trim(COALESCE(username, '')) <> ''
+        `);
+      }
+      await db.run(
+        'INSERT INTO schema_migrations (version, name) VALUES (?, ?)',
+        2,
+        'canonical osu user identities and username history'
+      );
+      await db.exec('COMMIT');
+    } catch (error) {
+      await db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  // Version 2 could only seed aliases from users_cache, which holds one
+  // current username per user. Older beatmap cache rows retain the username
+  // that was current when each map was fetched, so use their stable creator
+  // IDs to recover those historical aliases as well.
+  if (!applied.has(3)) {
+    await db.exec('BEGIN IMMEDIATE TRANSACTION');
+    try {
+      const usersCacheTable = await db.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'users_cache'");
+      if (usersCacheTable) {
+        await db.run(`
+          INSERT OR IGNORE INTO user_username_history (user_id, username, first_seen, last_seen)
+          SELECT id, trim(username), last_updated, last_updated
+          FROM users_cache
+          WHERE trim(COALESCE(username, '')) <> ''
+        `);
+      }
+      const beatmapCacheTable = await db.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'beatmap_cache'");
+      if (beatmapCacheTable) {
+        await db.run(`
+          INSERT OR IGNORE INTO user_username_history (user_id, username, first_seen, last_seen)
+          SELECT creator_id, trim(creator), last_updated, last_updated
+          FROM beatmap_cache
+          WHERE creator_id IS NOT NULL
+            AND trim(COALESCE(creator, '')) <> ''
+        `);
+      }
+      await db.run(
+        'INSERT INTO schema_migrations (version, name) VALUES (?, ?)',
+        3,
+        'backfill username history from cached beatmap creators'
+      );
+      await db.exec('COMMIT');
+    } catch (error) {
+      await db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  if (!applied.has(4)) {
+    await db.exec('BEGIN IMMEDIATE TRANSACTION');
+    try {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS unavailable_osu_users (
+          user_id INTEGER PRIMARY KEY CHECK(user_id > 0),
+          username TEXT COLLATE NOCASE,
+          first_failed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      await db.run(
+        'INSERT INTO schema_migrations (version, name) VALUES (?, ?)',
+        4,
+        'persist osu users that returned HTTP 404'
+      );
+      await db.exec('COMMIT');
+    } catch (error) {
+      await db.exec('ROLLBACK');
+      throw error;
+    }
+  }
 }
 
 // Add a column to a table if it does not already exist

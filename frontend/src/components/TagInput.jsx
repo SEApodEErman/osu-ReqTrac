@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Tag, X } from 'lucide-react';
 
-export default function TagInput({ value = [], onChange, suggestions = [], placeholder = 'Add a tag…', compact = false }) {
+export default function TagInput({ value = [], onChange, suggestions = [], placeholder = 'Add a tag…', compact = false, className = '' }) {
   const [input, setInput] = useState('');
   const normalizedValue = Array.isArray(value) ? value : [];
   const available = useMemo(() => {
@@ -33,13 +33,13 @@ export default function TagInput({ value = [], onChange, suggestions = [], place
   };
 
   return (
-    <div style={{ position: 'relative', minWidth: 0 }}>
+    <div className={className} style={{ position: 'relative', minWidth: 0 }}>
       {normalizedValue.length > 0 && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', marginBottom: '6px' }}>
+        <div className="tag-input-chips" style={{ display: 'flex', flexWrap: 'wrap', gap: '5px', marginBottom: '6px' }}>
           {normalizedValue.map(tag => (
             <span key={tag.toLowerCase()} className="tag-badge" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
               <Tag size={10} />{tag}
-              <button type="button" aria-label={`Remove ${tag}`} onClick={() => onChange(normalizedValue.filter(item => item !== tag))} style={{ display: 'inline-flex', color: 'inherit' }}>
+              <button type="button" aria-label={`Remove ${tag}`} onClick={() => onChange(normalizedValue.filter(item => item !== tag))} style={{ display: 'inline-flex', color: 'inherit', cursor: 'pointer' }}>
                 <X size={10} />
               </button>
             </span>

@@ -6,6 +6,7 @@ const { refreshAndCacheBeatmapset } = require('./beatmaps');
 const { createApiJob, updateApiJob, finishApiJob } = require('../osuApi');
 const { findUserDifficulties, isGuestDifficulty, normalizeGamemode, parseOsuLink, parseOsuUserLink } = require('../utils/requestUtils');
 const { trackBackgroundTask } = require('../utils/backgroundTasks');
+const { canonicalDifficultyNames, recordUserIdentity } = require('../utils/userIdentity');
 const {
   ensureTag,
   normalizeCategories,
@@ -14,27 +15,23 @@ const {
   resolveCategory,
 } = require('../utils/catalog');
 
+const refreshDateJobs = new Map();
+let nextRefreshDateJobId = 1;
+const REFRESH_DATE_JOB_RETENTION_MS = 10 * 60 * 1000;
+
+function pruneRefreshDateJobs() {
+  const cutoff = Date.now() - REFRESH_DATE_JOB_RETENTION_MS;
+  for (const [id, job] of refreshDateJobs) {
+    if (job.completedAt && job.completedAt < cutoff) refreshDateJobs.delete(id);
+  }
+}
+
 // Helper to update or cache a user profile
 async function fetchAndCacheUser(db, userIdOrUsername) {
   try {
     const userData = await fetchUser(userIdOrUsername);
     if (userData) {
-      await db.run(`
-        INSERT OR REPLACE INTO users_cache (id, username, avatar_url, country_code, last_updated)
-        VALUES (?, ?, ?, ?, ?)
-      `, [
-        userData.id,
-        userData.username,
-        userData.avatar_url,
-        userData.country_code,
-        new Date().toISOString()
-      ]);
-      return {
-        id: userData.id,
-        username: userData.username,
-        avatar_url: userData.avatar_url,
-        country_code: userData.country_code
-      };
+      return recordUserIdentity(db, userData);
     }
   } catch (error) {
     console.error('Failed to fetch/cache user:', error.message);
@@ -104,6 +101,12 @@ router.get('/', async (req, res, next) => {
     // Fetch all user caches
     const usersList = await db.all('SELECT * FROM users_cache');
     const userMap = new Map(usersList.map(u => [u.id, u]));
+    const usernameHistory = await db.all('SELECT user_id, username FROM user_username_history');
+    const aliasesByUser = new Map();
+    for (const row of usernameHistory) {
+      if (!aliasesByUser.has(row.user_id)) aliasesByUser.set(row.user_id, []);
+      aliasesByUser.get(row.user_id).push(row.username);
+    }
 
     // Fetch connected user details from settings
     const connectedSettings = await db.all("SELECT key, value FROM settings WHERE key IN ('connected_user_id', 'connected_username')");
@@ -132,7 +135,7 @@ router.get('/', async (req, res, next) => {
 
       if (reqRow.is_osu_link && reqRow.difficulties_json) {
         try {
-          difficulties = JSON.parse(reqRow.difficulties_json);
+          difficulties = JSON.parse(reqRow.difficulties_json).map(difficulty => canonicalDifficultyNames(difficulty, userMap));
           numDifficulties = difficulties.length;
           highestStars = difficulties.reduce((max, d) => d.stars > max ? d.stars : max, 0);
 
@@ -212,10 +215,14 @@ router.get('/', async (req, res, next) => {
       let requesterCountry = requesterCache ? requesterCache.country_code : null;
       let requesterIsCreator = false;
 
+      if (requesterId && userMap.get(requesterId)?.username) {
+        requesterUsername = userMap.get(requesterId).username;
+      }
+
       if (!hasExplicitRequester && reqRow.is_osu_link && reqRow.cache_creator) {
         const creatorCache = reqRow.cache_creator_id ? userMap.get(reqRow.cache_creator_id) : null;
         requesterId = reqRow.cache_creator_id || null;
-        requesterUsername = reqRow.cache_creator;
+        requesterUsername = creatorCache?.username || reqRow.cache_creator;
         requesterAvatar = creatorCache ? creatorCache.avatar_url : null;
         requesterCountry = creatorCache ? creatorCache.country_code : null;
         requesterIsCreator = true;
@@ -232,7 +239,9 @@ router.get('/', async (req, res, next) => {
         is_osu_link: !!reqRow.is_osu_link,
         artist: reqRow.is_osu_link ? reqRow.cache_artist : reqRow.non_osu_artist,
         title: reqRow.is_osu_link ? reqRow.cache_title : reqRow.non_osu_title,
-        creator: reqRow.is_osu_link ? reqRow.cache_creator : reqRow.non_osu_creator,
+        creator: reqRow.is_osu_link ? (userMap.get(reqRow.cache_creator_id)?.username || reqRow.cache_creator) : reqRow.non_osu_creator,
+        creator_id: reqRow.is_osu_link ? reqRow.cache_creator_id : null,
+        creator_aliases: reqRow.is_osu_link ? (aliasesByUser.get(reqRow.cache_creator_id) || []) : [],
         difficulty_name: reqRow.is_osu_link ? '' : reqRow.non_osu_difficulty,
         cover_url: reqRow.cover_url,
         local_cover_path: reqRow.local_cover_path || '/uploads/covers/default.jpg',
@@ -244,6 +253,7 @@ router.get('/', async (req, res, next) => {
         metadata_sync_error: reqRow.metadata_sync_error || null,
         requester_id: requesterId,
         requester_username: requesterUsername,
+        requester_aliases: requesterId ? (aliasesByUser.get(requesterId) || []) : [],
         requester_avatar: requesterAvatar,
         requester_country: requesterCountry,
         requester_is_creator: requesterIsCreator,
@@ -261,6 +271,7 @@ router.get('/', async (req, res, next) => {
         categories,
         tags,
         highest_stars: highestStars,
+        search_difficulties: difficulties,
         num_difficulties: numDifficulties,
         // Guest difficulty info
         highest_guest_stars: highestGuestStars,
@@ -1035,6 +1046,90 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
+// POST /api/requests/:id/link-beatmap - Convert one manual request into an
+// osu!-linked request while preserving its request workflow and child records.
+router.post('/:id/link-beatmap', async (req, res, next) => {
+  try {
+    const requestId = Number.parseInt(req.params.id, 10);
+    const parsedLink = parseOsuLink(req.body?.link);
+    if (!Number.isSafeInteger(requestId) || !parsedLink) {
+      return res.status(400).json({ error: 'Provide a valid osu! beatmap or beatmapset link.' });
+    }
+
+    const db = await getDatabase();
+    const request = await db.get('SELECT * FROM requests WHERE id = ?', requestId);
+    if (!request) return res.status(404).json({ error: 'Request not found.' });
+    if (request.is_osu_link) return res.status(409).json({ error: 'This request is already linked to an osu! beatmap.' });
+
+    let beatmapsetId = parsedLink.id;
+    if (parsedLink.type === 'beatmap') {
+      const beatmap = await fetchBeatmap(parsedLink.id);
+      if (!beatmap?.beatmapset_id) return res.status(400).json({ error: 'Could not resolve the beatmapset from that link.' });
+      beatmapsetId = beatmap.beatmapset_id;
+    }
+
+    const duplicate = await db.get('SELECT id FROM requests WHERE beatmapset_id = ? AND id <> ?', beatmapsetId, requestId);
+    if (duplicate) {
+      return res.status(409).json({ error: 'That beatmapset is already linked to another request.', requestId: duplicate.id });
+    }
+
+    // Do all network validation before changing the manual request.
+    const metadata = await refreshAndCacheBeatmapset(db, beatmapsetId);
+    await db.exec('BEGIN TRANSACTION');
+    try {
+      await db.run(`
+        UPDATE requests SET
+          beatmapset_id = ?, is_osu_link = 1,
+          non_osu_artist = NULL, non_osu_title = NULL, non_osu_creator = NULL, non_osu_difficulty = NULL,
+          input_link = NULL, last_updated = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `, beatmapsetId, requestId);
+      await db.run(
+        'INSERT INTO history (request_id, action_type, details) VALUES (?, ?, ?)',
+        [requestId, 'linked_to_beatmap', `Linked manual request to osu! beatmapset ${beatmapsetId} (${metadata.artist} - ${metadata.title}).`]
+      );
+      await db.exec('COMMIT');
+    } catch (error) {
+      await db.exec('ROLLBACK');
+      throw error;
+    }
+    res.json({ success: true, beatmapset_id: beatmapsetId, message: 'Manual request linked to osu! beatmap metadata.' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/requests/:id/refresh-date - refresh only this request's lifecycle date.
+router.post('/:id/refresh-date', async (req, res, next) => {
+  try {
+    const requestId = Number.parseInt(req.params.id, 10);
+    const db = await getDatabase();
+    const request = await db.get('SELECT id, beatmapset_id, is_osu_link, added_date FROM requests WHERE id = ?', requestId);
+    if (!request) return res.status(404).json({ error: 'Request not found.' });
+    if (!request.is_osu_link || !request.beatmapset_id) {
+      return res.status(400).json({ error: 'Only osu!-linked requests have dates to refresh.' });
+    }
+    const cacheEntry = await refreshAndCacheBeatmapset(db, request.beatmapset_id);
+    const dateValue = formatLifecycleDate(getEffectiveBeatmapDate(cacheEntry));
+    if (!dateValue) return res.status(422).json({ error: 'osu! did not provide a usable lifecycle date for this beatmap.' });
+    await db.exec('BEGIN TRANSACTION');
+    try {
+      await db.run('UPDATE requests SET added_date = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', dateValue, requestId);
+      await db.run(
+        'INSERT INTO history (request_id, action_type, details) VALUES (?, ?, ?)',
+        [requestId, 'added_date_refreshed_from_osu', `Added date refreshed from osu!: ${dateValue}`]
+      );
+      await db.exec('COMMIT');
+    } catch (error) {
+      await db.exec('ROLLBACK');
+      throw error;
+    }
+    res.json({ success: true, added_date: dateValue, message: 'Added date refreshed from osu!.' });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // DELETE /api/requests/:id - delete request
 router.delete('/:id', async (req, res, next) => {
   try {
@@ -1110,6 +1205,21 @@ router.get('/beatmap-info', async (req, res, next) => {
 
     // Fetch creator info
     const creatorInfo = await fetchUser(beatmapset.user_id);
+    const difficulties = (beatmapset.beatmaps || []).map(beatmap => {
+      const owners = Array.isArray(beatmap.owners) ? beatmap.owners.filter(Boolean) : [];
+      const creatorIds = owners.map(owner => Number(owner.id)).filter(Number.isSafeInteger);
+      const creatorNames = owners.map(owner => owner.username).filter(Boolean);
+      return {
+        id: beatmap.id,
+        name: beatmap.version,
+        mode: normalizeGamemode(beatmap.mode ?? beatmap.mode_int),
+        stars: beatmap.difficulty_rating,
+        creator_id: creatorIds[0] ?? beatmap.user_id ?? beatmapset.user_id,
+        creator_ids: creatorIds.length > 0 ? creatorIds : [beatmap.user_id ?? beatmapset.user_id].filter(Number.isSafeInteger),
+        creator_name: creatorNames[0] || beatmapset.creator,
+        creator_names: creatorNames.length > 0 ? creatorNames : [beatmapset.creator].filter(Boolean),
+      };
+    });
 
     res.json({
       beatmapsetId: beatmapset.id,
@@ -1126,7 +1236,8 @@ router.get('/beatmap-info', async (req, res, next) => {
       rankedDate: beatmapset.ranked_date,
       bpm: beatmapset.bpm,
       genres: beatmapset.genres,
-      language: beatmapset.language
+      language: beatmapset.language,
+      difficulties,
     });
   } catch (error) {
     next(error);
@@ -1144,28 +1255,145 @@ function getEffectiveBeatmapDate(cacheEntry) {
   return cacheEntry?.osu_last_updated || cacheEntry?.ranked_date || cacheEntry?.submitted_date || null;
 }
 
+function formatLifecycleDate(value) {
+  if (!value) return null;
+  const date = String(value).split(/[ T]/)[0];
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(Date.parse(`${date}T00:00:00Z`))
+    ? date
+    : null;
+}
+
+function createRefreshDateResult(manual = []) {
+  return {
+    updated: 0,
+    skippedManual: manual,
+    skippedNoUsableDate: [],
+    failed: []
+  };
+}
+
+function refreshDateJobResponse(job) {
+  return {
+    jobId: job.id,
+    status: job.status,
+    total: job.total,
+    processed: job.processed,
+    result: job.result
+  };
+}
+
+// GET /api/requests/refresh-dates/status/:jobId - Retrieve a selected-refresh result.
+router.get('/refresh-dates/status/:jobId', (req, res) => {
+  pruneRefreshDateJobs();
+  const job = refreshDateJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Refresh result not found or has expired.' });
+  res.json(refreshDateJobResponse(job));
+});
+
 // POST /api/requests/refresh-dates - Update added_date from each beatmapset's lifecycle date
 router.post('/refresh-dates', async (req, res, next) => {
   try {
     const db = await getDatabase();
-    const rows = await db.all('SELECT id, beatmapset_id FROM requests WHERE beatmapset_id IS NOT NULL');
+    const requestedIds = Array.isArray(req.body?.ids)
+      ? [...new Set(req.body.ids.map(id => Number.parseInt(id, 10)).filter(Number.isSafeInteger))]
+      : null;
+    if (requestedIds && requestedIds.length === 0) {
+      return res.status(400).json({ error: 'Select at least one request to refresh.' });
+    }
+
+    const rowSelect = `
+      SELECT r.id, r.beatmapset_id, r.is_osu_link,
+             COALESCE(b.title, r.non_osu_title, 'Request ' || r.id) AS title
+      FROM requests r
+      LEFT JOIN beatmap_cache b ON r.beatmapset_id = b.beatmapset_id
+    `;
+    const rows = requestedIds
+      ? await db.all(`${rowSelect} WHERE r.id IN (${requestedIds.map(() => '?').join(', ')})`, requestedIds)
+      : await db.all(`${rowSelect} WHERE r.beatmapset_id IS NOT NULL`);
 
     if (rows.length === 0) {
       return res.json({ success: true, message: 'No osu! link requests found to update.' });
     }
 
-    const apiJobId = createApiJob('Refreshing request dates', rows.length);
+    const manual = rows
+      .filter(row => !row.is_osu_link || !row.beatmapset_id)
+      .map(row => ({ id: row.id, title: row.title }));
+    const linkedRows = rows.filter(row => row.is_osu_link && row.beatmapset_id);
+
+    // A selected refresh needs an observable completion result so the UI can
+    // tell the user exactly which selected maps did not expose a usable date.
+    if (requestedIds) {
+      if (linkedRows.length === 0) {
+        return res.json({
+          success: true,
+          completed: true,
+          message: 'The selected requests are manual and were skipped.',
+          result: createRefreshDateResult(manual)
+        });
+      }
+
+      pruneRefreshDateJobs();
+      const job = {
+        id: `refresh-dates-${nextRefreshDateJobId++}`,
+        status: 'running',
+        total: linkedRows.length,
+        processed: 0,
+        result: createRefreshDateResult(manual),
+        completedAt: null
+      };
+      refreshDateJobs.set(job.id, job);
+      const apiJobId = createApiJob('Refreshing selected request dates', linkedRows.length);
+
+      res.status(202).json({
+        success: true,
+        message: `Refreshing dates for ${linkedRows.length} selected osu!-linked request${linkedRows.length === 1 ? '' : 's'} in the background.`,
+        ...refreshDateJobResponse(job)
+      });
+
+      trackBackgroundTask((async () => {
+        try {
+          for (const row of linkedRows) {
+            try {
+              const cacheEntry = await refreshAndCacheBeatmapset(db, row.beatmapset_id, apiJobId);
+              const dateValue = formatLifecycleDate(getEffectiveBeatmapDate(cacheEntry));
+              if (!dateValue) {
+                job.result.skippedNoUsableDate.push({ id: row.id, title: row.title });
+              } else {
+                await db.run('UPDATE requests SET added_date = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', [dateValue, row.id]);
+                await db.run(
+                  'INSERT INTO history (request_id, action_type, details) VALUES (?, ?, ?)',
+                  [row.id, 'added_date_refreshed_from_osu', `Added date refreshed from osu!: ${dateValue}`]
+                );
+                job.result.updated++;
+              }
+            } catch (error) {
+              console.error(`Failed to refresh selected request date for request ${row.id} (beatmapset ${row.beatmapset_id}):`, error.message);
+              job.result.failed.push({ id: row.id, title: row.title });
+            } finally {
+              job.processed++;
+            }
+          }
+        } finally {
+          finishApiJob(apiJobId);
+          job.status = 'completed';
+          job.completedAt = Date.now();
+        }
+      })());
+      return;
+    }
+
+    const apiJobId = createApiJob('Refreshing request dates', linkedRows.length);
 
     // Respond immediately; process in the background (throttled osu! API calls)
     res.json({
       success: true,
-      message: `Refreshing request dates for ${rows.length} requests in the background. This may take a while due to API rate limiting.`
+      message: `Refreshing request dates for ${linkedRows.length} requests in the background. This may take a while due to API rate limiting.`
     });
 
     trackBackgroundTask((async () => {
       let updated = 0;
       try {
-        for (const row of rows) {
+        for (const row of linkedRows) {
           try {
             // Full refresh also caches the creator profile and osu! dates
             const cacheEntry = await refreshAndCacheBeatmapset(db, row.beatmapset_id, apiJobId);
@@ -1173,7 +1401,7 @@ router.post('/refresh-dates', async (req, res, next) => {
             if (effectiveDate) {
               await db.run(
                 'UPDATE requests SET added_date = ? WHERE id = ?',
-                [effectiveDate, row.id]
+                [formatLifecycleDate(effectiveDate), row.id]
               );
               updated++;
             }
@@ -1184,7 +1412,7 @@ router.post('/refresh-dates', async (req, res, next) => {
       } finally {
         finishApiJob(apiJobId);
       }
-      console.log(`[refresh-dates] Updated request dates for ${updated}/${rows.length} requests.`);
+      console.log(`[refresh-dates] Updated request dates for ${updated}/${linkedRows.length} requests.`);
     })());
   } catch (error) {
     next(error);

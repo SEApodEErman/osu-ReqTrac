@@ -1,8 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const BACKUP_VERSION = '3.0.0';
-const LEGACY_BACKUP_VERSIONS = new Set(['1.0.0', '2.0.0']);
+const BACKUP_VERSION = '4.0.0';
+const LEGACY_BACKUP_VERSIONS = new Set(['1.0.0', '2.0.0', '3.0.0']);
 const DATA_TABLES = [
   'requests',
   'categories',
@@ -11,6 +11,8 @@ const DATA_TABLES = [
   'beatmap_cache',
   'beatmap_metadata_sync',
   'users_cache',
+  'user_username_history',
+  'unavailable_osu_users',
   'history',
   'tags',
   'request_tags',
@@ -22,10 +24,11 @@ function validateBackup(backup) {
     throw new Error('Invalid backup JSON structure.');
   }
   if (backup.version !== BACKUP_VERSION && !LEGACY_BACKUP_VERSIONS.has(backup.version)) {
-    throw new Error(`Unsupported backup version. Expected ${BACKUP_VERSION}, 2.0.0, or 1.0.0.`);
+    throw new Error(`Unsupported backup version. Expected ${BACKUP_VERSION}, 3.0.0, 2.0.0, or 1.0.0.`);
   }
   for (const table of DATA_TABLES.filter(table => {
-    if (['categories', 'request_guest_difficulties'].includes(table)) return backup.version === BACKUP_VERSION;
+    if (table === 'unavailable_osu_users') return false;
+    if (['categories', 'request_guest_difficulties', 'user_username_history'].includes(table)) return backup.version === BACKUP_VERSION;
     if (table === 'beatmap_metadata_sync') return backup.version !== '1.0.0';
     return true;
   })) {
@@ -48,6 +51,8 @@ function validateBackup(backup) {
     categories: backup.categories || [],
     request_guest_difficulties: backup.request_guest_difficulties || [],
     beatmap_metadata_sync: backup.beatmap_metadata_sync || [],
+    user_username_history: backup.user_username_history || [],
+    unavailable_osu_users: backup.unavailable_osu_users || [],
     cover_files: backup.cover_files || [],
     sqlite_sequence: backup.sqlite_sequence || []
   };
@@ -63,6 +68,21 @@ async function readCoverFiles(coversDir) {
     coverFiles.push({ filename, data: (await fs.promises.readFile(filePath)).toString('base64') });
   }
   return coverFiles;
+}
+
+async function getCoverStorageUsage(coversDir) {
+  let bytes = 0;
+  let fileCount = 0;
+
+  for (const filename of await fs.promises.readdir(coversDir)) {
+    if (filename === 'default.jpg' || !/\.jpe?g$/i.test(filename)) continue;
+    const stat = await fs.promises.stat(path.join(coversDir, filename));
+    if (!stat.isFile()) continue;
+    bytes += stat.size;
+    fileCount += 1;
+  }
+
+  return { bytes, fileCount };
 }
 
 function safeCoverFilename(filename) {
@@ -92,6 +112,7 @@ async function writeCoverFiles(coversDir, coverFiles = []) {
 module.exports = {
   BACKUP_VERSION,
   DATA_TABLES,
+  getCoverStorageUsage,
   readCoverFiles,
   validateBackup,
   writeCoverFiles

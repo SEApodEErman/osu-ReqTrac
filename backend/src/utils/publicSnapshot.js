@@ -28,7 +28,7 @@ async function buildPublicSnapshot() {
     && String(username).toLowerCase() === String(connectedUsername).toLowerCase());
   const requestRows = await db.all(`
     SELECT r.*, b.artist AS cache_artist, b.title AS cache_title,
-           b.creator AS cache_creator, b.cover_url, b.ranked_status,
+           b.creator AS cache_creator, b.creator_id AS cache_creator_id, b.cover_url, b.ranked_status,
            b.ranked_date, b.osu_last_updated, b.difficulties_json
     FROM requests r
     LEFT JOIN beatmap_cache b ON r.beatmapset_id = b.beatmapset_id
@@ -38,6 +38,7 @@ async function buildPublicSnapshot() {
     SELECT id, name, system_key, view_type, sort_order
     FROM categories WHERE is_active = 1 ORDER BY sort_order, id
   `);
+  const usersById = new Map((await db.all('SELECT id, username FROM users_cache')).map(user => [user.id, user]));
   const categories = await db.all(`
     SELECT rc.request_id, COALESCE(c.name, rc.category_name) AS category_name
     FROM request_categories rc LEFT JOIN categories c ON c.id = rc.category_id ORDER BY rc.id
@@ -106,14 +107,14 @@ async function buildPublicSnapshot() {
     );
     const drainSeconds = difficulties.reduce((max, difficulty) => Math.max(max, Number(difficulty.drain) || 0), 0);
     const requester = row.requester_id || (row.requester_username && row.requester_username.toLowerCase() !== 'anonymous')
-      ? row.requester_username
-      : row.cache_creator;
+      ? (usersById.get(row.requester_id)?.username || row.requester_username)
+      : (usersById.get(row.cache_creator_id)?.username || row.cache_creator);
 
     return {
       isOsuLink: true,
       artist: row.cache_artist,
       title: row.cache_title,
-      creator: row.cache_creator,
+      creator: usersById.get(row.cache_creator_id)?.username || row.cache_creator,
       requester,
       status: row.request_status,
       priority: row.priority,

@@ -128,6 +128,11 @@ async function startServer() {
   await getDatabase();
   const { initializeMetadataSyncWorker } = require('./services/beatmapMetadataSync');
   await initializeMetadataSyncWorker();
+  const { refreshKnownCreatorIdentities } = require('./routes/beatmaps');
+  const { trackBackgroundTask } = require('./utils/backgroundTasks');
+  trackBackgroundTask(refreshKnownCreatorIdentities(await getDatabase()).catch(error => {
+    console.error('[user-identities] Background refresh failed:', error.message);
+  }));
   console.log('Database initialized successfully.');
 
   return new Promise((resolve, reject) => {

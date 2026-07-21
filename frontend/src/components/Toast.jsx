@@ -84,7 +84,7 @@ function NotificationToast({ notification, onDismiss }) {
       </button>
       {progress ? (
         <div
-          className="app-toast-progress app-toast-progress-tracked"
+          className="app-toast-progress-bar app-toast-progress-bar-tracked"
           role="progressbar"
           aria-valuemin="0"
           aria-valuemax={progress.total}
@@ -94,7 +94,7 @@ function NotificationToast({ notification, onDismiss }) {
       ) : (
         <div
           key={notification.id}
-          className="app-toast-progress"
+          className="app-toast-progress-bar"
           style={{ animationPlayState: isPaused ? 'paused' : 'running' }}
           aria-hidden="true"
         />

@@ -14,6 +14,8 @@ import {
   AlertCircle
 } from 'lucide-react';
 import TagInput from './TagInput';
+import { requestMatchesSearch } from '../utils/requestSearch';
+import { REQUEST_COLUMNS, defaultVisibleColumns, moveColumn, normalizeColumnOrder, requestColumnClassName } from '../utils/requestColumns';
 
 // osu! official star difficulty spectrum from osu.Game.Rulesets.Osu.Difficulty.OsuColour
 // https://github.com/ppy/osu/blob/master/osu.Game.Rulesets.Osu/Difficulty/OsuColour.cs
@@ -153,11 +155,26 @@ function StarRatingBadge({ stars }) {
   );
 }
 
-function SortableHeader({ label, onSort }) {
+function GuestDifficultySummary({ stars, difficulties = [] }) {
   return (
-    <th onClick={onSort} className="sortable-header" style={{ cursor: 'pointer' }}>
+    <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: '3px', flexShrink: 0 }}>
+      <StarRatingBadge stars={stars} />
+      {difficulties.length > 0 && <span aria-label={`${difficulties.length} guest difficulties`} style={{ display: 'inline-flex', gap: '2px', minHeight: '4px' }}>
+        {difficulties.slice(0, 8).map((difficulty, index) => {
+          const color = getStarDifficultyColor(Number(difficulty.stars) || 0);
+          return <span key={difficulty.id || difficulty.assignment_id || `${difficulty.mode}-${difficulty.name}-${index}`} title={`${difficulty.name || 'Unnamed difficulty'} (${difficulty.mode === 'fruits' ? 'catch' : difficulty.mode || 'osu'}) - ${Number(difficulty.stars || 0).toFixed(2)} stars${difficulty.pending ? ' (pending)' : ''}`} style={{ width: '8px', height: '4px', borderRadius: '3px', background: difficulty.pending ? 'transparent' : color, border: `1px solid ${color}` }} />;
+        })}
+        {difficulties.length > 8 && <span style={{ fontSize: '9px', lineHeight: '5px', color: 'var(--text-muted)' }}>+{difficulties.length - 8}</span>}
+      </span>}
+    </span>
+  );
+}
+
+function SortableHeader({ label, shortLabel = label, onSort, dragProps }) {
+  return (
+    <th onClick={onSort} className="sortable-header" title={label} aria-label={`Sort by ${label}`} style={{ cursor: 'pointer', ...dragProps?.style }} {...dragProps}>
       <span className="sortable-header-content">
-        <span>{label}</span>
+        <span><span className="header-label-full">{label}</span><span className="header-label-short">{shortLabel}</span></span>
         <ArrowUpDown size={12} />
       </span>
     </th>
@@ -171,6 +188,8 @@ export default function RequestsTable({
   onUpdateRequest,
   onBulkUpdateStatus,
   isBulkStatusUpdating = false,
+  onBulkRefreshDates,
+  isBulkDateRefreshing = false,
   onBulkUpdatePriority,
   onBulkUpdateCategory,
   onBulkAddTags,
@@ -190,9 +209,33 @@ export default function RequestsTable({
   const [tagFilter, setTagFilter] = useState('');
   const [selectedIds, setSelectedIds] = useState([]);
   const [bulkTags, setBulkTags] = useState([]);
+  const [isBulkTagsOpen, setIsBulkTagsOpen] = useState(false);
+  const [isWindowMaximized, setIsWindowMaximized] = useState(false);
+  const columnStorageKey = `request-columns:${activeCategoryDefinition?.id || 'all'}`;
+  const columnOrderStorageKey = `${columnStorageKey}:order`;
+  const [visibleColumns, setVisibleColumns] = useState(() => defaultVisibleColumns(activeCategoryDefinition));
+  const [columnOrder, setColumnOrder] = useState(() => normalizeColumnOrder());
+  const [draggedColumn, setDraggedColumn] = useState(null);
   const tableContainerRef = useRef(null);
   const scrollFrameRef = useRef(null);
   const [virtualViewport, setVirtualViewport] = useState({ scrollTop: 0, height: 600 });
+
+  useEffect(() => {
+    const controls = window.electronAPI?.windowControls;
+    let isActive = true;
+
+    void controls?.isMaximized?.().then(isMaximized => {
+      if (isActive) setIsWindowMaximized(Boolean(isMaximized));
+    });
+    const removeMaximizedListener = controls?.onMaximizedChange?.(isMaximized => {
+      setIsWindowMaximized(Boolean(isMaximized));
+    });
+
+    return () => {
+      isActive = false;
+      removeMaximizedListener?.();
+    };
+  }, []);
   
   const toggleSort = (field) => {
     if (sortBy === field) {
@@ -245,16 +288,7 @@ export default function RequestsTable({
 
     // Search filter
     if (searchTerm.trim()) {
-      const term = searchTerm.toLowerCase();
-      result = result.filter(r => 
-        (r.title && r.title.toLowerCase().includes(term)) ||
-        (r.artist && r.artist.toLowerCase().includes(term)) ||
-        (r.creator && r.creator.toLowerCase().includes(term)) ||
-        (r.requester_username && r.requester_username.toLowerCase().includes(term)) ||
-        (r.notes && r.notes.toLowerCase().includes(term)) ||
-        (r.tags && r.tags.some(t => t.toLowerCase().includes(term))) ||
-        (r.beatmapset_id && r.beatmapset_id.toString().includes(term))
-      );
+      result = result.filter(r => requestMatchesSearch(r, searchTerm));
     }
 
     // Category filter (Left Sidebar navigation)
@@ -388,14 +422,130 @@ export default function RequestsTable({
     event.target.value = '';
   };
 
-  // Helper to determine which columns to show based on active category
-  const getCategoryColumns = () => ({
-    showTags: activeCategoryDefinition?.view_type === 'tagged',
-    showModes: activeCategoryDefinition?.view_type === 'guest_difficulties' || activeCategoryDefinition?.system_key === 'guest_difficulties',
+  const dismissBulkToolbar = () => {
+    setSelectedIds([]);
+    setBulkTags([]);
+    setIsBulkTagsOpen(false);
+  };
+
+  useEffect(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(columnStorageKey));
+      const storedOrder = JSON.parse(localStorage.getItem(columnOrderStorageKey));
+      setVisibleColumns(Array.isArray(stored) ? new Set(stored) : defaultVisibleColumns(activeCategoryDefinition));
+      setColumnOrder(normalizeColumnOrder(storedOrder));
+    } catch {
+      setVisibleColumns(defaultVisibleColumns(activeCategoryDefinition));
+      setColumnOrder(normalizeColumnOrder());
+    }
+  }, [columnOrderStorageKey, columnStorageKey, activeCategoryDefinition]);
+
+  const setColumnVisible = (key, visible) => {
+    setVisibleColumns(current => {
+      const next = new Set(current);
+      if (visible) next.add(key); else next.delete(key);
+      localStorage.setItem(columnStorageKey, JSON.stringify([...next]));
+      return next;
+    });
+  };
+
+  const reorderColumns = (sourceKey, targetKey) => {
+    setColumnOrder(current => {
+      const next = moveColumn(current, sourceKey, targetKey);
+      localStorage.setItem(columnOrderStorageKey, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const visibleDataColumns = columnOrder.filter(key => key === 'song' || visibleColumns.has(key));
+  const showTags = visibleDataColumns.includes('tags');
+  const showModes = visibleDataColumns.includes('modes');
+  const showCover = visibleDataColumns.includes('cover');
+  const showBeatmapStatus = visibleDataColumns.includes('beatmap_status');
+  const showRequestStatus = visibleDataColumns.includes('request_status');
+  const showPriority = visibleDataColumns.includes('priority');
+  const showDeadline = visibleDataColumns.includes('deadline');
+  const showNotes = visibleDataColumns.includes('notes');
+  const showAdded = visibleDataColumns.includes('added');
+  const showActions = visibleDataColumns.includes('actions');
+  const columnCount = 1 + visibleDataColumns.length;
+
+  const renderColumnDefinition = (key) => <col key={key} className={requestColumnClassName(key)} />;
+
+  const getColumnDragProps = (key) => ({
+    draggable: true,
+    onDragStart: (event) => {
+      setDraggedColumn(key);
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', key);
+    },
+    onDragOver: (event) => event.preventDefault(),
+    onDrop: (event) => {
+      event.preventDefault();
+      const sourceKey = draggedColumn || event.dataTransfer.getData('text/plain');
+      if (sourceKey) reorderColumns(sourceKey, key);
+      setDraggedColumn(null);
+    },
+    onDragEnd: () => setDraggedColumn(null),
+    style: { cursor: draggedColumn === key ? 'grabbing' : 'grab', opacity: draggedColumn === key ? 0.55 : 1 },
   });
 
-  const { showTags, showModes } = getCategoryColumns();
-  const columnCount = 10 + Number(showTags) + Number(showModes);
+  const renderColumnHeader = (key) => {
+    switch (key) {
+      case 'cover': return <th key={key} {...getColumnDragProps(key)}>Cover</th>;
+      case 'song': return <SortableHeader key={key} label="Song / Artist" onSort={() => toggleSort('title')} dragProps={getColumnDragProps(key)} />;
+      case 'tags': return <th key={key} {...getColumnDragProps(key)}>Tags</th>;
+      case 'modes': return <th key={key} {...getColumnDragProps(key)}>Gamemode</th>;
+      case 'beatmap_status': return <SortableHeader key={key} label="Beatmap Status" shortLabel="B. Status" onSort={() => toggleSort('ranked_status')} dragProps={getColumnDragProps(key)} />;
+      case 'request_status': return <SortableHeader key={key} label="Request Status" shortLabel="Status" onSort={() => toggleSort('request_status')} dragProps={getColumnDragProps(key)} />;
+      case 'priority': return <SortableHeader key={key} label="Priority" shortLabel="Prio" onSort={() => toggleSort('priority')} dragProps={getColumnDragProps(key)} />;
+      case 'deadline': return <SortableHeader key={key} label="Deadline" shortLabel="Due" onSort={() => toggleSort('deadline')} dragProps={getColumnDragProps(key)} />;
+      case 'notes': return <th key={key} {...getColumnDragProps(key)}>Notes</th>;
+      case 'added': return <SortableHeader key={key} label="Added" onSort={() => toggleSort('added_date')} dragProps={getColumnDragProps(key)} />;
+      case 'actions': return <th key={key} {...getColumnDragProps(key)} style={{ textAlign: 'right', ...getColumnDragProps(key).style }}>Actions</th>;
+      default: return null;
+    }
+  };
+
+  const renderRequestColumn = (req, key, { deadlineInfo, isMetadataPending, metadataFailed }) => {
+    switch (key) {
+      case 'cover':
+        return <td key={key}><img className="request-cover" src={req.local_cover_path} alt="cover" width={56} height={32} loading="lazy" decoding="async" onError={(event) => { event.currentTarget.src = '/uploads/covers/default.jpg'; }} /></td>;
+      case 'song':
+        return <td key={key} className="request-song-cell">
+          <div className="request-song-content">
+            <div className="request-title-line">
+              <span className="request-title" title={req.title}>{req.title || (isMetadataPending ? 'Syncing metadata...' : `Beatmapset ${req.beatmapset_id}`)}</span>
+              {req.priority === 'High' && <span className="request-priority-dot" title="High Priority" aria-label="High Priority" />}
+              {showModes ? <GuestDifficultySummary stars={req.my_guest_highest_stars} difficulties={req.my_guest_difficulties} /> : <StarRatingBadge stars={req.highest_stars} />}
+            </div>
+            <div className="request-song-subtitle">
+              {isMetadataPending && !req.artist ? 'Background sync in progress' : <><span className="request-artist" title={req.artist || 'Unknown artist'}>{req.artist || 'Unknown artist'}</span><span className="request-creator" title={req.creator || 'Unknown creator'}>{req.creator || 'Unknown creator'}</span></>}
+            </div>
+          </div>
+        </td>;
+      case 'tags':
+        return <td key={key}>{req.tags?.length ? <div className="request-tags">{req.tags.slice(0, 2).map(tag => <span key={tag} className="tag-badge" title={tag}><Tag size={9} />{tag}</span>)}{req.tags.length > 2 && <span className="request-tags-more">+{req.tags.length - 2}</span>}</div> : <span className="request-empty">—</span>}</td>;
+      case 'modes':
+        return <td key={key}><div className="request-modes">{(req.gamemodes || []).length > 0 ? req.gamemodes.map(mode => <span key={mode} className="badge badge-pending">{mode === 'fruits' ? 'catch' : mode}</span>) : <span className="request-empty">—</span>}</div></td>;
+      case 'beatmap_status':
+        return <td key={key}><span title={metadataFailed ? req.metadata_sync_error : undefined} className={`badge request-beatmap-badge badge-${metadataFailed ? 'cancelled' : isMetadataPending ? 'pending' : (req.ranked_status || 'Manual').toLowerCase()}`}>{isMetadataPending && <RefreshCw size={10} className="spin" style={{ marginRight: '4px' }} />}{metadataFailed && <AlertCircle size={10} style={{ marginRight: '4px' }} />}{metadataFailed ? 'Sync failed' : isMetadataPending ? 'Syncing' : (req.ranked_status || 'Manual')}</span></td>;
+      case 'request_status':
+        return <td key={key} onClick={(event) => event.stopPropagation()}><div className={`status-badge-select request-table-select badge badge-${req.request_status.toLowerCase()}`}><select value={req.request_status} onChange={(event) => onUpdateRequest(req.id, { request_status: event.target.value })} className={`status-badge-inner badge badge-${req.request_status.toLowerCase()}`} aria-label="Request status"><option className="status-option-accepted" value="Accepted">Accepted</option><option className="status-option-considering" value="Considering">Considering</option><option className="status-option-working" value="Working">Working</option><option className="status-option-completed" value="Completed">Completed</option><option className="status-option-cancelled" value="Cancelled">Cancelled</option></select><div className="request-select-chevron"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg></div></div></td>;
+      case 'priority':
+        return <td key={key} onClick={(event) => event.stopPropagation()}><div className={`status-badge-select request-table-select badge badge-priority-${(req.priority || 'Low').toLowerCase()}`}><select value={req.priority || 'Low'} onChange={(event) => onUpdateRequest(req.id, { priority: event.target.value })} className={`status-badge-inner badge badge-priority-${(req.priority || 'Low').toLowerCase()}`} aria-label="Priority"><option value="Low">Low</option><option value="Medium">Medium</option><option value="High">High</option></select><div className="request-select-chevron"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg></div></div></td>;
+      case 'deadline':
+        return <td key={key}>{deadlineInfo ? <span className="request-deadline" style={{ color: deadlineInfo.color }}><Calendar size={12} />{deadlineInfo.text}</span> : <span className="request-empty">—</span>}</td>;
+      case 'notes':
+        return <td key={key} className="request-notes-cell" title={req.notes || undefined} style={{ color: req.notes ? 'var(--text-main)' : 'var(--text-muted)' }}><span className="request-notes">{req.notes || '—'}</span></td>;
+      case 'added':
+        return <td key={key} className="request-added-date">{req.added_date ? new Date(req.added_date).toLocaleDateString() : '—'}</td>;
+      case 'actions':
+        return <td key={key} onClick={(event) => event.stopPropagation()} style={{ textAlign: 'right' }}><div className="request-row-actions"><button onClick={() => onOpenRequest(req)} title="Open Details" style={{ padding: '6px', borderRadius: '4px', color: 'var(--text-muted)', cursor: 'pointer' }} onMouseEnter={(event) => { event.currentTarget.style.backgroundColor = 'var(--hover-bg)'; }} onMouseLeave={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }}><Edit3 size={14} /></button><button onClick={async () => { const confirmed = await onRequestConfirmation({ title: 'Delete request?', message: 'This request and its associated categories will be permanently deleted.', confirmLabel: 'Delete request' }); if (confirmed) onDeleteRequest(req.id); }} title="Delete" style={{ padding: '6px', borderRadius: '4px', color: 'var(--text-muted)', cursor: 'pointer' }} onMouseEnter={(event) => { event.currentTarget.style.backgroundColor = 'rgba(231, 76, 60, 0.1)'; event.currentTarget.style.color = 'var(--priority-high)'; }} onMouseLeave={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; event.currentTarget.style.color = 'var(--text-muted)'; }}><Trash2 size={14} /></button></div></td>;
+      default:
+        return null;
+    }
+  };
 
   return (
     <div style={{ padding: '0 24px 24px 24px', display: 'flex', flexDirection: 'column', gap: '16px', position: 'relative' }}>
@@ -422,11 +572,12 @@ export default function RequestsTable({
           <input
             type="text"
             className="input-text"
-            placeholder="Search song, artist, tags, requester..."
+            placeholder={'Search or filter: creator="Mahiru Shiina"'}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             style={{ paddingLeft: '32px', fontSize: '13px' }}
           />
+          <span title={'Examples: creator="Mahiru Shiina" tag=collab mapstatus=Ranked added>=2026-01-01 stars>=5 mode=mania keys=4'} style={{ position: 'absolute', right: searchTerm ? '34px' : '10px', top: '9px', color: 'var(--text-muted)', fontSize: '11px', cursor: 'help' }}>?</span>
           {searchTerm && (
             <button 
               onClick={() => setSearchTerm('')} 
@@ -488,6 +639,22 @@ export default function RequestsTable({
             Clear Filters
           </button>
         )}
+        <details style={{ position: 'relative' }}>
+          <summary className="btn-secondary" style={{ listStyle: 'none', padding: '6px 12px', fontSize: '12px', cursor: 'pointer' }}>Columns</summary>
+          <div style={{ position: 'absolute', right: 0, zIndex: 30, minWidth: '190px', marginTop: '5px', padding: '10px', display: 'grid', gap: '7px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '8px', boxShadow: 'var(--shadow-lg)' }}>
+            <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Drag table headers to reorder columns</span>
+            {columnOrder.map(key => {
+              const column = REQUEST_COLUMNS.find(item => item.key === key);
+              return <label
+                key={key}
+                style={{ display: 'flex', gap: '7px', alignItems: 'center', fontSize: '12px', cursor: 'pointer' }}
+              >
+                <input type="checkbox" disabled={column.required} checked={column.required || visibleColumns.has(key)} onChange={event => setColumnVisible(key, event.target.checked)} />
+                {column.label}
+              </label>;
+            })}
+          </div>
+        </details>
       </div>
 
       {/* Main Table Container */}
@@ -507,17 +674,7 @@ export default function RequestsTable({
           >
             <colgroup>
               <col className="request-col-select" />
-              <col className="request-col-cover" />
-              <col className="request-col-song" />
-              {showTags && <col className="request-col-tags" />}
-              {showModes && <col className="request-col-modes" />}
-              <col className="request-col-beatmap-status" />
-              <col className="request-col-request-status" />
-              <col className="request-col-priority" />
-              <col className="request-col-deadline" />
-              <col className="request-col-notes" />
-              <col className="request-col-added" />
-              <col className="request-col-actions" />
+              {visibleDataColumns.map(renderColumnDefinition)}
             </colgroup>
             <thead>
               <tr>
@@ -529,19 +686,7 @@ export default function RequestsTable({
                     style={{ cursor: 'pointer' }}
                   />
                 </th>
-                <th>Cover</th>
-                <SortableHeader label="Song / Artist" onSort={() => toggleSort('title')} />
-                {showTags && (
-                  <th>Tags</th>
-                )}
-                {showModes && <th>Gamemode</th>}
-                <SortableHeader label="Beatmap Status" onSort={() => toggleSort('ranked_status')} />
-                <SortableHeader label="Request Status" onSort={() => toggleSort('request_status')} />
-                <SortableHeader label="Priority" onSort={() => toggleSort('priority')} />
-                <SortableHeader label="Deadline" onSort={() => toggleSort('deadline')} />
-                <th>Notes</th>
-                <SortableHeader label="Added" onSort={() => toggleSort('added_date')} />
-                <th style={{ textAlign: 'right' }}>Actions</th>
+                {visibleDataColumns.map(renderColumnHeader)}
               </tr>
             </thead>
             <tbody>
@@ -575,8 +720,11 @@ export default function RequestsTable({
                       />
                     </td>
 
+                    {visibleDataColumns.map(key => renderRequestColumn(req, key, { deadlineInfo, isMetadataPending, metadataFailed }))}
+
+                    {false && <>
                     {/* Cover Photo */}
-                    <td>
+                    {showCover && <td>
                       <img
                         className="request-cover"
                         src={req.local_cover_path} 
@@ -589,7 +737,7 @@ export default function RequestsTable({
                           e.target.src = '/uploads/covers/default.jpg';
                         }}
                       />
-                    </td>
+                    </td>}
 
                     {/* Metadata (Title + Artist + Creator) */}
                     <td className="request-song-cell">
@@ -601,7 +749,9 @@ export default function RequestsTable({
                           >
                             {req.title || (isMetadataPending ? 'Syncing metadata...' : `Beatmapset ${req.beatmapset_id}`)}
                           </span>
-                          <StarRatingBadge stars={showModes ? req.my_guest_highest_stars : req.highest_stars} />
+                          {showModes
+                            ? <GuestDifficultySummary stars={req.my_guest_highest_stars} difficulties={req.my_guest_difficulties} />
+                            : <StarRatingBadge stars={req.highest_stars} />}
                           {req.priority === 'High' && (
                             <span style={{ 
                               width: '6px', 
@@ -666,16 +816,16 @@ export default function RequestsTable({
                     )}
 
                     {/* Beatmap Status */}
-                    <td>
+                    {showBeatmapStatus && <td>
                       <span title={metadataFailed ? req.metadata_sync_error : undefined} className={`badge request-beatmap-badge badge-${metadataFailed ? 'cancelled' : isMetadataPending ? 'pending' : (req.ranked_status || 'Manual').toLowerCase()}`}>
                         {isMetadataPending && <RefreshCw size={10} className="spin" style={{ marginRight: '4px' }} />}
                         {metadataFailed && <AlertCircle size={10} style={{ marginRight: '4px' }} />}
                         {metadataFailed ? 'Sync failed' : isMetadataPending ? 'Syncing' : (req.ranked_status || 'Manual')}
                       </span>
-                    </td>
+                    </td>}
 
 {/* Inline Request Status Selector */}
-                    <td onClick={(e) => e.stopPropagation()}>
+                    {showRequestStatus && <td onClick={(e) => e.stopPropagation()}>
                       <div className={`status-badge-select request-table-select badge badge-${req.request_status.toLowerCase()}`}>
                         <select
                           value={req.request_status}
@@ -707,10 +857,10 @@ export default function RequestsTable({
                           </svg>
                         </div>
                       </div>
-                    </td>
+                    </td>}
 
                     {/* Inline Priority Selector */}
-                    <td onClick={(e) => e.stopPropagation()}>
+                    {showPriority && <td onClick={(e) => e.stopPropagation()}>
                       <div className={`status-badge-select request-table-select badge badge-priority-${(req.priority || 'Low').toLowerCase()}`}>
                         <select
                           value={req.priority || 'Low'}
@@ -740,10 +890,10 @@ export default function RequestsTable({
                           </svg>
                         </div>
                       </div>
-                    </td>
+                    </td>}
 
                     {/* Deadline */}
-                    <td>
+                    {showDeadline && <td>
                       {deadlineInfo ? (
                         <span className="request-deadline" style={{ color: deadlineInfo.color }}>
                           <Calendar size={12} />
@@ -752,10 +902,10 @@ export default function RequestsTable({
                       ) : (
                         <span style={{ color: 'var(--text-muted)' }}>—</span>
                       )}
-                    </td>
+                    </td>}
 
                     {/* Notes */}
-                    <td
+                    {showNotes && <td
                       className="request-notes-cell"
                       title={req.notes || undefined}
                       style={{
@@ -765,15 +915,15 @@ export default function RequestsTable({
                       <span className="request-notes">
                         {req.notes || '—'}
                       </span>
-                    </td>
+                    </td>}
 
                     {/* Added Date */}
-                    <td className="request-added-date">
+                    {showAdded && <td className="request-added-date">
                       {req.added_date ? new Date(req.added_date).toLocaleDateString() : '—'}
-                    </td>
+                    </td>}
 
                     {/* Actions dropdown/button */}
-                    <td onClick={(e) => e.stopPropagation()} style={{ textAlign: 'right' }}>
+                    {showActions && <td onClick={(e) => e.stopPropagation()} style={{ textAlign: 'right' }}>
                       <div className="request-row-actions">
                         <button 
                           onClick={() => onOpenRequest(req)} 
@@ -807,7 +957,8 @@ export default function RequestsTable({
                           <Trash2 size={14} />
                         </button>
                       </div>
-                    </td>
+                    </td>}
+                    </>}
 
                   </tr>
                 );
@@ -824,11 +975,8 @@ export default function RequestsTable({
 
       {/* Sticky Bulk Action Bar */}
       {selectedIds.length > 0 && (
-        <div style={{
-          position: 'fixed',
-          bottom: '24px',
-          left: '50%',
-          transform: 'translateX(-50%)',
+        <div className={`bulk-toolbar-shell${isWindowMaximized ? ' bulk-toolbar-shell-maximized' : ''}`}>
+          <div style={{
           backgroundColor: 'var(--bg-card)',
           border: '1px solid var(--osu-pink)',
           boxShadow: 'var(--shadow-lg)',
@@ -837,21 +985,35 @@ export default function RequestsTable({
           display: 'flex',
           alignItems: 'center',
           gap: '10px',
-          flexWrap: 'nowrap',
-          maxWidth: 'calc(100vw - 48px)',
-          whiteSpace: 'nowrap',
-          overflowX: 'auto',
-          zIndex: 100,
         }} className="bulk-action-bar">
-          <span style={{ fontSize: '13px', fontWeight: '600' }}>
-            {selectedIds.length} requests selected{isBulkStatusUpdating ? ' · updating...' : ''}
+          <span className="bulk-selection-count" style={{ fontSize: '13px', fontWeight: '600' }}>
+            {selectedIds.length} request{selectedIds.length === 1 ? '' : 's'} selected{isBulkStatusUpdating ? ' · updating...' : ''}
           </span>
           
           <div style={{ width: '1px', height: '24px', backgroundColor: 'var(--border)' }} />
 
+          <button
+            type="button"
+            className="btn-secondary bulk-refresh-button"
+            disabled={isBulkDateRefreshing}
+            onClick={async () => {
+              const ids = [...selectedIds];
+              const confirmed = await onRequestConfirmation({
+                title: `Refresh dates for ${ids.length} requests?`,
+                message: 'This replaces the Date Added value on selected osu!-linked requests. Manual requests will be skipped.',
+                confirmLabel: 'Refresh dates',
+              });
+              if (confirmed && await onBulkRefreshDates?.(ids)) dismissBulkToolbar();
+            }}
+            style={{ padding: '6px 9px', fontSize: '12px', flexShrink: 0 }}
+          >
+            <RefreshCw size={12} className={isBulkDateRefreshing ? 'spin' : undefined} style={{ marginRight: '4px' }} />
+            <span className="bulk-refresh-label">{isBulkDateRefreshing ? 'Refreshing...' : 'Refresh dates'}</span>
+          </button>
+
           {/* Change Status Dropdown */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Status:</span>
+          <div className="bulk-toolbar-control" style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+            <span className="bulk-toolbar-label" style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Status:</span>
             <select
               onChange={(e) => {
                 if (e.target.value) {
@@ -863,10 +1025,10 @@ export default function RequestsTable({
                 }
               }}
               disabled={isBulkStatusUpdating}
-              className="input-text"
+              className="input-text bulk-toolbar-select"
               style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
             >
-              <option value="">Change Status...</option>
+              <option value="">Change to...</option>
               <option value="Accepted">Accepted</option>
               <option value="Considering">Considering</option>
               <option value="Working">Working</option>
@@ -876,21 +1038,21 @@ export default function RequestsTable({
           </div>
 
           {/* Change Priority Dropdown */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Priority:</span>
+          <div className="bulk-toolbar-control" style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+            <span className="bulk-toolbar-label" style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Priority:</span>
             <select
               onChange={(e) => {
                 if (e.target.value) {
                   onBulkUpdatePriority(selectedIds, e.target.value);
-                  setSelectedIds([]);
+                  dismissBulkToolbar();
                   e.target.value = '';
                 }
               }}
               disabled={isBulkStatusUpdating}
-              className="input-text"
+              className="input-text bulk-toolbar-select"
               style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
             >
-              <option value="">Change Priority...</option>
+              <option value="">Change to...</option>
               <option value="Low">Low</option>
               <option value="Medium">Medium</option>
               <option value="High">High</option>
@@ -898,12 +1060,12 @@ export default function RequestsTable({
           </div>
 
           {/* Change Request Type */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Type:</span>
+          <div className="bulk-toolbar-control" style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+            <span className="bulk-toolbar-label" style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Type:</span>
             <select
               onChange={(e) => handleBulkCategoryAction(e, 'move')}
               disabled={isBulkStatusUpdating}
-              className="input-text"
+              className="input-text bulk-toolbar-select"
               style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
             >
               <option value="">Move to...</option>
@@ -912,7 +1074,7 @@ export default function RequestsTable({
             <select
               onChange={(e) => handleBulkCategoryAction(e, 'add')}
               disabled={isBulkStatusUpdating}
-              className="input-text"
+              className="input-text bulk-toolbar-select"
               style={{ padding: '4px 8px', fontSize: '12px', width: '105px' }}
             >
               <option value="">Add to...</option>
@@ -920,25 +1082,31 @@ export default function RequestsTable({
             </select>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: '6px', flexShrink: 0, minWidth: '230px' }}>
-            <div style={{ minWidth: '160px', flex: 1 }}>
-              <TagInput value={bulkTags} onChange={setBulkTags} suggestions={tagSuggestions} placeholder="Add tags…" compact />
-            </div>
+          <div style={{ position: 'relative', flexShrink: 0 }}>
             <button
               type="button"
-              className="btn-secondary"
-              disabled={isBulkStatusUpdating || bulkTags.length === 0}
-              onClick={async () => {
-                const success = await onBulkAddTags(selectedIds, bulkTags);
-                if (success) {
-                  setBulkTags([]);
-                  setSelectedIds([]);
-                }
-              }}
+              className="btn-secondary bulk-tags-button"
+              disabled={isBulkStatusUpdating}
+              onClick={() => setIsBulkTagsOpen(open => !open)}
               style={{ padding: '6px 9px', fontSize: '12px' }}
             >
-              Add tags
+              <span className="bulk-tags-label">Add tags{bulkTags.length ? ` (${bulkTags.length})` : ''}</span>
             </button>
+            {isBulkTagsOpen && (
+              <div className="bulk-tags-popover" style={{ position: 'absolute', right: 0, bottom: 'calc(100% + 8px)', zIndex: 130, padding: '10px', display: 'grid', gap: '8px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '8px', boxShadow: 'var(--shadow-lg)' }}>
+                <TagInput className="bulk-tag-editor" value={bulkTags} onChange={setBulkTags} suggestions={tagSuggestions} placeholder="Add tags..." compact />
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '6px' }}>
+                  <button type="button" className="btn-secondary" onClick={() => { setBulkTags([]); setIsBulkTagsOpen(false); }} style={{ padding: '5px 8px', fontSize: '11px' }}>Cancel</button>
+                  <button type="button" className="btn-primary" disabled={bulkTags.length === 0} onClick={async () => {
+                    const success = await onBulkAddTags(selectedIds, bulkTags);
+                    if (success) {
+                      setBulkTags([]);
+                      dismissBulkToolbar();
+                    }
+                  }} style={{ padding: '5px 8px', fontSize: '11px' }}>Add tags</button>
+                </div>
+              </div>
+            )}
           </div>
 
           <button
@@ -951,10 +1119,10 @@ export default function RequestsTable({
               });
               if (confirmed) {
                 onBulkDelete(selectedIds);
-                setSelectedIds([]);
+                dismissBulkToolbar();
               }
             }}
-            className="btn-secondary"
+            className="btn-secondary bulk-delete-button"
             style={{ 
               padding: '6px 10px',
               fontSize: '12px', 
@@ -965,12 +1133,16 @@ export default function RequestsTable({
             }}
           >
             <Trash2 size={12} style={{ marginRight: '4px' }} />
-            Delete Selected
+            <span className="bulk-delete-label">Delete Selected</span><span className="bulk-delete-label-compact">Delete</span>
           </button>
 
+          </div>
           <button
-            onClick={() => setSelectedIds([])}
-            style={{ color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', flexShrink: 0 }}
+            type="button"
+            aria-label="Close selection toolbar"
+            title="Close selection toolbar"
+            onClick={dismissBulkToolbar}
+            className="bulk-toolbar-close"
           >
             <X size={16} />
           </button>

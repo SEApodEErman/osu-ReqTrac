@@ -1,5 +1,6 @@
 import React from 'react';
 import { countryCodeToFlag } from '../utils/countryFlag';
+import { getRecentDashboardRequests } from '../utils/dashboard';
 import { 
   FileText, 
   Play, 
@@ -12,8 +13,18 @@ import {
   Calendar
 } from 'lucide-react';
 
-export default function Dashboard({ statsData, requestsList, onOpenRequest, connectedAccount }) {
-  const { overview = {}, stats = {}, yearSummary = [], requesterBreakdown = [] } = statsData || {};
+export default function Dashboard({
+  statsData,
+  statsLoading = false,
+  requestsList,
+  onOpenRequest,
+  connectedAccount,
+  categoryDefinitions = [],
+  selectedCategoryId = 'all',
+  onCategoryChange,
+}) {
+  const displayedStats = statsLoading ? {} : statsData;
+  const { overview = {}, stats = {}, yearSummary = [], requesterBreakdown = [] } = displayedStats || {};
   const connectedUsername = connectedAccount?.username || null;
 
   // Exclude the connected user from the breakdown (dashboard is for their own use)
@@ -31,10 +42,8 @@ export default function Dashboard({ statsData, requestsList, onOpenRequest, conn
     ? Math.max(...filteredBreakdown.map(r => r.count))
     : 1;
   
-  // Sort requests by added_date descending for recently added (max 5)
-  const recentlyAdded = [...requestsList]
-    .sort((a, b) => new Date(b.added_date) - new Date(a.added_date))
-    .slice(0, 5);
+  // Scope recent requests to the same category as the dashboard statistics.
+  const recentlyAdded = getRecentDashboardRequests(requestsList, selectedCategoryId);
 
   // SVG Chart Calculation
   const maxCompleted = yearSummary.length > 0 
@@ -49,17 +58,42 @@ export default function Dashboard({ statsData, requestsList, onOpenRequest, conn
     : 40;
 
   return (
-    <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
+    <div
+      aria-busy={statsLoading}
+      style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '24px' }}
+    >
       
       {/* Welcome Header */}
-      <div>
-        <h1 style={{ fontSize: '24px', fontWeight: '700', fontFamily: 'var(--font-display)', marginBottom: '4px' }}>
-          Overview
-        </h1>
-        <p style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
-          Welcome back! Here is a summary of your osu! request tracking workspace.
-        </p>
+      <div className="dashboard-header">
+        <div>
+          <h1 style={{ fontSize: '24px', fontWeight: '700', fontFamily: 'var(--font-display)', marginBottom: '4px' }}>
+            Overview
+          </h1>
+          <p style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
+            Welcome back! Here is a summary of your osu! request tracking workspace.
+          </p>
+        </div>
+        <label className="dashboard-category-control">
+          <span>Category</span>
+          <select
+            className="input-text dashboard-category-select"
+            value={selectedCategoryId}
+            onChange={event => onCategoryChange?.(event.target.value)}
+            aria-label="Dashboard statistics category"
+          >
+            <option value="all">All</option>
+            {categoryDefinitions.map(category => (
+              <option key={category.id} value={String(category.id)}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
+
+      {statsLoading && (
+        <div className="dashboard-loading" role="status">Loading category statistics…</div>
+      )}
 
       {/* Grid of 4 Cards */}
       <div style={{

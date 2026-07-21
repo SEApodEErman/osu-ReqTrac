@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const {
   BACKUP_VERSION,
+  getCoverStorageUsage,
   readCoverFiles,
   validateBackup,
   writeCoverFiles
@@ -20,6 +21,7 @@ function completeBackup(overrides = {}) {
     beatmap_cache: [],
     beatmap_metadata_sync: [],
     users_cache: [],
+    user_username_history: [],
     history: [],
     tags: [],
     request_tags: [],
@@ -44,6 +46,7 @@ test('validateBackup rejects partial backups and normalizes optional legacy data
   });
 
   assert.deepEqual(backup.beatmap_metadata_sync, []);
+  assert.deepEqual(backup.unavailable_osu_users, []);
   assert.deepEqual(backup.cover_files, []);
   assert.deepEqual(backup.sqlite_sequence, []);
 });
@@ -63,5 +66,16 @@ test('cover files round-trip and stale covers are removed', async () => {
   await writeCoverFiles(coversDir, [{ filename: '10.jpg', data: Buffer.from('new-cover').toString('base64') }]);
   assert.equal(await fs.promises.readFile(path.join(coversDir, '10.jpg'), 'utf8'), 'new-cover');
   await assert.rejects(fs.promises.access(path.join(coversDir, 'stale.jpg')));
+  await fs.promises.rm(coversDir, { recursive: true, force: true });
+});
+
+test('getCoverStorageUsage totals cached cover files only', async () => {
+  const coversDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'reqtrac-cover-usage-'));
+  await fs.promises.writeFile(path.join(coversDir, '10.jpg'), Buffer.alloc(10));
+  await fs.promises.writeFile(path.join(coversDir, '20.jpeg'), Buffer.alloc(20));
+  await fs.promises.writeFile(path.join(coversDir, 'default.jpg'), Buffer.alloc(40));
+  await fs.promises.writeFile(path.join(coversDir, 'notes.txt'), Buffer.alloc(80));
+
+  assert.deepEqual(await getCoverStorageUsage(coversDir), { bytes: 30, fileCount: 2 });
   await fs.promises.rm(coversDir, { recursive: true, force: true });
 });

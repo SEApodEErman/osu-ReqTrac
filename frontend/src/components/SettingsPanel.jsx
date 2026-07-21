@@ -9,6 +9,7 @@ import {
   Moon,
   Sun,
   Monitor,
+  HardDrive,
   AlertCircle,
   CheckCircle,
   RefreshCw,
@@ -16,7 +17,16 @@ import {
 } from 'lucide-react';
 import SpreadsheetImportModal from './SpreadsheetImportModal';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / (1024 ** unitIndex);
+  const fractionDigits = unitIndex === 0 || value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(fractionDigits)} ${units[unitIndex]}`;
+}
 
 export default function SettingsPanel({ 
   settingsData, 
@@ -123,6 +133,8 @@ export default function SettingsPanel({
   const [isSpreadsheetImportOpen, setIsSpreadsheetImportOpen] = useState(false);
   const [metadataSyncStatus, setMetadataSyncStatus] = useState(null);
   const [isRetryingMetadata, setIsRetryingMetadata] = useState(false);
+  const [coverStorageUsage, setCoverStorageUsage] = useState(null);
+  const [coverStorageError, setCoverStorageError] = useState(false);
 
   // Google Sheets publishing state
   const [googleStatus, setGoogleStatus] = useState(null);
@@ -146,10 +158,23 @@ export default function SettingsPanel({
     }
   }, []);
 
+  const loadDataUsage = useCallback(async () => {
+    try {
+      const res = await fetch('/api/settings/data-usage');
+      if (!res.ok) throw new Error('Failed to load data usage.');
+      setCoverStorageUsage(await res.json());
+      setCoverStorageError(false);
+    } catch (e) {
+      console.error('Failed to load data usage:', e);
+      setCoverStorageError(true);
+    }
+  }, []);
+
   useEffect(() => {
     void loadGoogleStatus();
     void loadMetadataSyncStatus();
-  }, [loadGoogleStatus, loadMetadataSyncStatus]);
+    void loadDataUsage();
+  }, [loadDataUsage, loadGoogleStatus, loadMetadataSyncStatus]);
 
   const hasActiveMetadataSync = (metadataSyncStatus?.Pending || 0) + (metadataSyncStatus?.Processing || 0) > 0;
   useEffect(() => {
@@ -350,6 +375,7 @@ export default function SettingsPanel({
     setIsDeletingAllData(true);
     try {
       await onDeleteAllData();
+      await loadDataUsage();
       setIsDeleteConfirmOpen(false);
       setDeleteConfirmationText('');
       onNotify('All local application data was deleted.', 'success');
@@ -398,7 +424,7 @@ export default function SettingsPanel({
           </form>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
             {[...allCategories].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id).map(category => (
-              <div key={category.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(160px, 1fr) auto auto', gap: '7px', alignItems: 'center', padding: '8px', border: '1px solid var(--border)', borderRadius: '7px', opacity: category.is_active ? 1 : 0.65 }}>
+              <div key={category.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(160px, 1fr) auto 86px', gap: '7px', alignItems: 'center', padding: '8px', border: '1px solid var(--border)', borderRadius: '7px', opacity: category.is_active ? 1 : 0.65 }}>
                 <form onSubmit={event => {
                   event.preventDefault();
                   const name = new FormData(event.currentTarget).get('name');
@@ -412,7 +438,7 @@ export default function SettingsPanel({
                   <button type="button" className="btn-secondary" disabled={!category.is_active} onClick={() => void moveCategory(category, 1)} aria-label={`Move ${category.name} down`}>↓</button>
                 </div>
                 {category.system_key ? (
-                  <span style={{ fontSize: '10px', color: 'var(--text-muted)', minWidth: '64px', textAlign: 'center' }}>Built-in</span>
+                  <span style={{ fontSize: '15px', fontWeight: '500', color: 'var(--text-muted)', width: '100%', textAlign: 'center' }}>Built-in</span>
                 ) : category.is_active ? (
                   <button type="button" className="btn-secondary" onClick={async () => {
                     const confirmed = await onRequestConfirmation({ title: `Archive ${category.name}?`, message: 'Existing requests keep this category, but it will be hidden from new selections.', confirmLabel: 'Archive' });
@@ -421,9 +447,9 @@ export default function SettingsPanel({
                     const result = await response.json();
                     if (!response.ok) return onNotify(result.error || 'Failed to archive category.', 'error');
                     await Promise.all([refreshCategories(), onCategoriesChanged()]);
-                  }}>Archive</button>
+                  }} style={{ width: '100%', justifyContent: 'center' }}>Archive</button>
                 ) : (
-                  <button type="button" className="btn-secondary" onClick={() => void updateCategory(category, { is_active: true })}>Restore</button>
+                  <button type="button" className="btn-secondary" onClick={() => void updateCategory(category, { is_active: true })} style={{ width: '100%', justifyContent: 'center' }}>Restore</button>
                 )}
               </div>
             ))}
@@ -781,6 +807,29 @@ export default function SettingsPanel({
               <Monitor size={14} style={{ marginRight: '6px' }} />
               <span>System</span>
             </button>
+          </div>
+        </div>
+
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <HardDrive size={18} style={{ color: 'var(--osu-pink)' }} />
+            Data Usage
+          </h3>
+          <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+            Storage used by beatmap covers downloaded for offline display.
+          </p>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', padding: '14px 16px', backgroundColor: 'var(--bg-app)', border: '1px solid var(--border)', borderRadius: '8px' }}>
+            <div>
+              <div style={{ fontSize: '13px', fontWeight: '600' }}>Cached covers</div>
+              {!coverStorageError && coverStorageUsage && (
+                <div style={{ marginTop: '3px', fontSize: '11px', color: 'var(--text-muted)' }}>
+                  {coverStorageUsage.coverCount} {coverStorageUsage.coverCount === 1 ? 'cover' : 'covers'}
+                </div>
+              )}
+            </div>
+            <div style={{ fontSize: '16px', fontWeight: '700', fontVariantNumeric: 'tabular-nums' }}>
+              {coverStorageError ? 'Unavailable' : coverStorageUsage ? formatBytes(coverStorageUsage.coverCacheBytes) : 'Calculating...'}
+            </div>
           </div>
         </div>
 

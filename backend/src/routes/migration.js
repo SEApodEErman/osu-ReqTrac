@@ -79,6 +79,8 @@ router.get('/export', async (req, res, next) => {
     const request_guest_difficulties = await db.all('SELECT * FROM request_guest_difficulties');
     const beatmap_cache = await db.all('SELECT * FROM beatmap_cache');
     const users_cache = await db.all('SELECT * FROM users_cache');
+    const user_username_history = await db.all('SELECT * FROM user_username_history');
+    const unavailable_osu_users = await db.all('SELECT * FROM unavailable_osu_users');
     const beatmap_metadata_sync = await db.all('SELECT * FROM beatmap_metadata_sync');
     const history = await db.all('SELECT * FROM history');
     const tags = await db.all('SELECT * FROM tags');
@@ -96,6 +98,8 @@ router.get('/export', async (req, res, next) => {
       request_guest_difficulties,
       beatmap_cache,
       users_cache,
+      user_username_history,
+      unavailable_osu_users,
       beatmap_metadata_sync,
       history,
       tags,
@@ -155,6 +159,8 @@ router.post('/import-json', async (req, res, next) => {
     await db.run('DELETE FROM requests');
     await db.run('DELETE FROM beatmap_cache');
     await db.run('DELETE FROM beatmap_metadata_sync');
+    await db.run('DELETE FROM user_username_history');
+    await db.run('DELETE FROM unavailable_osu_users');
     await db.run('DELETE FROM users_cache');
     await db.run('DELETE FROM tags');
     await db.run('DELETE FROM settings');
@@ -243,6 +249,20 @@ router.post('/import-json', async (req, res, next) => {
         INSERT INTO users_cache (id, username, avatar_url, country_code, last_updated)
         VALUES (?, ?, ?, ?, ?)
       `, [uc.id, uc.username, uc.avatar_url, uc.country_code, uc.last_updated]);
+    }
+
+    for (const identity of backup.user_username_history || []) {
+      await db.run(`
+        INSERT OR IGNORE INTO user_username_history (user_id, username, first_seen, last_seen)
+        VALUES (?, ?, ?, ?)
+      `, [identity.user_id, identity.username, identity.first_seen, identity.last_seen]);
+    }
+
+    for (const unavailableUser of backup.unavailable_osu_users || []) {
+      await db.run(`
+        INSERT OR IGNORE INTO unavailable_osu_users (user_id, username, first_failed_at)
+        VALUES (?, ?, ?)
+      `, [unavailableUser.user_id, unavailableUser.username, unavailableUser.first_failed_at]);
     }
 
     // Insert history

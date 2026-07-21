@@ -1,6 +1,13 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Plus, Link, AlertCircle, X, Loader2, UserCheck } from 'lucide-react';
 import TagInput from './TagInput';
+import {
+  addUploadedGuestDifficulty,
+  createManualGuestDifficulty,
+  findConnectedUserDifficulties,
+  isDifficultySelected,
+  isUploadedGuestDifficulty,
+} from '../utils/guestDifficulties';
 
 const OSU_BEATMAP_LINK_PATTERN = /osu\.ppy\.sh\/(?:beatmapsets|beatmaps|b)\/\d+/i;
 
@@ -15,6 +22,7 @@ export default function QuickAdd({
   onNotify,
   categoryDefinitions = [],
   tagSuggestions = [],
+  connectedAccount,
 }) {
   const [inputVal, setInputVal] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -31,7 +39,9 @@ export default function QuickAdd({
   const [priority, setPriority] = useState('Low');
   const [deadline, setDeadline] = useState('');
   const [tags, setTags] = useState([]);
-  const [guestDifficulties, setGuestDifficulties] = useState([{ gamemode: 'osu', difficulty_name: '', target_sr: '' }]);
+  const [guestDifficulties, setGuestDifficulties] = useState([createManualGuestDifficulty()]);
+  const [beatmapDifficulties, setBeatmapDifficulties] = useState([]);
+  const [selectedUploadedDifficultyId, setSelectedUploadedDifficultyId] = useState('');
   
   // Categories Checklist
   const getDefaultCategories = () => {
@@ -45,6 +55,9 @@ export default function QuickAdd({
   const [categories, setCategories] = useState(getDefaultCategories);
   const [otherText, setOtherText] = useState('');
   const isOsuBeatmapLink = OSU_BEATMAP_LINK_PATTERN.test(inputVal);
+  const hasGuestCategory = categoryDefinitions.some(category => category.system_key === 'guest_difficulties' && categories[category.id]);
+  const uploadedGuestDifficulties = guestDifficulties.filter(isUploadedGuestDifficulty);
+  const manualGuestDifficulties = guestDifficulties.filter(row => !isUploadedGuestDifficulty(row));
 
   useEffect(() => {
     setCategories(current => {
@@ -69,6 +82,13 @@ export default function QuickAdd({
         setTitle(data.title || '');
         setCreator(data.creator || '');
         setRequester(data.creatorUsername || '');
+        const difficulties = data.difficulties || [];
+        const ownedDifficulties = findConnectedUserDifficulties(difficulties, connectedAccount);
+        setBeatmapDifficulties(difficulties);
+        setGuestDifficulties(current => ownedDifficulties.reduce(
+          (rows, difficulty) => addUploadedGuestDifficulty(rows, difficulty),
+          current.filter(row => !isUploadedGuestDifficulty(row))
+        ));
       }
     } catch (e) {
       console.error('Failed to fetch beatmap info:', e);
@@ -83,6 +103,10 @@ export default function QuickAdd({
 
     if (OSU_BEATMAP_LINK_PATTERN.test(value)) {
       void fetchBeatmapInfo(value);
+    } else {
+      setBeatmapDifficulties([]);
+      setSelectedUploadedDifficultyId('');
+      setGuestDifficulties(rows => rows.filter(row => !isUploadedGuestDifficulty(row)));
     }
   };
 
@@ -110,7 +134,9 @@ export default function QuickAdd({
     setPriority('Low');
     setDeadline('');
     setTags([]);
-    setGuestDifficulties([{ gamemode: 'osu', difficulty_name: '', target_sr: '' }]);
+    setGuestDifficulties([createManualGuestDifficulty()]);
+    setBeatmapDifficulties([]);
+    setSelectedUploadedDifficultyId('');
     localStorage.setItem('lastRequestCategories', JSON.stringify(categories));
     setCategories(getDefaultCategories());
     setOtherText('');
@@ -169,6 +195,13 @@ export default function QuickAdd({
   const handleCancel = () => {
     resetForm();
     onToggle(false);
+  };
+
+  const addSelectedUploadedDifficulty = () => {
+    const selected = beatmapDifficulties.find(difficulty => Number(difficulty.id) === Number(selectedUploadedDifficultyId));
+    if (!selected) return;
+    setGuestDifficulties(rows => addUploadedGuestDifficulty(rows, selected));
+    setSelectedUploadedDifficultyId('');
   };
 
   return (
@@ -251,7 +284,9 @@ export default function QuickAdd({
                       deadline: deadline || null,
                       notes: notes || null,
                       tags,
-                      guest_difficulties: guestDifficulties,
+                      guest_difficulties: catsPayload.some(category => categoryDefinitions.find(definition => definition.id === category.category_id)?.system_key === 'guest_difficulties')
+                        ? guestDifficulties
+                        : [],
                       force: true
                     };
                     if (isOsuBeatmapLink) {
@@ -353,19 +388,47 @@ export default function QuickAdd({
                 />
               )}
 
-              {categoryDefinitions.some(category => category.system_key === 'guest_difficulties' && categories[category.id]) && (
+              {hasGuestCategory && (
                 <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '7px' }}>
-                  {guestDifficulties.map((guestDifficulty, index) => (
+                  {isOsuBeatmapLink && beatmapDifficulties.length > 0 && (
+                    <div style={{ display: 'grid', gap: '6px', padding: '9px', backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: '7px' }}>
+                      <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Uploaded beatmap difficulties</span>
+                      <div style={{ display: 'flex', gap: '6px' }}>
+                        <select className="input-text" value={selectedUploadedDifficultyId} onChange={event => setSelectedUploadedDifficultyId(event.target.value)} style={{ minWidth: 0, flex: 1 }}>
+                          <option value="">Select an uploaded difficulty…</option>
+                          {beatmapDifficulties.map(difficulty => (
+                            <option key={difficulty.id} value={difficulty.id} disabled={isDifficultySelected(guestDifficulties, difficulty.id)}>
+                              {difficulty.mode === 'fruits' ? 'catch' : difficulty.mode || 'osu'} · {difficulty.name} · ★ {Number(difficulty.stars || 0).toFixed(2)}
+                            </option>
+                          ))}
+                        </select>
+                        <button type="button" className="btn-secondary" disabled={!selectedUploadedDifficultyId} onClick={addSelectedUploadedDifficulty}>Add</button>
+                      </div>
+                      {uploadedGuestDifficulties.length > 0 && uploadedGuestDifficulties.map(row => (
+                        <div key={row.beatmap_id} style={{ display: 'grid', gridTemplateColumns: '95px minmax(0, 1fr) 88px auto', gap: '5px', alignItems: 'center' }}>
+                          <span className="badge badge-pending">{row.gamemode === 'fruits' ? 'catch' : row.gamemode}</span>
+                          <input className="input-text" value={row.difficulty_name || ''} disabled style={{ padding: '5px 7px' }} />
+                          <input className="input-text" type="number" value={row.target_sr ?? ''} disabled title="Uploaded difficulties use their current osu! star rating." style={{ padding: '5px 7px' }} />
+                          <button type="button" className="btn-secondary" onClick={() => setGuestDifficulties(rows => rows.filter(item => Number(item.beatmap_id) !== Number(row.beatmap_id)))} style={{ padding: '5px' }} aria-label={`Remove ${row.difficulty_name || 'difficulty'}`}><X size={14} /></button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Manual / unuploaded difficulties</span>
+                  {manualGuestDifficulties.map((guestDifficulty, index) => {
+                    const rowIndex = guestDifficulties.indexOf(guestDifficulty);
+                    return (
                     <div key={index} style={{ display: 'grid', gridTemplateColumns: '110px minmax(140px, 1fr) 110px auto', gap: '6px', alignItems: 'center' }}>
-                      <select className="input-text" value={guestDifficulty.gamemode} onChange={event => setGuestDifficulties(rows => rows.map((row, rowIndex) => rowIndex === index ? { ...row, gamemode: event.target.value } : row))}>
+                      <select className="input-text" value={guestDifficulty.gamemode} onChange={event => setGuestDifficulties(rows => rows.map((row, currentIndex) => currentIndex === rowIndex ? { ...row, gamemode: event.target.value } : row))}>
                         <option value="osu">osu!</option><option value="taiko">Taiko</option><option value="fruits">Catch</option><option value="mania">Mania</option>
                       </select>
-                      <input className="input-text" placeholder="Difficulty name" value={guestDifficulty.difficulty_name} onChange={event => setGuestDifficulties(rows => rows.map((row, rowIndex) => rowIndex === index ? { ...row, difficulty_name: event.target.value } : row))} />
-                      <input className="input-text" type="number" min="0" step="0.01" placeholder="Target SR" value={guestDifficulty.target_sr} onChange={event => setGuestDifficulties(rows => rows.map((row, rowIndex) => rowIndex === index ? { ...row, target_sr: event.target.value } : row))} />
-                      <button type="button" className="btn-secondary" disabled={guestDifficulties.length === 1} onClick={() => setGuestDifficulties(rows => rows.filter((_, rowIndex) => rowIndex !== index))}><X size={14} /></button>
+                      <input className="input-text" placeholder="Difficulty name" value={guestDifficulty.difficulty_name} onChange={event => setGuestDifficulties(rows => rows.map((row, currentIndex) => currentIndex === rowIndex ? { ...row, difficulty_name: event.target.value } : row))} />
+                      <input className="input-text" type="number" min="0" step="0.01" placeholder="Target SR" value={guestDifficulty.target_sr} onChange={event => setGuestDifficulties(rows => rows.map((row, currentIndex) => currentIndex === rowIndex ? { ...row, target_sr: event.target.value } : row))} />
+                      <button type="button" className="btn-secondary" onClick={() => setGuestDifficulties(rows => rows.filter((_, currentIndex) => currentIndex !== rowIndex))}><X size={14} /></button>
                     </div>
-                  ))}
-                  <button type="button" className="btn-secondary" style={{ width: 'fit-content' }} onClick={() => setGuestDifficulties(rows => [...rows, { gamemode: 'osu', difficulty_name: '', target_sr: '' }])}>
+                    );
+                  })}
+                  <button type="button" className="btn-secondary" style={{ width: 'fit-content' }} onClick={() => setGuestDifficulties(rows => [...rows, createManualGuestDifficulty()])}>
                     <Plus size={14} /> Add guest difficulty
                   </button>
                 </div>

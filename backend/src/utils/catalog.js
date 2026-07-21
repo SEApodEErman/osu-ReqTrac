@@ -55,19 +55,28 @@ function normalizeGuestDifficulties(value, legacy = {}) {
     }];
   }
 
-  return rows.slice(0, 100).map((row, index) => {
+  const seenBeatmapIds = new Set();
+  const normalized = [];
+  for (const row of rows.slice(0, 100)) {
     const beatmapId = Number(row?.beatmap_id);
     const targetSr = row?.target_sr === '' || row?.target_sr == null ? null : Number(row.target_sr);
     const gamemode = VALID_GAMEMODES.has(row?.gamemode) ? row.gamemode : 'osu';
     const difficultyName = String(row?.difficulty_name || '').trim().slice(0, 160) || null;
-    return {
+    const normalizedRow = {
       beatmap_id: Number.isSafeInteger(beatmapId) && beatmapId > 0 ? beatmapId : null,
       difficulty_name: difficultyName,
       gamemode,
       target_sr: Number.isFinite(targetSr) && targetSr >= 0 ? targetSr : null,
-      sort_order: index,
+      sort_order: normalized.length,
     };
-  }).filter(row => row.beatmap_id || row.difficulty_name || row.target_sr != null);
+    if (!normalizedRow.beatmap_id && !normalizedRow.difficulty_name && normalizedRow.target_sr == null) continue;
+    if (normalizedRow.beatmap_id) {
+      if (seenBeatmapIds.has(normalizedRow.beatmap_id)) continue;
+      seenBeatmapIds.add(normalizedRow.beatmap_id);
+    }
+    normalized.push(normalizedRow);
+  }
+  return normalized;
 }
 
 async function replaceGuestDifficulties(db, requestId, rows) {

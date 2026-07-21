@@ -55,6 +55,40 @@ test('application migration backfills dynamic categories, guest rows, and case-i
   await db.close();
 });
 
+test('username history migration recovers former creator names from cached beatmaps', async () => {
+  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  await db.exec(`
+    CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE users_cache (id INTEGER PRIMARY KEY, username TEXT NOT NULL, avatar_url TEXT NOT NULL, country_code TEXT NOT NULL, last_updated DATETIME);
+    CREATE TABLE beatmap_cache (
+      beatmapset_id INTEGER PRIMARY KEY, creator TEXT NOT NULL, creator_id INTEGER NOT NULL,
+      last_updated DATETIME
+    );
+    INSERT INTO schema_migrations (version, name) VALUES (1, 'existing'), (2, 'username history');
+    CREATE TABLE user_username_history (
+      user_id INTEGER NOT NULL, username TEXT COLLATE NOCASE NOT NULL,
+      first_seen DATETIME, last_seen DATETIME, PRIMARY KEY (user_id, username)
+    );
+    INSERT INTO users_cache VALUES (42, 'ItsCactus', '', '', '2026-07-21');
+    INSERT INTO beatmap_cache VALUES (100, 'Sweep Tosho', 42, '2025-04-01');
+  `);
+
+  await runApplicationMigrations(db);
+  await runApplicationMigrations(db);
+
+  assert.deepEqual(
+    (await db.all('SELECT username FROM user_username_history WHERE user_id = 42 ORDER BY username')).map(row => row.username),
+    ['ItsCactus', 'Sweep Tosho']
+  );
+  assert.equal((await db.get('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 3')).count, 1);
+  assert.equal((await db.get('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 4')).count, 1);
+  assert.deepEqual(
+    (await db.all('PRAGMA table_info(unavailable_osu_users)')).map(column => column.name),
+    ['user_id', 'username', 'first_failed_at']
+  );
+  await db.close();
+});
+
 test('guest difficulty normalization accepts four modes and filters empty rows', () => {
   assert.deepEqual(normalizeGuestDifficulties([
     { beatmap_id: '42', difficulty_name: ' Oni ', gamemode: 'taiko', target_sr: '5.25' },
@@ -62,7 +96,18 @@ test('guest difficulty normalization accepts four modes and filters empty rows',
     { difficulty_name: 'Catch Cup', gamemode: 'fruits' },
   ]), [
     { beatmap_id: 42, difficulty_name: 'Oni', gamemode: 'taiko', target_sr: 5.25, sort_order: 0 },
-    { beatmap_id: null, difficulty_name: 'Catch Cup', gamemode: 'fruits', target_sr: null, sort_order: 2 },
+    { beatmap_id: null, difficulty_name: 'Catch Cup', gamemode: 'fruits', target_sr: null, sort_order: 1 },
+  ]);
+});
+
+test('guest difficulty normalization keeps exact uploaded IDs only once', () => {
+  assert.deepEqual(normalizeGuestDifficulties([
+    { beatmap_id: 99, difficulty_name: 'Old name', gamemode: 'mania', target_sr: '6.4' },
+    { beatmap_id: 99, difficulty_name: 'Duplicate', gamemode: 'mania', target_sr: '6.5' },
+    { difficulty_name: 'Unuploaded', gamemode: 'fruits', target_sr: '4.2' },
+  ]), [
+    { beatmap_id: 99, difficulty_name: 'Old name', gamemode: 'mania', target_sr: 6.4, sort_order: 0 },
+    { beatmap_id: null, difficulty_name: 'Unuploaded', gamemode: 'fruits', target_sr: 4.2, sort_order: 1 },
   ]);
 });
 
