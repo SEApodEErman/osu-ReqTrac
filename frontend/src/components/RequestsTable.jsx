@@ -186,6 +186,8 @@ export default function RequestsTable({
   onOpenRequest, 
   onDeleteRequest, 
   onUpdateRequest,
+  onForceRefreshBeatmap,
+  refreshingRequestId = null,
   onBulkUpdateStatus,
   isBulkStatusUpdating = false,
   onBulkRefreshDates,
@@ -255,7 +257,7 @@ export default function RequestsTable({
   }, [requestsList]);
 
   // Calculate deadline colors dynamically
-  const getDeadlineInfo = (deadlineStr) => {
+  const getDeadlineInfo = (deadlineStr, requestStatus) => {
     if (!deadlineStr) return null;
     const deadline = new Date(deadlineStr);
     const today = new Date();
@@ -268,7 +270,13 @@ export default function RequestsTable({
     let color = 'var(--req-completed)'; // Green (> 30 days)
     let text = `${diffDays} days left`;
 
-    if (diffDays <= 0) {
+    if (requestStatus === 'Completed' && diffDays < 0) {
+      color = 'var(--req-completed)';
+      text = `${Math.abs(diffDays)}d ago`;
+    } else if (requestStatus === 'Completed' && diffDays === 0) {
+      color = 'var(--req-completed)';
+      text = 'Completed today';
+    } else if (diffDays <= 0) {
       color = 'var(--req-cancelled)'; // Red
       text = diffDays === 0 ? 'Today' : `${Math.abs(diffDays)}d overdue`;
     } else if (diffDays <= 3) {
@@ -533,7 +541,7 @@ export default function RequestsTable({
       case 'request_status':
         return <td key={key} onClick={(event) => event.stopPropagation()}><div className={`status-badge-select request-table-select badge badge-${req.request_status.toLowerCase()}`}><select value={req.request_status} onChange={(event) => onUpdateRequest(req.id, { request_status: event.target.value })} className={`status-badge-inner badge badge-${req.request_status.toLowerCase()}`} aria-label="Request status"><option className="status-option-accepted" value="Accepted">Accepted</option><option className="status-option-considering" value="Considering">Considering</option><option className="status-option-working" value="Working">Working</option><option className="status-option-completed" value="Completed">Completed</option><option className="status-option-cancelled" value="Cancelled">Cancelled</option></select><div className="request-select-chevron"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg></div></div></td>;
       case 'priority':
-        return <td key={key} onClick={(event) => event.stopPropagation()}><div className={`status-badge-select request-table-select badge badge-priority-${(req.priority || 'Low').toLowerCase()}`}><select value={req.priority || 'Low'} onChange={(event) => onUpdateRequest(req.id, { priority: event.target.value })} className={`status-badge-inner badge badge-priority-${(req.priority || 'Low').toLowerCase()}`} aria-label="Priority"><option value="Low">Low</option><option value="Medium">Medium</option><option value="High">High</option></select><div className="request-select-chevron"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg></div></div></td>;
+        return <td key={key} onClick={(event) => event.stopPropagation()}><div className={`status-badge-select request-table-select badge badge-priority-${(req.priority || 'Low').toLowerCase()}`}><select value={req.priority || 'Low'} onChange={(event) => onUpdateRequest(req.id, { priority: event.target.value })} className={`status-badge-inner badge badge-priority-${(req.priority || 'Low').toLowerCase()}`} aria-label="Priority"><option className="priority-option-low" value="Low">Low</option><option className="priority-option-medium" value="Medium">Medium</option><option className="priority-option-high" value="High">High</option></select><div className="request-select-chevron"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg></div></div></td>;
       case 'deadline':
         return <td key={key}>{deadlineInfo ? <span className="request-deadline" style={{ color: deadlineInfo.color }}><Calendar size={12} />{deadlineInfo.text}</span> : <span className="request-empty">—</span>}</td>;
       case 'notes':
@@ -541,7 +549,7 @@ export default function RequestsTable({
       case 'added':
         return <td key={key} className="request-added-date">{req.added_date ? new Date(req.added_date).toLocaleDateString() : '—'}</td>;
       case 'actions':
-        return <td key={key} onClick={(event) => event.stopPropagation()} style={{ textAlign: 'right' }}><div className="request-row-actions"><button onClick={() => onOpenRequest(req)} title="Open Details" style={{ padding: '6px', borderRadius: '4px', color: 'var(--text-muted)', cursor: 'pointer' }} onMouseEnter={(event) => { event.currentTarget.style.backgroundColor = 'var(--hover-bg)'; }} onMouseLeave={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }}><Edit3 size={14} /></button><button onClick={async () => { const confirmed = await onRequestConfirmation({ title: 'Delete request?', message: 'This request and its associated categories will be permanently deleted.', confirmLabel: 'Delete request' }); if (confirmed) onDeleteRequest(req.id); }} title="Delete" style={{ padding: '6px', borderRadius: '4px', color: 'var(--text-muted)', cursor: 'pointer' }} onMouseEnter={(event) => { event.currentTarget.style.backgroundColor = 'rgba(231, 76, 60, 0.1)'; event.currentTarget.style.color = 'var(--priority-high)'; }} onMouseLeave={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; event.currentTarget.style.color = 'var(--text-muted)'; }}><Trash2 size={14} /></button></div></td>;
+        return <td key={key} onClick={(event) => event.stopPropagation()} style={{ textAlign: 'right' }}><div className="request-row-actions"><button onClick={() => onOpenRequest(req)} title="Open Details" style={{ padding: '6px', borderRadius: '4px', color: 'var(--text-muted)', cursor: 'pointer' }} onMouseEnter={(event) => { event.currentTarget.style.backgroundColor = 'var(--hover-bg)'; }} onMouseLeave={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }}><Edit3 size={14} /></button>{req.is_osu_link && req.beatmapset_id && <button onClick={() => onForceRefreshBeatmap?.(req)} disabled={refreshingRequestId === req.id} title="Force Refresh API" style={{ padding: '6px', borderRadius: '4px', color: 'var(--text-muted)', cursor: 'pointer' }}><RefreshCw size={14} className={refreshingRequestId === req.id ? 'spin' : undefined} /></button>}<button onClick={async () => { const confirmed = await onRequestConfirmation({ title: 'Delete request?', message: 'This request and its associated categories will be permanently deleted.', confirmLabel: 'Delete request' }); if (confirmed) onDeleteRequest(req.id); }} title="Delete" style={{ padding: '6px', borderRadius: '4px', color: 'var(--text-muted)', cursor: 'pointer' }} onMouseEnter={(event) => { event.currentTarget.style.backgroundColor = 'rgba(231, 76, 60, 0.1)'; event.currentTarget.style.color = 'var(--priority-high)'; }} onMouseLeave={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; event.currentTarget.style.color = 'var(--text-muted)'; }}><Trash2 size={14} /></button></div></td>;
       default:
         return null;
     }
@@ -696,7 +704,7 @@ export default function RequestsTable({
                 </tr>
               )}
               {virtualWindow.rows.map((req, virtualIndex) => {
-                const deadlineInfo = getDeadlineInfo(req.deadline);
+                const deadlineInfo = getDeadlineInfo(req.deadline, req.request_status);
                 const isChecked = selectedIds.includes(req.id);
                 const isMetadataPending = req.metadata_sync_status === 'Pending' || req.metadata_sync_status === 'Processing';
                 const metadataFailed = req.metadata_sync_status === 'Failed';

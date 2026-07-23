@@ -584,6 +584,21 @@ select.input-text {
   color: #742c26;
 }
 
+.status-badge-inner option.priority-option-low {
+  background-color: #d8ebf8;
+  color: #1f5f8a;
+}
+
+.status-badge-inner option.priority-option-medium {
+  background-color: #f9e5c5;
+  color: #7a4c00;
+}
+
+.status-badge-inner option.priority-option-high {
+  background-color: #f1d6d3;
+  color: #742c26;
+}
+
 /* Chevron inside table status badge container inherits badge color */
 .status-badge-select > div:last-child svg {
   color: inherit;
@@ -1087,6 +1102,7 @@ select.input-text {
 .request-notes {
   width: 100%;
   line-height: 1.35;
+  -webkit-line-clamp: 3;
 }
 
 .request-added-date {

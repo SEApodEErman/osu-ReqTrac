@@ -159,6 +159,7 @@ export default function RequestDetailModal({
   onClose, 
   onUpdateRequest,
   onLinkManualRequest,
+  onChangeMapset,
   onForceRefreshBeatmap,
   connectedAccount,
   onNotify,
@@ -171,7 +172,10 @@ export default function RequestDetailModal({
   const [isRefreshingMetadata, setIsRefreshingMetadata] = useState(false);
   const [isRefreshingAddedDate, setIsRefreshingAddedDate] = useState(false);
   const [isLinkingBeatmap, setIsLinkingBeatmap] = useState(false);
+  const [isChangingMapset, setIsChangingMapset] = useState(false);
+  const [showMapsetChange, setShowMapsetChange] = useState(false);
   const [beatmapLink, setBeatmapLink] = useState('');
+  const [replacementMapsetLink, setReplacementMapsetLink] = useState('');
   const [isAddingDifficulties, setIsAddingDifficulties] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const isMetadataPending = request.metadata_sync_status === 'Pending' || request.metadata_sync_status === 'Processing';
@@ -277,10 +281,15 @@ export default function RequestDetailModal({
         body: JSON.stringify({ beatmapset_id: request.beatmapset_id })
       });
       if (res.ok) {
-        const resData = await res.json();
-        // Trigger parent state refresh
-        onForceRefreshBeatmap(request.id);
+        await res.json();
+        const refreshedBeatmap = await fetch(`/api/beatmaps/${request.beatmapset_id}?cacheOnly=1`);
+        const refreshedData = refreshedBeatmap.ok ? await refreshedBeatmap.json() : null;
+        // Refresh the request summary and replace this modal's cached difficulty list.
+        await onForceRefreshBeatmap?.(request.id, refreshedData?.difficulties);
         onNotify?.('Beatmap metadata updated successfully!', 'success');
+      } else {
+        const error = await res.json().catch(() => ({}));
+        onNotify?.(error.error || 'Could not refresh beatmap metadata.', 'error');
       }
     } catch (e) {
       console.error('Error refreshing beatmap metadata:', e);
@@ -314,6 +323,20 @@ export default function RequestDetailModal({
       if (result?.ok) setBeatmapLink('');
     } finally {
       setIsLinkingBeatmap(false);
+    }
+  };
+
+  const handleChangeMapset = async () => {
+    if (!replacementMapsetLink.trim() || isChangingMapset) return;
+    setIsChangingMapset(true);
+    try {
+      const result = await onChangeMapset?.(request.id, replacementMapsetLink.trim());
+      if (result?.ok) {
+        setReplacementMapsetLink('');
+        setShowMapsetChange(false);
+      }
+    } finally {
+      setIsChangingMapset(false);
     }
   };
 
@@ -491,23 +514,49 @@ export default function RequestDetailModal({
                     <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
                       Beatmapset ID: {request.beatmapset_id}
                     </span>
-                    <button
-                      onClick={handleMetadataRefresh}
-                      disabled={isRefreshingMetadata || isMetadataPending}
-                      style={{ 
-                        fontSize: '11px', 
-                        color: 'var(--osu-pink)', 
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                        marginLeft: 'auto'
-                      }}
-                    >
-                      <RefreshCw size={12} className={isRefreshingMetadata ? 'spin' : ''} />
-                      {isMetadataPending ? 'Sync queued' : isRefreshingMetadata ? 'Refreshing...' : 'Force Refresh API'}
-                    </button>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginLeft: 'auto' }}>
+                      <button
+                        type="button"
+                        onClick={() => setShowMapsetChange(current => !current)}
+                        disabled={isRefreshingMetadata || isMetadataPending || isChangingMapset}
+                        style={{ fontSize: '11px', color: 'var(--text-muted)', cursor: 'pointer' }}
+                      >
+                        Change Mapset
+                      </button>
+                      <button
+                        onClick={handleMetadataRefresh}
+                        disabled={isRefreshingMetadata || isMetadataPending || isChangingMapset}
+                        style={{
+                          fontSize: '11px',
+                          color: 'var(--osu-pink)',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                        }}
+                      >
+                        <RefreshCw size={12} className={isRefreshingMetadata ? 'spin' : ''} />
+                        {isMetadataPending ? 'Sync queued' : isRefreshingMetadata ? 'Refreshing...' : 'Force Refresh API'}
+                      </button>
+                    </div>
                   </div>
+
+                  {showMapsetChange && (
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <input
+                        className="input-text"
+                        value={replacementMapsetLink}
+                        onChange={event => setReplacementMapsetLink(event.target.value)}
+                        placeholder="New beatmapset ID or osu! link"
+                        disabled={isChangingMapset}
+                        aria-label="New beatmapset ID or osu! link"
+                      />
+                      <button type="button" className="btn-primary" onClick={handleChangeMapset} disabled={!replacementMapsetLink.trim() || isChangingMapset} style={{ flexShrink: 0 }}>
+                        {isChangingMapset ? 'Changing...' : 'Replace'}
+                      </button>
+                      <button type="button" className="btn-secondary" onClick={() => { setShowMapsetChange(false); setReplacementMapsetLink(''); }} disabled={isChangingMapset} style={{ flexShrink: 0 }}>Cancel</button>
+                    </div>
+                  )}
 
                   {hasGuestDifficultyCategory && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -640,10 +689,11 @@ export default function RequestDetailModal({
             </div>
 
             {request.categories.some(c => c.system_key === 'guest_difficulties' || c.view_type === 'guest_difficulties' || c.category_name === 'Guest Difficulties') && (
-                <div style={{ marginTop: '20px', minWidth: 0, maxHeight: '360px', overflowY: 'auto', paddingRight: '4px' }}>
+                <div style={{ marginTop: '20px', minWidth: 0 }}>
                   <h3 style={{ fontSize: '14px', fontWeight: '700', textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.5px', marginBottom: '12px' }}>
                     My Guest Difficulties
                   </h3>
+                  <div style={{ maxHeight: '360px', overflowY: 'auto', paddingRight: '4px' }}>
                   {request.user_difficulty ? (
                     // Show the detected difficulty belonging to the connected user
                     (() => {
@@ -659,7 +709,7 @@ export default function RequestDetailModal({
                           borderRadius: '8px',
                           border: `1px solid rgba(${r}, ${g}, ${b}, 0.4)`
                         }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', alignItems: 'center', gap: '8px', width: '100%', minWidth: 0, marginBottom: '6px' }}>
                             <span style={{
                               display: 'inline-flex',
                               alignItems: 'center',
@@ -673,7 +723,7 @@ export default function RequestDetailModal({
                             }}>
                               ★ {Number(diff.stars || 0).toFixed(2)}
                             </span>
-                            <span style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={diff.name}>
+                            <span style={{ flex: '1 1 auto', minWidth: 0, fontSize: '13px', fontWeight: '600', color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={diff.name}>
                               {diff.name}
                             </span>
                           </div>
@@ -749,7 +799,7 @@ export default function RequestDetailModal({
                         border: `1px solid rgba(${r}, ${g}, ${b}, 0.4)`,
                         minWidth: 0,
                       }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', minWidth: 0 }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: difficulty.pending ? 'max-content minmax(0, 1fr) max-content' : 'max-content minmax(0, 1fr)', alignItems: 'center', gap: '8px', width: '100%', minWidth: 0, marginBottom: '6px' }}>
                           <span style={{
                             display: 'inline-flex',
                             alignItems: 'center',
@@ -764,7 +814,7 @@ export default function RequestDetailModal({
                           }}>
                             ★ {Number(difficulty.stars || 0).toFixed(2)}
                           </span>
-                          <span title={difficulty.name} style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          <span title={difficulty.name} style={{ flex: '1 1 auto', minWidth: 0, fontSize: '13px', fontWeight: '600', color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             {difficulty.name || 'Unnamed difficulty'}
                           </span>
                           {difficulty.pending && <span style={{ fontSize: '10px', color: 'var(--text-muted)', marginLeft: 'auto' }}>pending</span>}
@@ -782,6 +832,7 @@ export default function RequestDetailModal({
                       </div>
                     );
                   })}
+                  </div>
                 </div>
               )}
 

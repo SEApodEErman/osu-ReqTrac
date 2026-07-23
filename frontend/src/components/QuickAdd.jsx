@@ -42,6 +42,7 @@ export default function QuickAdd({
   const [guestDifficulties, setGuestDifficulties] = useState([createManualGuestDifficulty()]);
   const [beatmapDifficulties, setBeatmapDifficulties] = useState([]);
   const [selectedUploadedDifficultyId, setSelectedUploadedDifficultyId] = useState('');
+  const [osuLinkValidationError, setOsuLinkValidationError] = useState('');
   
   // Categories Checklist
   const getDefaultCategories = () => {
@@ -78,6 +79,7 @@ export default function QuickAdd({
       const res = await fetch(`/api/requests/beatmap-info?link=${encodeURIComponent(link)}`);
       if (res.ok) {
         const data = await res.json();
+        setOsuLinkValidationError('');
         setArtist(data.artist || '');
         setTitle(data.title || '');
         setCreator(data.creator || '');
@@ -89,6 +91,9 @@ export default function QuickAdd({
           (rows, difficulty) => addUploadedGuestDifficulty(rows, difficulty),
           current.filter(row => !isUploadedGuestDifficulty(row))
         ));
+      } else if (res.status === 404) {
+        setOsuLinkValidationError('This osu! beatmap link no longer exists or is unavailable. Please use a different link.');
+        setBeatmapDifficulties([]);
       }
     } catch (e) {
       console.error('Failed to fetch beatmap info:', e);
@@ -100,6 +105,7 @@ export default function QuickAdd({
   const handleInputChange = (event) => {
     const value = event.target.value;
     setInputVal(value);
+    setOsuLinkValidationError('');
 
     if (OSU_BEATMAP_LINK_PATTERN.test(value)) {
       void fetchBeatmapInfo(value);
@@ -125,6 +131,7 @@ export default function QuickAdd({
 
   const resetForm = () => {
     setInputVal('');
+    setOsuLinkValidationError('');
     setArtist('');
     setTitle('');
     setCreator('');
@@ -151,6 +158,16 @@ export default function QuickAdd({
 
     if (catsPayload.length === 0) {
       onNotify?.('Please select at least one request category.', 'warning');
+      return;
+    }
+
+    if (isOsuBeatmapLink && osuLinkValidationError) {
+      onNotify?.(osuLinkValidationError, 'warning');
+      return;
+    }
+
+    if (isOsuBeatmapLink && isFetchingInfo) {
+      onNotify?.('Please wait for the osu! beatmap link to finish validating.', 'info');
       return;
     }
 
@@ -358,6 +375,12 @@ export default function QuickAdd({
               </div>
             )}
 
+            {osuLinkValidationError && (
+              <div role="alert" style={{ fontSize: '12px', color: 'var(--priority-high)', padding: '8px 12px', backgroundColor: 'rgba(231, 76, 60, 0.08)', borderRadius: '6px', border: '1px solid rgba(231, 76, 60, 0.35)' }}>
+                {osuLinkValidationError}
+              </div>
+            )}
+
             {/* Categories Checklist (Always show to specify what requests you want) */}
             <div>
               <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase', marginBottom: '8px', display: 'block' }}>
@@ -514,7 +537,7 @@ export default function QuickAdd({
                   <button type="button" onClick={resetForm} className="btn-secondary" disabled={isSubmitting}>
                     Reset
                   </button>
-                  <button type="submit" className="btn-primary" disabled={isSubmitting}>
+                  <button type="submit" className="btn-primary" disabled={isSubmitting || (isOsuBeatmapLink && isFetchingInfo)}>
                     <Plus size={16} />
                     <span>{isSubmitting ? 'Creating...' : 'Create Request'}</span>
                   </button>

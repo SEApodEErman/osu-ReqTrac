@@ -8,6 +8,7 @@ const {
   recordUnavailableUser,
   recordUserIdentity,
 } = require('../utils/userIdentity');
+const { reconcileGuestDifficultyAssignments } = require('../utils/guestDifficultyAssignments');
 
 // Fetch and cache a user profile (used for beatmap creators / requesters)
 async function cacheUser(db, userIdOrUsername, includedUser = null) {
@@ -129,13 +130,20 @@ async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
     cacheEntry.submitted_date,
     cacheEntry.last_updated
   ]);
+
+  // Keep uploaded guest assignments current. If osu! removed a difficulty, retain
+  // the user's record as a manual difficulty rather than dropping it on refresh.
+  const linkedRequests = await db.all('SELECT id FROM requests WHERE beatmapset_id = ?', beatmapsetId);
+  for (const request of linkedRequests) {
+    await reconcileGuestDifficultyAssignments(db, request.id, { difficulties });
+  }
   await db.run(`
     UPDATE beatmap_metadata_sync
     SET status = 'Completed', last_error = NULL, next_attempt_at = NULL, updated_at = CURRENT_TIMESTAMP
     WHERE beatmapset_id = ?
   `, beatmapsetId);
 
-  return cacheEntry;
+  return { ...cacheEntry, difficulties };
 }
 
 // Reconcile older cached creator names by refreshing each distinct stable osu!
@@ -197,6 +205,17 @@ router.get('/sync/status', async (req, res, next) => {
     const db = await getDatabase();
     const { getMetadataSyncStatus } = require('../services/beatmapMetadataSync');
     res.json(await getMetadataSyncStatus(db));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/beatmaps/sync/failed - inspect persistent metadata errors before retrying.
+router.get('/sync/failed', async (req, res, next) => {
+  try {
+    const db = await getDatabase();
+    const { getFailedMetadata } = require('../services/beatmapMetadataSync');
+    res.json(await getFailedMetadata(db));
   } catch (error) {
     next(error);
   }

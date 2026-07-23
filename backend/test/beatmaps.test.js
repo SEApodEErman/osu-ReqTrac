@@ -49,7 +49,7 @@ test('refreshAndCacheBeatmapset reuses the embedded creator without a user API c
   };
   delete require.cache[beatmapsModulePath];
   const { refreshAndCacheBeatmapset } = require(beatmapsModulePath);
-  const db = { run: async () => ({}) };
+  const db = { run: async () => ({}), all: async () => [] };
 
   await refreshAndCacheBeatmapset(db, 10);
 

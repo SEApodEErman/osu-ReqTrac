@@ -7,6 +7,7 @@ const { createApiJob, updateApiJob, finishApiJob } = require('../osuApi');
 const { findUserDifficulties, isGuestDifficulty, normalizeGamemode, parseOsuLink, parseOsuUserLink } = require('../utils/requestUtils');
 const { trackBackgroundTask } = require('../utils/backgroundTasks');
 const { canonicalDifficultyNames, recordUserIdentity } = require('../utils/userIdentity');
+const { replaceRequestBeatmapset } = require('../utils/beatmapReplacement');
 const {
   ensureTag,
   normalizeCategories,
@@ -443,7 +444,7 @@ router.post('/', async (req, res, next) => {
         if (mapData && mapData.beatmapset_id) {
           beatmapsetId = mapData.beatmapset_id;
         } else {
-          return res.status(400).json({ error: 'Could not resolve beatmapset ID from osu! link' });
+          return res.status(404).json({ code: 'BEATMAPSET_NOT_FOUND', error: 'This osu! beatmap link no longer exists or is unavailable.' });
         }
       }
 
@@ -463,6 +464,9 @@ router.post('/', async (req, res, next) => {
       try {
         await refreshAndCacheBeatmapset(db, beatmapsetId);
       } catch (err) {
+        if (/not found on osu!/i.test(err.message)) {
+          return res.status(404).json({ code: 'BEATMAPSET_NOT_FOUND', error: 'This osu! beatmap link no longer exists or is unavailable.' });
+        }
         return res.status(400).json({ error: `Failed to fetch beatmap metadata from osu! API: ${err.message}` });
       }
     }
@@ -1099,6 +1103,32 @@ router.post('/:id/link-beatmap', async (req, res, next) => {
   }
 });
 
+// POST /api/requests/:id/change-mapset - Replace an existing osu!-linked
+// request's mapset while preserving the request workflow and related records.
+router.post('/:id/change-mapset', async (req, res, next) => {
+  try {
+    const db = await getDatabase();
+    const result = await replaceRequestBeatmapset({
+      db,
+      requestId: req.params.id,
+      link: req.body?.link,
+      fetchBeatmap,
+      refreshBeatmapset: refreshAndCacheBeatmapset,
+    });
+    res.json({
+      success: true,
+      beatmapset_id: result.beatmapsetId,
+      guest_difficulties_preserved_as_manual: result.guestResult.preservedAsManual,
+      message: 'Beatmapset changed and metadata refreshed successfully.',
+    });
+  } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ error: error.message, requestId: error.requestId });
+    }
+    next(error);
+  }
+});
+
 // POST /api/requests/:id/refresh-date - refresh only this request's lifecycle date.
 router.post('/:id/refresh-date', async (req, res, next) => {
   try {
@@ -1193,7 +1223,7 @@ router.get('/beatmap-info', async (req, res, next) => {
       if (mapData && mapData.beatmapset_id) {
         beatmapsetId = mapData.beatmapset_id;
       } else {
-        return res.status(400).json({ error: 'Could not resolve beatmapset ID from osu! link' });
+        return res.status(404).json({ code: 'BEATMAPSET_NOT_FOUND', error: 'This osu! beatmap link no longer exists or is unavailable.' });
       }
     }
 

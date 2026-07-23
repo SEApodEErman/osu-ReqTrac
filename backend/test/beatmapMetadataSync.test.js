@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const sqlite3 = require('sqlite3');
 const { open } = require('sqlite');
 const {
+  getFailedMetadata,
   processMetadataSyncEntry,
   queueBeatmapMetadata
 } = require('../src/services/beatmapMetadataSync');
@@ -98,4 +99,33 @@ test('processMetadataSyncEntry stops retrying after the third failed attempt', a
 
   assert.ok(statements.some(sql => sql.includes("status = 'Failed'")));
   assert.ok(!statements.some(sql => sql.includes("SET status = 'Pending'")));
+});
+
+test('getFailedMetadata returns the failed mapset, its error, and cached context', async () => {
+  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  await db.exec(`
+    CREATE TABLE beatmap_metadata_sync (
+      beatmapset_id INTEGER PRIMARY KEY, status TEXT NOT NULL, attempt_count INTEGER NOT NULL,
+      last_error TEXT, updated_at DATETIME
+    );
+    CREATE TABLE beatmap_cache (
+      beatmapset_id INTEGER PRIMARY KEY, artist TEXT, title TEXT, creator TEXT
+    );
+    CREATE TABLE requests (id INTEGER PRIMARY KEY, beatmapset_id INTEGER);
+    INSERT INTO beatmap_metadata_sync VALUES (10, 'Failed', 3, 'Beatmapset with ID 10 not found on osu!', '2026-07-23 10:00:00');
+    INSERT INTO beatmap_cache VALUES (10, 'Artist', 'Title', 'Creator');
+    INSERT INTO requests VALUES (7, 10);
+  `);
+
+  assert.deepEqual(await getFailedMetadata(db), [{
+    beatmapset_id: 10,
+    attempt_count: 3,
+    last_error: 'Beatmapset with ID 10 not found on osu!',
+    updated_at: '2026-07-23 10:00:00',
+    artist: 'Artist',
+    title: 'Title',
+    creator: 'Creator',
+    request_id: 7,
+  }]);
+  await db.close();
 });

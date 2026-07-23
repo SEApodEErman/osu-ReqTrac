@@ -62,6 +62,7 @@ export default function App() {
   const [confirmationRequest, setConfirmationRequest] = useState(null);
   const [isBulkStatusUpdating, setIsBulkStatusUpdating] = useState(false);
   const [isBulkDateRefreshing, setIsBulkDateRefreshing] = useState(false);
+  const [refreshingRequestId, setRefreshingRequestId] = useState(null);
   const toastIdRef = useRef(0);
   const bulkStatusUpdateRef = useRef(false);
   const metadataProgressRef = useRef({ settled: null, lastListRefresh: 0 });
@@ -363,8 +364,11 @@ export default function App() {
         return { ok: true };
       } else {
         const errData = await res.json();
-        showToast(`Failed to add request: ${errData.error || 'Server Error'}`, 'error');
-        return { ok: false, reason: 'server' };
+        const isMissingBeatmap = errData.code === 'BEATMAPSET_NOT_FOUND';
+        showToast(isMissingBeatmap
+          ? (errData.error || 'This osu! beatmap link no longer exists or is unavailable.')
+          : `Failed to add request: ${errData.error || 'Server Error'}`, isMissingBeatmap ? 'warning' : 'error');
+        return { ok: false, reason: isMissingBeatmap ? 'missing-beatmap' : 'server' };
       }
     } catch (e) {
       console.error(e);
@@ -463,6 +467,65 @@ export default function App() {
       return { ok: false };
     }
   };
+
+  const handleChangeMapset = async (id, link) => {
+    try {
+      const response = await fetchWithTimeout(`/api/requests/${id}/change-mapset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ link }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        showToast(result.error || 'Could not change this beatmapset.', 'error');
+        return { ok: false, duplicateRequestId: result.requestId };
+      }
+      await Promise.all([fetchRequests(), fetchStats()]);
+      const beatmapResponse = await fetchWithTimeout(`/api/beatmaps/${result.beatmapset_id}?cacheOnly=1`);
+      const beatmap = beatmapResponse.ok ? await beatmapResponse.json() : null;
+      setSelectedRequest(current => current?.id === id
+        ? { ...current, beatmapset_id: result.beatmapset_id, difficulties: beatmap?.difficulties || [] }
+        : current);
+      const preserved = result.guest_difficulties_preserved_as_manual || 0;
+      showToast(`${result.message}${preserved ? ` ${preserved} guest difficult${preserved === 1 ? 'y was' : 'ies were'} preserved as manual.` : ''}`, 'success');
+      return { ok: true };
+    } catch (error) {
+      console.error('Failed to change beatmapset:', error);
+      showToast('Could not reach the local server to change this beatmapset.', 'error');
+      return { ok: false };
+    }
+  };
+
+  const handleForceRefreshBeatmap = async (request) => {
+    if (!request?.beatmapset_id || refreshingRequestId) return false;
+    setRefreshingRequestId(request.id);
+    try {
+      const response = await fetchWithTimeout('/api/beatmaps/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ beatmapset_id: request.beatmapset_id }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not refresh beatmap metadata.');
+      await fetchRequests();
+      showToast('Beatmap metadata refreshed successfully.', 'success');
+      return true;
+    } catch (error) {
+      showToast(error.message || 'Could not refresh beatmap metadata.', 'error');
+      return false;
+    } finally {
+      setRefreshingRequestId(null);
+    }
+  };
+
+  const handleDetailMetadataRefresh = useCallback(async (requestId, difficulties) => {
+    await fetchRequests();
+    if (Array.isArray(difficulties)) {
+      setSelectedRequest(current => current?.id === requestId
+        ? { ...current, difficulties }
+        : current);
+    }
+  }, [fetchRequests]);
 
   // DELETE Request
   const handleDeleteRequest = async (id) => {
@@ -905,6 +968,8 @@ export default function App() {
             onOpenRequest={handleOpenRequest}
             onDeleteRequest={handleDeleteRequest}
             onUpdateRequest={handleUpdateRequest}
+            onForceRefreshBeatmap={handleForceRefreshBeatmap}
+            refreshingRequestId={refreshingRequestId}
             onBulkUpdateStatus={handleBulkUpdateStatus}
             isBulkStatusUpdating={isBulkStatusUpdating}
             onBulkRefreshDates={handleBulkRefreshDates}
@@ -965,7 +1030,8 @@ export default function App() {
           onClose={() => setSelectedRequest(null)}
           onUpdateRequest={handleUpdateRequest}
           onLinkManualRequest={handleLinkManualRequest}
-          onForceRefreshBeatmap={fetchRequests}
+          onChangeMapset={handleChangeMapset}
+          onForceRefreshBeatmap={handleDetailMetadataRefresh}
           connectedAccount={settingsData.connectedAccount}
           onNotify={showToast}
           categoryDefinitions={categoryDefinitions}

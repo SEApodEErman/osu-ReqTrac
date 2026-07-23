@@ -251,6 +251,25 @@ async function getMetadataSyncStatus(db) {
   return counts;
 }
 
+async function getFailedMetadata(db) {
+  return db.all(`
+    SELECT
+      sync.beatmapset_id,
+      sync.attempt_count,
+      sync.last_error,
+      sync.updated_at,
+      cache.artist,
+      cache.title,
+      cache.creator,
+      request.id AS request_id
+    FROM beatmap_metadata_sync sync
+    LEFT JOIN beatmap_cache cache ON cache.beatmapset_id = sync.beatmapset_id
+    LEFT JOIN requests request ON request.beatmapset_id = sync.beatmapset_id
+    WHERE sync.status = 'Failed'
+    ORDER BY sync.updated_at DESC, sync.beatmapset_id ASC
+  `);
+}
+
 async function retryFailedMetadata(db) {
   const result = await db.run(`
     UPDATE beatmap_metadata_sync
@@ -264,6 +283,7 @@ async function retryFailedMetadata(db) {
 module.exports = {
   enqueueBeatmapMetadata,
   enqueueBeatmapRefresh,
+  getFailedMetadata,
   getMetadataSyncStatus,
   initializeMetadataSyncWorker,
   pauseMetadataSyncWorker,

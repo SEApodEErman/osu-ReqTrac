@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import SpreadsheetImportModal from './SpreadsheetImportModal';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -133,6 +133,9 @@ export default function SettingsPanel({
   const [isSpreadsheetImportOpen, setIsSpreadsheetImportOpen] = useState(false);
   const [metadataSyncStatus, setMetadataSyncStatus] = useState(null);
   const [isRetryingMetadata, setIsRetryingMetadata] = useState(false);
+  const [failedMetadata, setFailedMetadata] = useState([]);
+  const [isFailedMetadataVisible, setIsFailedMetadataVisible] = useState(false);
+  const [isLoadingFailedMetadata, setIsLoadingFailedMetadata] = useState(false);
   const [coverStorageUsage, setCoverStorageUsage] = useState(null);
   const [coverStorageError, setCoverStorageError] = useState(false);
 
@@ -157,6 +160,20 @@ export default function SettingsPanel({
       console.error('Failed to load metadata sync status:', e);
     }
   }, []);
+
+  const loadFailedMetadata = useCallback(async () => {
+    setIsLoadingFailedMetadata(true);
+    try {
+      const res = await fetch('/api/beatmaps/sync/failed');
+      if (!res.ok) throw new Error('Could not load failed metadata details.');
+      setFailedMetadata(await res.json());
+      setIsFailedMetadataVisible(true);
+    } catch (error) {
+      onNotify(error.message, 'error');
+    } finally {
+      setIsLoadingFailedMetadata(false);
+    }
+  }, [onNotify]);
 
   const loadDataUsage = useCallback(async () => {
     try {
@@ -283,6 +300,8 @@ export default function SettingsPanel({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to retry metadata synchronization.');
       onNotify(data.message, 'success');
+      setFailedMetadata([]);
+      setIsFailedMetadataVisible(false);
       await loadMetadataSyncStatus();
     } catch (e) {
       onNotify(e.message, 'error');
@@ -648,7 +667,27 @@ export default function SettingsPanel({
               <RefreshCw size={14} className={isRetryingMetadata ? 'spin' : ''} />
               <span>{isRetryingMetadata ? 'Retrying...' : 'Retry Failed Metadata'}</span>
             </button>}
+            {(metadataSyncStatus?.Failed || 0) > 0 && <button type="button" className="btn-secondary" onClick={() => isFailedMetadataVisible ? setIsFailedMetadataVisible(false) : loadFailedMetadata()} disabled={isLoadingFailedMetadata} style={{ width: 'fit-content' }}>
+              <AlertCircle size={14} />
+              <span>{isLoadingFailedMetadata ? 'Loading failures...' : isFailedMetadataVisible ? 'Hide Failure Details' : 'View Failure Details'}</span>
+            </button>}
           </div>
+          {isFailedMetadataVisible && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '4px', maxHeight: '280px', overflowY: 'auto' }}>
+              <strong style={{ fontSize: '12px' }}>Failed metadata details</strong>
+              {failedMetadata.length === 0 ? (
+                <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>No failed metadata entries remain.</span>
+              ) : failedMetadata.map(item => (
+                <div key={item.beatmapset_id} style={{ padding: '9px 10px', border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--bg-sidebar)', display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', fontSize: '11px' }}>
+                    <strong style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.artist && item.title ? `${item.artist} — ${item.title}` : `Beatmapset ${item.beatmapset_id}`}</strong>
+                    <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>ID: {item.beatmapset_id} · {item.attempt_count} attempts</span>
+                  </div>
+                  <span style={{ fontSize: '11px', color: 'var(--priority-high)', overflowWrap: 'anywhere' }}>{item.last_error || 'No error details were recorded.'}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
