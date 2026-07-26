@@ -482,7 +482,6 @@ async function syncSheet(db, stored, snapshot, theme) {
     formattingRequests.push(...categoryFormatting(sheetMap.get(category.title), rows.length, theme, rows, category.layout));
   });
 
-  await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}:batchUpdate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: formattingRequests }) });
   await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}/values/${encodeURIComponent("'Dashboard'!A1:D" + dashboard.length)}?valueInputOption=USER_ENTERED`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ range: `'Dashboard'!A1:D${dashboard.length}`, majorDimension: 'ROWS', values: dashboard }) });
 
   for (const category of categoryModels) {
@@ -490,6 +489,8 @@ async function syncSheet(db, stored, snapshot, theme) {
     const range = `${quotedSheetTitle(category.title)}!A1:M${Math.max(rows.length, 1)}`;
     await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ range, majorDimension: 'ROWS', values: rows }) });
   }
+
+  await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}:batchUpdate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requests: formattingRequests }) });
 
   await authorized(db, stored, `${DRIVE_URL}/${spreadsheetId}/permissions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'anyone', role: 'reader' }) }).catch((error) => { if (!/already exists|duplicate/i.test(error.message)) throw error; });
   const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit?usp=sharing`;
