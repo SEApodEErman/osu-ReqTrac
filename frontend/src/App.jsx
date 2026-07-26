@@ -10,13 +10,14 @@ import MultipleRequestsImport from './components/MultipleRequestsImport';
 import TopBar from './components/TopBar';
 import Toast from './components/Toast';
 import ConfirmModal from './components/ConfirmModal';
+import { fetchWithTimeout } from './api/client';
+import { useAppData } from './hooks/useAppData';
 
 function getResolvedTheme(preference) {
   if (preference !== 'system') return preference;
   return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 }
 
-const API_REQUEST_TIMEOUT_MS = 30000;
 const METADATA_STATUS_POLL_MS = 3000;
 const METADATA_LIST_REFRESH_MS = 15000;
 const BULK_REQUEST_BATCH_SIZE = 400;
@@ -28,13 +29,6 @@ function requestIdBatches(ids) {
     batches.push(ids.slice(index, index + BULK_REQUEST_BATCH_SIZE));
   }
   return batches;
-}
-
-function fetchWithTimeout(input, init = {}, timeoutMs = API_REQUEST_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(input, { ...init, signal: controller.signal })
-    .finally(() => window.clearTimeout(timeoutId));
 }
 
 export default function App() {
@@ -95,6 +89,28 @@ export default function App() {
     resolve?.(confirmed);
   }, []);
 
+  const {
+    fetchCatalogs,
+    fetchData,
+    fetchRequests,
+    fetchSettings,
+    fetchStats,
+    handleDashboardCategoryChange,
+  } = useAppData({
+    dashboardCategoryIdRef,
+    setActiveTab,
+    setCategoryDefinitions,
+    setDashboardCategoryId,
+    setRequestsList,
+    setSelectedRequest,
+    setSettingsData,
+    setShowFirstLaunchSetup,
+    setStatsData,
+    setStatsLoading,
+    setTagCatalog,
+    statsRequestIdRef,
+  });
+
   useEffect(() => {
     const removeUpdateListener = window.electronAPI?.onUpdateDownloaded?.(({ version }) => {
       showToast(`Version ${version} is ready to install.`, 'info', {
@@ -104,97 +120,6 @@ export default function App() {
     });
     return () => removeUpdateListener?.();
   }, [showToast]);
-
-  const fetchData = async () => {
-    try {
-      await Promise.all([
-        fetchRequests(),
-        fetchStats(),
-        fetchSettings(),
-        fetchCatalogs()
-      ]);
-    } catch (e) {
-      console.error('Failed to load initial data:', e);
-    }
-  };
-
-  const fetchRequests = useCallback(async () => {
-    try {
-      const res = await fetchWithTimeout('/api/requests');
-      if (res.ok) {
-        const data = await res.json();
-        setRequestsList(data);
-
-        // Keep a detail modal opened during background sync up to date.
-        setSelectedRequest(current => {
-          if (!current) return current;
-          const updated = data.find(request => request.id === current.id);
-          return updated
-            ? { ...current, ...updated, difficulties: current.difficulties }
-            : current;
-        });
-      }
-    } catch (e) {
-      console.error('Error fetching requests list:', e);
-    }
-  }, []);
-
-  const fetchStats = useCallback(async (categoryId = dashboardCategoryIdRef.current) => {
-    const normalizedCategoryId = categoryId === 'all' ? 'all' : String(categoryId);
-    const requestId = ++statsRequestIdRef.current;
-    const endpoint = normalizedCategoryId === 'all'
-      ? '/api/stats'
-      : `/api/stats?categoryId=${encodeURIComponent(normalizedCategoryId)}`;
-    setStatsLoading(true);
-    try {
-      const res = await fetchWithTimeout(endpoint);
-      if (!res.ok) throw new Error(`Statistics request failed (${res.status}).`);
-      const data = await res.json();
-      if (requestId === statsRequestIdRef.current) setStatsData(data);
-    } catch (e) {
-      console.error('Error fetching stats:', e);
-    } finally {
-      if (requestId === statsRequestIdRef.current) setStatsLoading(false);
-    }
-  }, []);
-
-  const handleDashboardCategoryChange = useCallback((categoryId) => {
-    const normalizedCategoryId = categoryId === 'all' ? 'all' : String(categoryId);
-    dashboardCategoryIdRef.current = normalizedCategoryId;
-    setDashboardCategoryId(normalizedCategoryId);
-    setStatsData({});
-    void fetchStats(normalizedCategoryId);
-  }, [fetchStats]);
-
-  const fetchCatalogs = useCallback(async () => {
-    try {
-      const [categoriesResponse, tagsResponse] = await Promise.all([
-        fetchWithTimeout('/api/categories'),
-        fetchWithTimeout('/api/tags'),
-      ]);
-      if (categoriesResponse.ok) setCategoryDefinitions(await categoriesResponse.json());
-      if (tagsResponse.ok) setTagCatalog(await tagsResponse.json());
-    } catch (error) {
-      console.error('Failed to load categories or tags:', error);
-    }
-  }, []);
-
-  const fetchSettings = async () => {
-    try {
-      const res = await fetch('/api/settings');
-      if (res.ok) {
-        const data = await res.json();
-        setSettingsData(data);
-        if (!data.isConfigured && !localStorage.getItem('credentialsSetupPromptShown')) {
-          localStorage.setItem('credentialsSetupPromptShown', '1');
-          setActiveTab('settings');
-          setShowFirstLaunchSetup(true);
-        }
-      }
-    } catch (e) {
-      console.error('Error fetching settings:', e);
-    }
-  };
 
   useEffect(() => {
     const applyTheme = () => {
@@ -209,31 +134,6 @@ export default function App() {
     mediaQuery.addEventListener?.('change', handleThemeChange);
     return () => mediaQuery.removeEventListener?.('change', handleThemeChange);
   }, [theme]);
-
-  // Load the initial data once the client component mounts.
-  useEffect(() => {
-    void Promise.all([
-      fetch('/api/requests').then(async (res) => {
-        if (res.ok) setRequestsList(await res.json());
-      }),
-      fetchStats('all'),
-      fetch('/api/settings').then(async (res) => {
-        if (res.ok) {
-          const data = await res.json();
-          setSettingsData(data);
-          if (!data.isConfigured && !localStorage.getItem('credentialsSetupPromptShown')) {
-            localStorage.setItem('credentialsSetupPromptShown', '1');
-            setActiveTab('settings');
-            setShowFirstLaunchSetup(true);
-          }
-        }
-      }),
-      fetch('/api/categories').then(async res => { if (res.ok) setCategoryDefinitions(await res.json()); }),
-      fetch('/api/tags').then(async res => { if (res.ok) setTagCatalog(await res.json()); }),
-    ]).catch((error) => {
-      console.error('Failed to load initial data:', error);
-    });
-  }, [fetchStats]);
 
   useEffect(() => {
     if (dashboardCategoryId === 'all' || categoryDefinitions.length === 0) return;

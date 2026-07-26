@@ -705,4 +705,10 @@ router.post('/import-spreadsheet', spreadsheetUpload.single('file'), async (req,
   }
 });
 
+router.testUtils = {
+  importableCategories,
+  readJson,
+  spreadsheetForName,
+};
+
 module.exports = router;

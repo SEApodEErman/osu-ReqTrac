@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import SpreadsheetImportModal from './SpreadsheetImportModal';
 
-const APP_VERSION = '1.3.2';
+const APP_VERSION = '1.3.727';
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';

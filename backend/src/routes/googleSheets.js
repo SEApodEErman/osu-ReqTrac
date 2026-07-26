@@ -320,7 +320,6 @@ function categoryFormatting(sheet, rowCount, theme, rows, layout) {
   const columnCount = 13;
   const { osuPink, text, background, alternate, white } = sheetTheme(theme);
   const requests = [
-    { updateCells: { range: { sheetId, startRowIndex: 0, startColumnIndex: 0 }, fields: 'userEnteredValue' } },
     { updateSheetProperties: { properties: { sheetId, gridProperties: { frozenRowCount: 1, hideGridlines: true } }, fields: 'gridProperties.frozenRowCount,gridProperties.hideGridlines' } },
     { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: rowCount, startColumnIndex: 0, endColumnIndex: columnCount }, cell: { userEnteredFormat: { backgroundColor: background, textFormat: { fontFamily: 'JetBrains Mono', fontSize: 10, foregroundColor: text }, horizontalAlignment: 'CENTER', wrapStrategy: 'WRAP', verticalAlignment: 'MIDDLE' } }, fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,wrapStrategy,verticalAlignment)' } },
     { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: columnCount }, cell: { userEnteredFormat: { backgroundColor: osuPink, textFormat: { fontFamily: 'JetBrains Mono', fontSize: 11, bold: true, foregroundColor: white }, horizontalAlignment: 'CENTER' } }, fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)' } },
@@ -416,7 +415,6 @@ function dashboardFormatting(sheetId, rowCount, layout, theme) {
   const green = hexColor('#D9F7E5');
   const red = hexColor('#FBDedb');
   const requests = [
-    { updateCells: { range: { sheetId, startRowIndex: 0, startColumnIndex: 0 }, fields: 'userEnteredValue' } },
     { updateSheetProperties: { properties: { sheetId, gridProperties: { frozenRowCount: 2, hideGridlines: true } }, fields: 'gridProperties.frozenRowCount,gridProperties.hideGridlines' } },
     { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: rowCount, startColumnIndex: 0, endColumnIndex: 4 }, cell: { userEnteredFormat: { backgroundColor: background, textFormat: { fontFamily: 'JetBrains Mono', fontSize: 10, foregroundColor: text }, horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE', wrapStrategy: 'WRAP' } }, fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)' } },
     { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 4 }, cell: { userEnteredFormat: { backgroundColor: osuPink, textFormat: { fontFamily: 'JetBrains Mono', fontSize: 16, bold: true, foregroundColor: white }, horizontalAlignment: 'LEFT' } }, fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)' } },
@@ -480,6 +478,17 @@ async function syncSheet(db, stored, snapshot, theme) {
   categoryModels.forEach((category) => {
     const rows = categoryData.get(category.title);
     formattingRequests.push(...categoryFormatting(sheetMap.get(category.title), rows.length, theme, rows, category.layout));
+  });
+
+  // Clear old values before writing the new snapshot. Keeping this separate
+  // from the formatting batch is essential: an updateCells request with the
+  // userEnteredValue field mask and no values clears every targeted cell.
+  const clearedRanges = [
+    "'Dashboard'!A:D",
+    ...categoryModels.map((category) => `${quotedSheetTitle(category.title)}!A:M`)
+  ];
+  await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}/values:batchClear`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ranges: clearedRanges })
   });
 
   await authorized(db, stored, `${SHEETS_URL}/${spreadsheetId}/values/${encodeURIComponent("'Dashboard'!A1:D" + dashboard.length)}?valueInputOption=USER_ENTERED`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ range: `'Dashboard'!A1:D${dashboard.length}`, majorDimension: 'ROWS', values: dashboard }) });
@@ -594,5 +603,15 @@ router.post('/disconnect', async (_req, res, next) => {
     res.json({ success: true });
   } catch (error) { next(error); }
 });
+
+router.testUtils = {
+  categoryRows,
+  categorySheetModels,
+  categoryFormatting,
+  dashboardFormatting,
+  safeSheetTitle,
+  sheetDate,
+  starDifficultyColor,
+};
 
 module.exports = router;

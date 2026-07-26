@@ -1199,6 +1199,14 @@ router.get('/:id/history', async (req, res, next) => {
   }
 });
 
+router.testUtils = {
+  createRefreshDateResult,
+  formatLifecycleDate,
+  getEffectiveBeatmapDate,
+  normalizedRequestIds,
+  refreshDateJobResponse,
+};
+
 module.exports = router;
 
 // GET /api/requests/beatmap-info - fetch beatmap metadata from osu! link
