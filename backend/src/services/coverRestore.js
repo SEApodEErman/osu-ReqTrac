@@ -26,7 +26,7 @@ async function restoreCoversFromCache(db, { coversDir, download = downloadCover,
           }
         }
       } catch (error) {
-        console.warn(`[cover-restore] Failed to restore cover for beatmapset ${row.beatmapset_id}:`, error.message);
+        console.warn(`[cover-restore] Failed to restore cover for beatmapset ${row.beatmapset_id}:`, String(error?.message ?? error));
       }
     }
   };

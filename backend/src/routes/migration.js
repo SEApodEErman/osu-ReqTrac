@@ -22,6 +22,15 @@ function readJson(value, fallback) {
   }
 }
 
+function prepareBackupFromBody(raw) {
+  if (!Buffer.isBuffer(raw)) return raw;
+  const candidate = JSON.parse(raw.toString('utf8'));
+  if (shouldStripCovers(candidate, raw.byteLength)) {
+    delete candidate.cover_files;
+  }
+  return candidate;
+}
+
 async function spreadsheetBuffer(req) {
   if (req.file) return req.file.buffer;
 
@@ -137,16 +146,7 @@ router.post('/import-json', async (req, res, next) => {
   try {
     let backup;
     try {
-      const raw = req.body;
-      if (Buffer.isBuffer(raw)) {
-        const candidate = JSON.parse(raw.toString('utf8'));
-        if (shouldStripCovers(candidate, raw.byteLength)) {
-          delete candidate.cover_files;
-        }
-        backup = validateBackup(candidate);
-      } else {
-        backup = validateBackup(raw);
-      }
+      backup = validateBackup(prepareBackupFromBody(req.body));
     } catch (error) {
       return res.status(400).json({ error: error.message });
     }
@@ -719,6 +719,7 @@ router.post('/import-spreadsheet', spreadsheetUpload.single('file'), async (req,
 
 router.testUtils = {
   importableCategories,
+  prepareBackupFromBody,
   readJson,
   spreadsheetForName,
 };

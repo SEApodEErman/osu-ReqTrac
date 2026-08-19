@@ -78,3 +78,40 @@ test('restoreCoversFromCache skips rows without a positive beatmapset_id', async
   assert.deepEqual(updates, []);
   await fs.promises.rm(coversDir, { recursive: true, force: true });
 });
+
+test('restoreCoversFromCache resolves and skips when download throws', async () => {
+  const coversDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'reqtrac-restore-'));
+  const updates = [];
+  const db = {
+    all: async () => [{ beatmapset_id: 10, cover_url: 'x', local_cover_path: '/uploads/covers/default.jpg' }],
+    run: async (sql, ...args) => { updates.push({ sql, args }); }
+  };
+  const download = async () => { throw new Error('boom'); };
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    await restoreCoversFromCache(db, { coversDir, download });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.deepEqual(updates, []);
+  await fs.promises.rm(coversDir, { recursive: true, force: true });
+});
+
+test('restoreCoversFromCache does not update when local_cover_path already matches', async () => {
+  const coversDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'reqtrac-restore-'));
+  await fs.promises.writeFile(path.join(coversDir, '10.jpg'), 'cover-data');
+  const updates = [];
+  const db = {
+    all: async () => [{ beatmapset_id: 10, cover_url: 'x', local_cover_path: '/uploads/covers/10.jpg' }],
+    run: async (sql, ...args) => { updates.push({ sql, args }); }
+  };
+  let downloads = 0;
+  const download = async () => { downloads++; };
+
+  await restoreCoversFromCache(db, { coversDir, download });
+
+  assert.equal(downloads, 0);
+  assert.deepEqual(updates, []);
+  await fs.promises.rm(coversDir, { recursive: true, force: true });
+});
