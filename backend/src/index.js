@@ -30,6 +30,7 @@ app.use(cors({
 }));
 
 // Body parsing middleware
+app.use('/api/migration/import-json', express.raw({ type: 'application/json', limit: '1gb' }));
 app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: REQUEST_BODY_LIMIT }));
 app.use(waitForBackupUnlock);
@@ -84,7 +85,8 @@ if (isElectron && process.env.FRONTEND_DIST) {
 app.use((err, req, res, next) => {
   console.error(err.stack);
   if (err.type === 'entity.too.large') {
-    return res.status(413).json({ error: `Request payload exceeds the ${REQUEST_BODY_LIMIT} limit.` });
+    const limitText = err.limit ? `${Math.ceil(err.limit / (1024 * 1024))} MB` : REQUEST_BODY_LIMIT;
+    return res.status(413).json({ error: `Request payload is too large. Maximum allowed is ${limitText}.` });
   }
   res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
 });

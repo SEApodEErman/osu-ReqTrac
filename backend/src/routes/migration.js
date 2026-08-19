@@ -7,9 +7,10 @@ const { createApiJob, addApiJobWork, updateApiJob, finishApiJob } = require('../
 const { parseOsuLink } = require('../utils/requestUtils');
 const { parseWorkbook, suggestMapping, validateMapping, normalizeRows } = require('../utils/spreadsheetImport');
 const { initializeMetadataSyncWorker, pauseMetadataSyncWorker, queueBeatmapMetadata } = require('../services/beatmapMetadataSync');
-const { BACKUP_VERSION, readCoverFiles, validateBackup, writeCoverFiles } = require('../utils/backup');
+const { BACKUP_VERSION, readCoverFiles, shouldStripCovers, validateBackup, writeCoverFiles } = require('../utils/backup');
 const { acquireBackupLock } = require('../utils/backupLock');
-const { waitForBackgroundTasks } = require('../utils/backgroundTasks');
+const { trackBackgroundTask, waitForBackgroundTasks } = require('../utils/backgroundTasks');
+const { restoreCoversFromCache } = require('../services/coverRestore');
 
 const spreadsheetUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -136,7 +137,16 @@ router.post('/import-json', async (req, res, next) => {
   try {
     let backup;
     try {
-      backup = validateBackup(req.body);
+      const raw = req.body;
+      if (Buffer.isBuffer(raw)) {
+        const candidate = JSON.parse(raw.toString('utf8'));
+        if (shouldStripCovers(candidate, raw.byteLength)) {
+          delete candidate.cover_files;
+        }
+        backup = validateBackup(candidate);
+      } else {
+        backup = validateBackup(raw);
+      }
     } catch (error) {
       return res.status(400).json({ error: error.message });
     }
@@ -313,6 +323,10 @@ router.post('/import-json', async (req, res, next) => {
     transactionStarted = false;
     await db.run('PRAGMA foreign_keys = ON');
     await initializeMetadataSyncWorker();
+
+    if (!backup._hasCoverFiles) {
+      trackBackgroundTask(restoreCoversFromCache(db, { coversDir }));
+    }
 
     res.json({ success: true, message: 'Backup JSON restored successfully' });
   } catch (error) {
