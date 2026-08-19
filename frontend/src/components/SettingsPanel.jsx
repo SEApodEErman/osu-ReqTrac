@@ -354,22 +354,13 @@ export default function SettingsPanel({
 
     setIsRestoringJson(true);
     try {
-      const reader = new FileReader();
-      reader.onload = async (event) => {
-        try {
-          const backupObj = JSON.parse(event.target.result);
-          const success = await onImportJson(backupObj);
-          if (success) {
-            setJsonFile(null);
-            e.target.reset();
-          }
-        } catch (err) {
-          onNotify('Invalid backup JSON structure. Make sure you upload a valid backup.json file.', 'error');
-        }
-      };
-      reader.readAsText(jsonFile);
-    } catch (e) {
-      console.error(e);
+      const success = await onImportJson(jsonFile);
+      if (success) {
+        setJsonFile(null);
+        e.target.reset();
+      }
+    } catch (err) {
+      onNotify('Backup restore failed. Make sure you upload a valid backup.json file.', 'error');
     } finally {
       setIsRestoringJson(false);
     }
@@ -718,6 +709,9 @@ export default function SettingsPanel({
           <div style={{ padding: '12px', borderRadius: '8px', border: '1px solid rgba(231, 76, 60, 0.4)', backgroundColor: 'rgba(231, 76, 60, 0.1)', color: 'var(--text-muted)', fontSize: '12px' }}>
             <strong style={{ color: 'var(--priority-high)' }}>Treat backup.json like a key.</strong> It contains your request database and configured osu!/Google credentials. Never upload it to a public repository, issue, chat, or file-sharing link. Store it privately and share it only through a trusted, secure channel.
           </div>
+          <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+            Backups no longer embed cover images, keeping them small and fast to export and import. Cover images re-download automatically in the background after a restore.
+          </p>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
             

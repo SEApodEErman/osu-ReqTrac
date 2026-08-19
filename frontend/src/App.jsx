@@ -729,12 +729,12 @@ export default function App() {
   };
 
   // JSON Restore Backup
-  const handleImportJson = async (backupObj) => {
+  const handleImportJson = async (jsonFile) => {
     try {
       const res = await fetch('/api/migration/import-json', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(backupObj)
+        body: jsonFile
       });
 
       const data = await res.json();
