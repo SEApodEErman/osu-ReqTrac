@@ -5,8 +5,10 @@ const os = require('os');
 const path = require('path');
 const {
   BACKUP_VERSION,
+  COVER_STRIP_THRESHOLD_BYTES,
   getCoverStorageUsage,
   readCoverFiles,
+  shouldStripCovers,
   validateBackup,
   writeCoverFiles
 } = require('../src/utils/backup');
@@ -78,4 +80,25 @@ test('getCoverStorageUsage totals cached cover files only', async () => {
 
   assert.deepEqual(await getCoverStorageUsage(coversDir), { bytes: 30, fileCount: 2 });
   await fs.promises.rm(coversDir, { recursive: true, force: true });
+});
+
+test('validateBackup accepts v5 backups without cover_files', () => {
+  const backup = validateBackup(completeBackup({ version: '5.0.0' }));
+  assert.equal(backup._hasCoverFiles, false);
+  assert.deepEqual(backup.cover_files, []);
+});
+
+test('validateBackup accepts 4.0.0 as a legacy version', () => {
+  const backup = validateBackup(completeBackup({ version: '4.0.0' }));
+  assert.equal(backup.version, '4.0.0');
+});
+
+test('shouldStripCovers only strips oversized legacy backups with covers', () => {
+  const legacy = { version: '4.0.0', cover_files: [{ filename: '1.jpg', data: 'x' }] };
+  const base = COVER_STRIP_THRESHOLD_BYTES;
+  assert.equal(shouldStripCovers(legacy, base), false);
+  assert.equal(shouldStripCovers(legacy, base + 1), true);
+  assert.equal(shouldStripCovers({ ...legacy, version: BACKUP_VERSION }, base + 1), false);
+  assert.equal(shouldStripCovers({ ...legacy, cover_files: [] }, base + 1), false);
+  assert.equal(shouldStripCovers({ ...legacy, version: '9.0.0' }, base + 1), false);
 });

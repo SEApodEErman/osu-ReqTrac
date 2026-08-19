@@ -1,8 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const BACKUP_VERSION = '4.0.0';
-const LEGACY_BACKUP_VERSIONS = new Set(['1.0.0', '2.0.0', '3.0.0']);
+const BACKUP_VERSION = '5.0.0';
+const LEGACY_BACKUP_VERSIONS = new Set(['1.0.0', '2.0.0', '3.0.0', '4.0.0']);
 const DATA_TABLES = [
   'requests',
   'categories',
@@ -19,12 +19,21 @@ const DATA_TABLES = [
   'settings'
 ];
 
+const COVER_STRIP_THRESHOLD_BYTES = 50 * 1024 * 1024;
+
+function shouldStripCovers(backup, bodyByteLength) {
+  return bodyByteLength > COVER_STRIP_THRESHOLD_BYTES
+    && LEGACY_BACKUP_VERSIONS.has(backup?.version)
+    && Array.isArray(backup?.cover_files)
+    && backup.cover_files.length > 0;
+}
+
 function validateBackup(backup) {
   if (!backup || typeof backup !== 'object' || Array.isArray(backup)) {
     throw new Error('Invalid backup JSON structure.');
   }
   if (backup.version !== BACKUP_VERSION && !LEGACY_BACKUP_VERSIONS.has(backup.version)) {
-    throw new Error(`Unsupported backup version. Expected ${BACKUP_VERSION}, 3.0.0, 2.0.0, or 1.0.0.`);
+    throw new Error(`Unsupported backup version. Expected ${BACKUP_VERSION}, 4.0.0, 3.0.0, 2.0.0, or 1.0.0.`);
   }
   for (const table of DATA_TABLES.filter(table => {
     if (table === 'unavailable_osu_users') return false;
@@ -111,9 +120,11 @@ async function writeCoverFiles(coversDir, coverFiles = []) {
 
 module.exports = {
   BACKUP_VERSION,
+  COVER_STRIP_THRESHOLD_BYTES,
   DATA_TABLES,
   getCoverStorageUsage,
   readCoverFiles,
+  shouldStripCovers,
   validateBackup,
   writeCoverFiles
 };
