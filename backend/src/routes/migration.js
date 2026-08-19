@@ -87,7 +87,6 @@ router.get('/export', async (req, res, next) => {
     const request_tags = await db.all('SELECT * FROM request_tags');
     const settings = await db.all('SELECT * FROM settings');
     const sqlite_sequence = await db.all('SELECT name, seq FROM sqlite_sequence');
-    const cover_files = await readCoverFiles(coversDir);
 
     const backup = {
       version: BACKUP_VERSION,
@@ -105,8 +104,7 @@ router.get('/export', async (req, res, next) => {
       tags,
       request_tags,
       settings,
-      sqlite_sequence,
-      cover_files
+      sqlite_sequence
     };
 
     await db.exec('COMMIT');
