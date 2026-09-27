@@ -85,7 +85,8 @@
         "AppImage"
       ],
       "icon": "build/icon.png",
-      "category": "Utility"
+      "category": "Utility",
+      "executableName": "osu-ReqTrac"
     }
   }
 }

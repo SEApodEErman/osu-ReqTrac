@@ -17,7 +17,8 @@
 - Build the renderer with `npm run build:frontend`; this also regenerates `build/icon.png`, `build/icon.ico`, and `build/icon.icns` from `build/icon.svg`.
 - Package with `npm run build` or create an unpacked package with `npm run build:dir`; both build the renderer first. `frontend/dist/` and `release/` are generated output.
 - The frontend has no lint or typecheck; `npm test --prefix frontend` runs `node --test` but matches no test files. The frontend's meaningful verification is the Vite production build (`npm run build:frontend`).
-- `scripts/generate-icon.js` requires `app-builder-bin`, declared explicitly in root devDependencies because `electron-builder` 26 no longer ships it; keep that dependency when upgrading the builder.
+- `scripts/generate-icon.js` requires `app-builder-bin`, declared explicitly in root devDependencies because `electron-builder` 26 no longer ships it; keep that dependency when upgrading the builder. It chmod +x's the binary on unix (npm may install it without the executable bit).
+- `electron-builder` 26 rejects `!` in AppImage path fields: Linux builds must set `linux.executableName` to a path-safe name (here `osu-ReqTrac`) while `productName` keeps `osu!ReqTrac` for display.
 
 ## Configuration And Releases
 
