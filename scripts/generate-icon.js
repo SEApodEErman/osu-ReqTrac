@@ -24,6 +24,11 @@ async function main() {
     .toFile(png);
 
   try {
+    // npm may install app-builder-bin's binary without the executable bit on
+    // unix (install scripts gated); Windows .exe is unaffected.
+    if (process.platform !== 'win32') {
+      fs.chmodSync(appBuilderPath, 0o755);
+    }
     for (const [format, output] of [['ico', ico], ['icns', icns]]) {
       const outputDirectory = path.join(generatedRoot, format);
       execFileSync(appBuilderPath, [
