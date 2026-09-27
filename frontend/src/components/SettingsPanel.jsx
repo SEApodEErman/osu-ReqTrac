@@ -17,7 +17,9 @@ import {
 } from 'lucide-react';
 import SpreadsheetImportModal from './SpreadsheetImportModal';
 
-const APP_VERSION = '1.3.727';
+// Injected at build time from the ROOT package.json version (single source of
+// truth for releases) — see vite.config.js. Never hardcode a version here.
+const APP_VERSION = __APP_VERSION__;
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';

@@ -6,7 +6,9 @@ const path = require('path');
 const {
   BACKUP_VERSION,
   COVER_STRIP_THRESHOLD_BYTES,
+  LOCAL_CREDENTIAL_SETTING_KEYS,
   getCoverStorageUsage,
+  mergeSettingsForRestore,
   readCoverFiles,
   shouldStripCovers,
   validateBackup,
@@ -101,4 +103,75 @@ test('shouldStripCovers only strips oversized legacy backups with covers', () =>
   assert.equal(shouldStripCovers({ ...legacy, version: BACKUP_VERSION }, base + 1), false);
   assert.equal(shouldStripCovers({ ...legacy, cover_files: [] }, base + 1), false);
   assert.equal(shouldStripCovers({ ...legacy, version: '9.0.0' }, base + 1), false);
+});
+
+test('restore keeps this machine\'s OAuth credentials over backup values', () => {
+  const merged = mergeSettingsForRestore(
+    [
+      { key: 'osu_client_id', value: 'attacker-id' },
+      { key: 'osu_client_secret', value: 'attacker-secret' },
+      { key: 'google_refresh_token', value: 'attacker-token' },
+      { key: 'google_access_token', value: 'attacker-access' },
+      { key: 'connected_username', value: 'from-backup' },
+    ],
+    [
+      { key: 'osu_client_id', value: 'local-id' },
+      { key: 'osu_client_secret', value: 'local-secret' },
+      { key: 'google_refresh_token', value: 'local-token' },
+      { key: 'google_access_token', value: '' },
+    ]
+  );
+
+  const byKey = Object.fromEntries(merged.map(row => [row.key, row.value]));
+  assert.equal(byKey.osu_client_id, 'local-id');
+  assert.equal(byKey.osu_client_secret, 'local-secret');
+  assert.equal(byKey.google_refresh_token, 'local-token');
+  assert.equal(byKey.connected_username, 'from-backup');
+});
+
+test('restore adopts backup credentials only when none exist locally', () => {
+  const merged = mergeSettingsForRestore(
+    [
+      { key: 'osu_client_id', value: 'backup-id' },
+      { key: 'osu_client_secret', value: 'backup-secret' },
+      { key: 'google_access_token', value: 'local-empty-skipped' },
+    ],
+    [
+      { key: 'google_access_token', value: '' },
+    ]
+  );
+
+  const byKey = Object.fromEntries(merged.map(row => [row.key, row.value]));
+  assert.equal(byKey.osu_client_id, 'backup-id');
+  assert.equal(byKey.osu_client_secret, 'backup-secret');
+  assert.equal(byKey.google_access_token, 'local-empty-skipped', 'empty local rows do not block backup values');
+});
+
+test('restore writes all non-credential settings from the backup', () => {
+  const merged = mergeSettingsForRestore(
+    [
+      { key: 'connected_username', value: 'someone' },
+      { key: 'google_sheet_id', value: 'sheet-123' },
+    ],
+    [{ key: 'osu_client_id', value: 'local-id' }]
+  );
+
+  assert.deepEqual(merged.slice(0, 2), [
+    { key: 'connected_username', value: 'someone' },
+    { key: 'google_sheet_id', value: 'sheet-123' },
+  ]);
+  assert.deepEqual(merged[2], { key: 'osu_client_id', value: 'local-id' });
+});
+
+test('restore tolerates empty settings tables and preserves only known credential keys', () => {
+  assert.deepEqual(mergeSettingsForRestore(undefined, undefined), []);
+  const merged = mergeSettingsForRestore(
+    [],
+    [
+      { key: 'some_other_key', value: 'not-a-credential' },
+      { key: 'osu_client_secret', value: 'local-secret' },
+    ]
+  );
+  assert.deepEqual(merged, [{ key: 'osu_client_secret', value: 'local-secret' }]);
+  assert.equal(LOCAL_CREDENTIAL_SETTING_KEYS.includes('connected_username'), false);
 });

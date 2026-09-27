@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDatabase, coversDir, BUILTIN_CATEGORIES } = require('../db');
 const { getCredentials, fetchBeatmapset, fetchUser, clearAccessToken } = require('../osuApi');
+const { consumeState, issueState } = require('../utils/oauthState');
 const { acquireBackupLock } = require('../utils/backupLock');
 const { waitForBackgroundTasks } = require('../utils/backgroundTasks');
 const { pauseMetadataSyncWorker, initializeMetadataSyncWorker } = require('../services/beatmapMetadataSync');
@@ -191,7 +192,8 @@ router.get('/oauth-url', async (req, res, next) => {
     }
 
     const redirectUri = getRedirectUri();
-    const oauthUrl = `https://osu.ppy.sh/oauth/authorize?client_id=${client_id}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify`;
+    const state = issueState();
+    const oauthUrl = `https://osu.ppy.sh/oauth/authorize?client_id=${client_id}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify&state=${state}`;
 
     res.json({ url: oauthUrl });
   } catch (error) {
@@ -201,12 +203,19 @@ router.get('/oauth-url', async (req, res, next) => {
 
 // GET /api/settings/oauth-callback - handle callback from osu! OAuth redirect
 router.get('/oauth-callback', async (req, res, next) => {
-  const { code, error: oauthError, error_description: oauthErrorDesc } = req.query;
-  
+  const { code, state, error: oauthError, error_description: oauthErrorDesc } = req.query;
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+
+  // Reject callbacks that do not correspond to an authorization this app
+  // started (login-CSRF protection). osu! echoes the state back on both
+  // success and error redirects, so legitimate flows always carry it.
+  if (!consumeState(state)) {
+    return res.redirect(`${frontendUrl}/settings?oauth_error=invalid_state&error_desc=${encodeURIComponent('The OAuth state parameter is missing, expired, or already used. Start the connection again from osu!ReqTrac.')}`);
+  }
+
   // Handle OAuth errors from osu! (e.g., user denied access)
   if (oauthError) {
     console.error('OAuth error from osu!:', oauthError, oauthErrorDesc);
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     return res.redirect(`${frontendUrl}/settings?oauth_error=${encodeURIComponent(oauthError)}&error_desc=${encodeURIComponent(oauthErrorDesc || '')}`);
   }
 
@@ -244,7 +253,6 @@ router.get('/oauth-callback', async (req, res, next) => {
     if (!tokenRes.ok) {
       console.error('Token exchange failed:', tokenData);
       const errorMsg = tokenData.error_description || tokenData.message || JSON.stringify(tokenData);
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
       return res.redirect(`${frontendUrl}/settings?oauth_error=token_exchange&error_desc=${encodeURIComponent(errorMsg)}`);
     }
 
@@ -261,7 +269,6 @@ router.get('/oauth-callback', async (req, res, next) => {
     if (!userRes.ok) {
       const errText = await userRes.text();
       console.error('Failed to fetch user profile:', errText);
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
       return res.redirect(`${frontendUrl}/settings?oauth_error=user_fetch&error_desc=${encodeURIComponent(errText)}`);
     }
 
@@ -277,7 +284,6 @@ router.get('/oauth-callback', async (req, res, next) => {
     res.redirect(process.env.FRONTEND_URL || 'http://localhost:3000');
   } catch (error) {
     console.error('OAuth Callback Error:', error);
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     res.redirect(`${frontendUrl}/settings?oauth_error=server_error&error_desc=${encodeURIComponent(error.message)}`);
   }
 });

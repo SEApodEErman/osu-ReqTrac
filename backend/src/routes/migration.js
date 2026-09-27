@@ -7,7 +7,7 @@ const { createApiJob, addApiJobWork, updateApiJob, finishApiJob } = require('../
 const { parseOsuLink } = require('../utils/requestUtils');
 const { parseWorkbook, suggestMapping, validateMapping, normalizeRows } = require('../utils/spreadsheetImport');
 const { initializeMetadataSyncWorker, pauseMetadataSyncWorker, queueBeatmapMetadata } = require('../services/beatmapMetadataSync');
-const { BACKUP_VERSION, readCoverFiles, shouldStripCovers, validateBackup, writeCoverFiles } = require('../utils/backup');
+const { BACKUP_VERSION, LOCAL_CREDENTIAL_SETTING_KEYS, mergeSettingsForRestore, readCoverFiles, shouldStripCovers, validateBackup, writeCoverFiles } = require('../utils/backup');
 const { acquireBackupLock } = require('../utils/backupLock');
 const { trackBackgroundTask, waitForBackgroundTasks } = require('../utils/backgroundTasks');
 const { restoreCoversFromCache } = require('../services/coverRestore');
@@ -159,6 +159,13 @@ router.post('/import-json', async (req, res, next) => {
     await db.exec('BEGIN TRANSACTION');
     transactionStarted = true;
 
+    // Capture this machine's OAuth credential rows before the wipe below;
+    // restore must never overwrite them with backup contents.
+    const localCredentialRows = await db.all(
+      `SELECT key, value FROM settings WHERE key IN (${LOCAL_CREDENTIAL_SETTING_KEYS.map(() => '?').join(',')})`,
+      LOCAL_CREDENTIAL_SETTING_KEYS
+    );
+
     // Clear existing tables
     await db.run('DELETE FROM request_categories');
     await db.run('DELETE FROM request_guest_difficulties');
@@ -298,8 +305,9 @@ router.post('/import-json', async (req, res, next) => {
       await db.run('INSERT OR IGNORE INTO request_tags (request_id, tag_id) VALUES (?, ?)', [rt.request_id, restoredTagIds.get(rt.tag_id) || rt.tag_id]);
     }
 
-    // Insert settings
-    for (const s of backup.settings || []) {
+    // Insert settings. This machine's credential rows always win over backup
+    // values; the backup's are adopted only when nothing is configured locally.
+    for (const s of mergeSettingsForRestore(backup.settings || [], localCredentialRows)) {
       await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [s.key, s.value]);
     }
 

@@ -1,7 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const sqlite3 = require('sqlite3');
-const { open } = require('sqlite');
+const { open } = require('../src/utils/sqliteAdapter');
 const {
   canonicalDifficultyNames,
   getUnavailableUserIds,
@@ -10,7 +9,7 @@ const {
 } = require('../src/utils/userIdentity');
 
 test('creator identity keeps aliases while displaying the latest username', async () => {
-  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  const db = await open({ filename: ':memory:' });
   await db.exec(`
     CREATE TABLE users_cache (id INTEGER PRIMARY KEY, username TEXT NOT NULL, avatar_url TEXT NOT NULL, country_code TEXT NOT NULL, last_updated DATETIME);
     CREATE TABLE user_username_history (user_id INTEGER NOT NULL, username TEXT COLLATE NOCASE NOT NULL, first_seen DATETIME, last_seen DATETIME, PRIMARY KEY (user_id, username));
@@ -27,7 +26,7 @@ test('creator identity keeps aliases while displaying the latest username', asyn
 });
 
 test('unavailable users are persisted once by stable positive user ID', async () => {
-  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  const db = await open({ filename: ':memory:' });
   await db.exec(`
     CREATE TABLE unavailable_osu_users (
       user_id INTEGER PRIMARY KEY CHECK(user_id > 0),

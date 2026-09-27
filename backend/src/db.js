@@ -1,6 +1,5 @@
 const path = require('path');
-const sqlite3 = require('sqlite3');
-const { open } = require('sqlite');
+const { open } = require('./utils/sqliteAdapter');
 const fs = require('fs');
 
 // Determine data directory — use Electron userData path if available
@@ -38,8 +37,7 @@ async function getDatabase() {
   if (dbInstance) return dbInstance;
 
   dbInstance = await open({
-    filename: dbPath,
-    driver: sqlite3.Database
+    filename: dbPath
   });
 
   // Enable foreign key support

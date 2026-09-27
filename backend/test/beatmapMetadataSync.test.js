@@ -1,7 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const sqlite3 = require('sqlite3');
-const { open } = require('sqlite');
+const { open } = require('../src/utils/sqliteAdapter');
 const {
   getFailedMetadata,
   processMetadataSyncEntry,
@@ -33,7 +32,7 @@ test('queueBeatmapMetadata stores provisional data and deduplicates queue entrie
 });
 
 test('queueBeatmapMetadata writes a valid provisional cache and persistent queue row', async () => {
-  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  const db = await open({ filename: ':memory:' });
   await db.exec(`
     CREATE TABLE beatmap_cache (
       beatmapset_id INTEGER PRIMARY KEY, artist TEXT NOT NULL, title TEXT NOT NULL,
@@ -102,7 +101,7 @@ test('processMetadataSyncEntry stops retrying after the third failed attempt', a
 });
 
 test('getFailedMetadata returns the failed mapset, its error, and cached context', async () => {
-  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  const db = await open({ filename: ':memory:' });
   await db.exec(`
     CREATE TABLE beatmap_metadata_sync (
       beatmapset_id INTEGER PRIMARY KEY, status TEXT NOT NULL, attempt_count INTEGER NOT NULL,

@@ -316,30 +316,54 @@ async function fetchUser(userIdOrUsername) {
   return apiFetch(`users/${encodeURIComponent(userIdOrUsername)}/osu?key=${keyType}`);
 }
 
+// Cover images are only ever fetched from the official osu! asset CDN. The
+// cover URL is attacker-controllable through restored backup data
+// (beatmap_cache.cover_url), and its response is written to disk and served
+// back from /uploads/covers, so allowing arbitrary URLs here would be an SSRF
+// with a response-exfiltration channel. Anything else falls back to the
+// canonical assets.ppy.sh URL derived from the validated beatmapset ID.
+const ALLOWED_COVER_HOSTS = new Set(['assets.ppy.sh']);
+
+function isAllowedCoverUrl(coverUrl) {
+  if (typeof coverUrl !== 'string' || !coverUrl) return false;
+  try {
+    const url = new URL(coverUrl);
+    return url.protocol === 'https:'
+      && ALLOWED_COVER_HOSTS.has(url.host)
+      && url.pathname.startsWith('/beatmaps/');
+  } catch {
+    return false;
+  }
+}
+
 // Download cover image to local directory
 async function downloadCover(beatmapsetId, coverUrl) {
+  const numericBeatmapsetId = Number(beatmapsetId);
+  if (!Number.isSafeInteger(numericBeatmapsetId) || numericBeatmapsetId <= 0) {
+    return '/uploads/covers/default.jpg';
+  }
   try {
-    const destPath = path.resolve(coversDir, `${beatmapsetId}.jpg`);
+    const destPath = path.resolve(coversDir, `${numericBeatmapsetId}.jpg`);
     
     // Default cover fallback if not provided
-    const url = coverUrl || `https://assets.ppy.sh/beatmaps/${beatmapsetId}/covers/cover.jpg`;
-
+    const fallbackUrl = `https://assets.ppy.sh/beatmaps/${numericBeatmapsetId}/covers/cover.jpg`;
+    const url = isAllowedCoverUrl(coverUrl) ? coverUrl : fallbackUrl;
     const res = await fetchWithTimeout(url);
     if (!res.ok) {
       // Try fallback URL if the provided one failed
-      if (url !== `https://assets.ppy.sh/beatmaps/${beatmapsetId}/covers/cover.jpg`) {
-        return downloadCover(beatmapsetId, `https://assets.ppy.sh/beatmaps/${beatmapsetId}/covers/cover.jpg`);
+      if (url !== fallbackUrl) {
+        return downloadCover(numericBeatmapsetId, fallbackUrl);
       }
       throw new Error(`Failed to download cover image: status ${res.status}`);
     }
 
     const buffer = Buffer.from(await res.arrayBuffer());
     await fs.promises.writeFile(destPath, buffer);
-    return `/uploads/covers/${beatmapsetId}.jpg`;
+    return `/uploads/covers/${numericBeatmapsetId}.jpg`;
   } catch (error) {
-    console.error(`Error downloading cover for beatmapset ${beatmapsetId}:`, error.message);
+    console.error(`Error downloading cover for beatmapset ${numericBeatmapsetId}:`, error.message);
     // Return a default placeholder string or local route to handle error gracefully
-    return `/uploads/covers/default.jpg`;
+    return '/uploads/covers/default.jpg';
   }
 }
 
@@ -355,5 +379,6 @@ module.exports = {
   addApiJobWork,
   updateApiJob,
   finishApiJob,
-  clearAccessToken
+  clearAccessToken,
+  isAllowedCoverUrl
 };

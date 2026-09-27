@@ -3,6 +3,7 @@ const cors = require('cors');
 const path = require('path');
 const { getDatabase, coversDir } = require('./db');
 const { waitForBackupUnlock } = require('./utils/backupLock');
+const { corsOriginCallback, localApiGuard } = require('./utils/httpSecurity');
 
 // Load local backend/.env when running outside a process manager.
 try {
@@ -18,13 +19,14 @@ const REQUEST_BODY_LIMIT = '50mb';
 // In standalone/dev we keep the fixed port for the Vite proxy.
 const PORT = process.env.PORT || (isElectron ? 0 : 3001);
 
-// CORS setup — allow both Vite dev server and Electron file:// protocol
-const corsOrigin = process.env.ELECTRON_RUN === '1'
-  ? true
-  : (process.env.FRONTEND_URL || 'http://localhost:3000');
-
+// CORS setup — allow both Vite dev server and Electron file:// protocol.
+// Only loopback origins are reflected; the local API is not a web API and
+// must never be readable by arbitrary websites. localApiGuard additionally
+// rejects cross-site requests outright (including simple form POSTs that
+// bypass CORS) and blocks DNS-rebinding Host headers.
+app.use(localApiGuard);
 app.use(cors({
-  origin: corsOrigin,
+  origin: corsOriginCallback,
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   credentials: true
 }));

@@ -89,3 +89,25 @@ test('makes duplicate headers distinct so one can be ignored independently', () 
 
   assert.deepEqual(sheet.headers, ['Notes', 'Notes (2)']);
 });
+
+// Regression guard for the SheetJS prototype-pollution advisory
+// (GHSA-4r6h-8v6p-xvw6). Parsed workbooks are attacker-controlled input on
+// the import route, so parsing must never touch Object.prototype.
+test('parsing hostile workbooks does not pollute prototypes', () => {
+  const XLSX = require('xlsx');
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.aoa_to_sheet([['__proto__', 'constructor'], ['polluted', 'pwned']]);
+  sheet['!definedNames'] = [{ Name: '__proto__', Ref: "'__proto__'!A1" }];
+  XLSX.utils.book_append_sheet(workbook, sheet, '__proto__');
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['Title'], ['Manual request']]), 'Sheet2');
+  const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+  const sheets = parseWorkbook(buffer);
+  assert.ok(sheets.length >= 2);
+
+  assert.equal(({}).polluted, undefined);
+  assert.equal(({}).pwned, undefined);
+  assert.equal(Object.prototype.polluted, undefined);
+  assert.equal(Object.keys(Object.prototype).length, 0);
+  assert.equal(Object.getOwnPropertyNames(Object.prototype).includes('polluted'), false);
+});

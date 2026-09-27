@@ -1,8 +1,11 @@
 name: Release
 
 # Publishes installers to GitHub Releases when a version tag is pushed.
-#   git tag v1.0.0
-#   git push origin v1.0.0
+# Name a release with ONE command so every version string follows:
+#   npm version 1.4.5        # bumps root + backend + frontend manifests,
+#                            # commits, and tags v1.4.5
+#   git push origin main --follow-tags
+# The workflow fails fast if the tag and package.json version disagree.
 on:
   push:
     tags:
@@ -23,6 +26,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Verify tag matches package.json version
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag v$TAG_VERSION does not match package.json version $PKG_VERSION. Run 'npm version $TAG_VERSION' so the release version flows into every version string."
+            exit 1
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v7

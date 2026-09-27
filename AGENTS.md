@@ -6,6 +6,8 @@
 - Development runs the backend on `3001` and Vite on `3000`; Electron waits for both ports before loading Vite. Vite proxies `/api` and `/uploads` to the backend.
 - This is not an npm workspace. Backend runtime dependencies are duplicated in the root package for Electron packaging and in `backend/` for standalone development; update both manifests and lockfiles when changing them.
 - SQLite data is persistent application state: standalone runs use `backend/data/`, while Electron runs use the Electron user-data directory. Schema creation and lightweight migrations live in `backend/src/db.js`.
+- All SQLite access goes through `backend/src/utils/sqliteAdapter.js`, a promise-API shim over Node's built-in `node:sqlite` (`DatabaseSync`) matching the old `sqlite` wrapper contract (`run` resolves to `{ lastID, changes }`; params may be spread or one array; `undefined` binds as NULL). There is deliberately no native DB driver: do not reintroduce `sqlite`/`sqlite3`, `asarUnpack`, or `electron-builder install-app-deps`.
+- The local HTTP API is unauthenticated; its trust boundary is loopback-only enforcement in `backend/src/utils/httpSecurity.js` (`localApiGuard` runs before CORS in `backend/src/index.js`). Keep outbound cover downloads on the official osu! asset CDN (`isAllowedCoverUrl` in `backend/src/osuApi.js`) and the osu! OAuth login on one-time CSRF state tokens (`backend/src/utils/oauthState.js`).
 
 ## Commands
 
@@ -14,7 +16,8 @@
 - Run backend tests with `npm test --prefix backend`; focus a file with `npm test --prefix backend -- test/requestUtils.test.js`, or combine file and name filtering with `npm test --prefix backend -- --test-name-pattern="pattern" test/requestUtils.test.js`.
 - Build the renderer with `npm run build:frontend`; this also regenerates `build/icon.png`, `build/icon.ico`, and `build/icon.icns` from `build/icon.svg`.
 - Package with `npm run build` or create an unpacked package with `npm run build:dir`; both build the renderer first. `frontend/dist/` and `release/` are generated output.
-- The frontend has no test, lint, or typecheck script; its available verification is the Vite production build.
+- The frontend has no lint or typecheck; `npm test --prefix frontend` runs `node --test` but matches no test files. The frontend's meaningful verification is the Vite production build (`npm run build:frontend`).
+- `scripts/generate-icon.js` requires `app-builder-bin`, declared explicitly in root devDependencies because `electron-builder` 26 no longer ships it; keep that dependency when upgrading the builder.
 
 ## Configuration And Releases
 
@@ -22,9 +25,14 @@
 - Despite `backend/.env.example`, `OSU_CLIENT_ID` and `OSU_CLIENT_SECRET` are not read from the environment; osu! credentials are stored in the SQLite `settings` table through the app.
 - `backend/google-oauth.json` is gitignored and may be created from `backend/google-oauth.json.example`; never commit OAuth credentials or local `.env` files.
 - Do not replace or ignore the top-level `build/` directory: its icon resources are committed and used by Electron Builder.
-- A release is triggered by pushing a `v*` tag. CI uses Node 24, installs the root and frontend lockfiles, creates `backend/google-oauth.json` from GitHub secrets, and publishes platform installers.
+- The app version has one source of truth: the ROOT `package.json` `version`. Frontend version strings (Settings panel) are injected at build time via the `__APP_VERSION__` Vite define (`frontend/vite.config.js`); never hardcode a version in UI code.
+- Name a release with `npm version <x.y.z>`: the `version` script (`scripts/sync-version.js`) propagates the version into the backend/frontend manifests and lockfiles and stages them into npm's version commit, which carries the `vX.Y.Z` tag. Push with `git push origin main --follow-tags`.
+- A release is triggered by pushing a `v*` tag. CI (`release.yml`) uses Node 24, installs the root and frontend lockfiles, creates `backend/google-oauth.json` from GitHub secrets, and publishes platform installers — and fails fast when the tag and the root `package.json` version disagree. CI is the authoritative packaging and auto-update test.
 
 ## Verification
 
 - The automated suite is backend-focused Node tests using mocks, temporary files, and in-memory SQLite; it does not validate the Electron shell, renderer, or full API flows.
-- If changing a persistent database schema, add or update the migration logic in `backend/src/db.js` rather than relying only on a fresh database.
+- If changing a persistent database schema, add or update the migration logic in `backend/src/db.js` rather than relying only on a fresh database. Databases in the wild predate the current schema (e.g. missing `categories`); migrations run automatically on startup and must stay idempotent.
+- `POST /api/migration/import-json` and `POST /api/settings/delete-all-data` wipe all tables. When exercising restore flows end to end, run the backend against a copy of the database, never live user data.
+- Restore intentionally preserves this machine's OAuth credential rows over backup-supplied values (`LOCAL_CREDENTIAL_SETTING_KEYS` / `mergeSettingsForRestore` in `backend/src/utils/backup.js`); backup values are adopted only when nothing is configured locally. Keep this behavior.
+- Backup export/restore serialize behind a global backup lock and wait for background metadata-sync work to drain; against an old database the startup sync queue (throttled osu! API calls) can stall the whole API for minutes. That serialization is by design — do not bypass the wait.

@@ -21,6 +21,28 @@ const DATA_TABLES = [
 
 const COVER_STRIP_THRESHOLD_BYTES = 50 * 1024 * 1024;
 
+// Credential rows are local trust anchors: osu! OAuth client credentials and
+// Google tokens identify this installation to third-party OAuth providers.
+// Restoring a backup must never swap them out — a hostile backup carrying the
+// attacker's OAuth client ID would otherwise hijack the next "connect
+// account" handshake. A backup's values are only adopted when this machine
+// has none of its own (fresh-install migration).
+const LOCAL_CREDENTIAL_SETTING_KEYS = [
+  'osu_client_id',
+  'osu_client_secret',
+  'google_access_token',
+  'google_refresh_token'
+];
+
+function mergeSettingsForRestore(backupSettings = [], localCredentialRows = []) {
+  const preservedRows = (localCredentialRows || []).filter(row =>
+    LOCAL_CREDENTIAL_SETTING_KEYS.includes(row.key) && row.value
+  );
+  const preservedKeys = new Set(preservedRows.map(row => row.key));
+  const restoredRows = (backupSettings || []).filter(row => !preservedKeys.has(row.key));
+  return [...restoredRows, ...preservedRows];
+}
+
 function shouldStripCovers(backup, bodyByteLength) {
   return bodyByteLength > COVER_STRIP_THRESHOLD_BYTES
     && LEGACY_BACKUP_VERSIONS.has(backup?.version)
@@ -122,7 +144,9 @@ module.exports = {
   BACKUP_VERSION,
   COVER_STRIP_THRESHOLD_BYTES,
   DATA_TABLES,
+  LOCAL_CREDENTIAL_SETTING_KEYS,
   getCoverStorageUsage,
+  mergeSettingsForRestore,
   readCoverFiles,
   shouldStripCovers,
   validateBackup,

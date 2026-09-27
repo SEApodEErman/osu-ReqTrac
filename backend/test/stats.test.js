@@ -1,11 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const sqlite3 = require('sqlite3');
-const { open } = require('sqlite');
+const { open } = require('../src/utils/sqliteAdapter');
 const { getDashboardStats, resolveStatsCategoryId } = require('../src/routes/stats');
 
 async function createStatsDatabase() {
-  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  const db = await open({ filename: ':memory:' });
   await db.exec(`
     CREATE TABLE categories (
       id INTEGER PRIMARY KEY,

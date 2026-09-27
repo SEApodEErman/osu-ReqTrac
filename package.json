@@ -8,12 +8,12 @@
     "install:backend": "npm install --prefix backend",
     "install:frontend": "npm install --prefix frontend",
     "install:all": "npm install && npm run install:backend && npm run install:frontend",
-    "postinstall": "electron-builder install-app-deps",
     "dev:backend": "cross-env PORT=3001 npm run dev --prefix backend",
     "dev:frontend": "cd frontend && npx vite",
     "dev:electron": "wait-on tcp:3000 tcp:3001 && cross-env NODE_ENV=development electron .",
     "dev": "concurrently -n \"backend,frontend,electron\" -c \"yellow,cyan,green\" \"npm run dev:backend\" \"npm run dev:frontend\" \"npm run dev:electron\"",
     "generate:icon": "node scripts/generate-icon.js",
+    "version": "node scripts/sync-version.js",
     "build:frontend": "npm run generate:icon && cd frontend && npx vite build",
     "build": "npm run build:frontend && electron-builder",
     "build:dir": "npm run build:frontend && electron-builder --dir",
@@ -22,18 +22,17 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "electron-updater": "^6.3.9",
+    "electron-updater": "^6.8.9",
     "express": "^4.19.2",
     "multer": "^2.2.0",
-    "sqlite": "^5.1.1",
-    "sqlite3": "^5.1.7",
-    "xlsx": "^0.18.5"
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
+    "app-builder-bin": "^4.2.0",
     "concurrently": "^8.2.2",
     "cross-env": "^7.0.3",
-    "electron": "^35.0.0",
-    "electron-builder": "^25.0.0",
+    "electron": "^43.7.5",
+    "electron-builder": "^26.15.3",
     "sharp": "^0.35.3",
     "wait-on": "^8.0.1"
   },
@@ -52,9 +51,6 @@
       "frontend/dist/**/*",
       "node_modules/**/*",
       "!**/*.map"
-    ],
-    "asarUnpack": [
-      "node_modules/sqlite3/**/*"
     ],
     "publish": [
       {

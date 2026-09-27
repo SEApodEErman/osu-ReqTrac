@@ -1,13 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const sqlite3 = require('sqlite3');
-const { open } = require('sqlite');
+const { open } = require('../src/utils/sqliteAdapter');
 const { runApplicationMigrations } = require('../src/db');
 const { normalizeGuestDifficulties, replaceGuestDifficulties } = require('../src/utils/catalog');
 const { findUserDifficulties } = require('../src/utils/requestUtils');
 
 test('application migration backfills dynamic categories, guest rows, and case-insensitive tags idempotently', async () => {
-  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  const db = await open({ filename: ':memory:' });
   await db.run('PRAGMA foreign_keys = ON');
   await db.exec(`
     CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP);
@@ -56,7 +55,7 @@ test('application migration backfills dynamic categories, guest rows, and case-i
 });
 
 test('username history migration recovers former creator names from cached beatmaps', async () => {
-  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  const db = await open({ filename: ':memory:' });
   await db.exec(`
     CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE users_cache (id INTEGER PRIMARY KEY, username TEXT NOT NULL, avatar_url TEXT NOT NULL, country_code TEXT NOT NULL, last_updated DATETIME);
@@ -127,7 +126,7 @@ test('plural guest resolver merges account-owned and manually assigned difficult
 });
 
 test('guest difficulty replacement is compatible, mode-aware, and transaction-safe for existing requests', async () => {
-  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  const db = await open({ filename: ':memory:' });
   await db.run('PRAGMA foreign_keys = ON');
   await db.exec(`
     CREATE TABLE requests (
