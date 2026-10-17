@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { getDatabase, coversDir } = require('./db');
 
 let accessToken = null;
@@ -7,7 +8,6 @@ let tokenExpiresAt = null;
 let accessTokenRequest = null;
 let rateLimitedUntil = null;
 let lastRequestTime = 0;
-let apiRequestQueue = Promise.resolve();
 let pendingApiRequests = 0;
 let lastApiError = null;
 let lastApiErrorAt = null;
@@ -15,10 +15,42 @@ let nextApiJobId = 1;
 let nextApiRequestId = 1;
 const apiJobs = new Map();
 const RATE_LIMIT_WAIT = 30000;
-const MIN_REQUEST_INTERVAL = 2000;
 const NETWORK_TIMEOUT_MS = 30000;
 const MAX_RATE_LIMIT_RETRIES = 2;
 const MAX_BEATMAPS_PER_REQUEST = 50;
+const MAX_USERS_PER_REQUEST = 50;
+
+// osu! allows 1200 requests/minute but asks API consumers to stay at or below
+// 60/minute. Calls are scheduled through priority lanes so work the user is
+// waiting on is never stuck behind background synchronization:
+//   interactive - a user action in the UI (add, open, refresh one request)
+//   bulk        - jobs the user started and is watching (imports, date refresh)
+//   background  - passive upkeep (metadata sync worker, username refresh)
+// User-driven lanes use the recommended 60/minute pace; background upkeep
+// keeps a slower pace so it never consumes the whole budget on its own.
+const API_PRIORITIES = ['interactive', 'bulk', 'background'];
+const DEFAULT_MIN_REQUEST_INTERVALS = [1000, 1000, 2000];
+let minRequestIntervals = [...DEFAULT_MIN_REQUEST_INTERVALS];
+const MIN_REQUEST_INTERVAL = DEFAULT_MIN_REQUEST_INTERVALS[0];
+const apiPriorityContext = new AsyncLocalStorage();
+const apiLanes = API_PRIORITIES.map(() => []);
+let apiPumpRunning = false;
+const inflightApiFetches = new Map();
+
+function priorityRank(priority) {
+  const rank = API_PRIORITIES.indexOf(priority);
+  return rank === -1 ? 1 : rank;
+}
+
+// Run fn (and every osu! API call it makes, including in awaited
+// continuations) at the given priority.
+function runWithApiPriority(priority, fn) {
+  return apiPriorityContext.run(priority, fn);
+}
+
+function currentApiRank() {
+  return priorityRank(apiPriorityContext.getStore() ?? 'bulk');
+}
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = NETWORK_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -34,35 +66,65 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function throttle() {
-  const elapsed = Date.now() - lastRequestTime;
-  if (elapsed < MIN_REQUEST_INTERVAL) {
-    await sleep(MIN_REQUEST_INTERVAL - elapsed);
+function nextQueuedApiRequest() {
+  const lane = apiLanes.find(items => items.length > 0);
+  return lane ? lane[0] : null;
+}
+
+async function pumpApiQueue() {
+  if (apiPumpRunning) return;
+  apiPumpRunning = true;
+  try {
+    for (let item = nextQueuedApiRequest(); item; item = nextQueuedApiRequest()) {
+      await waitIfRateLimited();
+      // Re-check the head while waiting so a newly queued interactive call
+      // takes over the next slot with its own (shorter) spacing.
+      for (;;) {
+        item = nextQueuedApiRequest();
+        const wait = lastRequestTime + minRequestIntervals[item.rank] - Date.now();
+        if (wait <= 0) break;
+        await sleep(Math.min(wait, 200));
+      }
+      apiLanes[item.rank].shift();
+      item.started = true;
+      console.log(`${item.logPrefix} Sending ${item.description} (${API_PRIORITIES[item.rank]}).`);
+      try {
+        const response = await item.request();
+        lastRequestTime = Date.now();
+        if (response.status === 429) setRateLimited();
+        console.log(`${item.logPrefix} Completed ${item.description} with HTTP ${response.status}.`);
+        item.resolve(response);
+      } catch (error) {
+        lastRequestTime = Date.now();
+        console.error(`${item.logPrefix} Failed ${item.description}:`, error.message);
+        item.reject(error);
+      }
+    }
+  } finally {
+    apiPumpRunning = false;
   }
 }
 
-function queueApiRequest(request, description) {
+function promoteQueuedApiRequest(item, rank) {
+  if (!item || item.started || rank >= item.rank) return;
+  const lane = apiLanes[item.rank];
+  const index = lane.indexOf(item);
+  if (index === -1) return;
+  lane.splice(index, 1);
+  item.rank = rank;
+  apiLanes[rank].push(item);
+}
+
+function queueApiRequest(request, description, { rank = currentApiRank(), onQueued } = {}) {
   const requestId = nextApiRequestId++;
   const logPrefix = `[osuApi #${requestId}]`;
   console.log(`${logPrefix} Queued ${description}.`);
-
-  const queuedRequest = apiRequestQueue.then(async () => {
-    await waitIfRateLimited();
-    await throttle();
-    console.log(`${logPrefix} Sending ${description}.`);
-    try {
-      const response = await request();
-      lastRequestTime = Date.now();
-      if (response.status === 429) setRateLimited();
-      console.log(`${logPrefix} Completed ${description} with HTTP ${response.status}.`);
-      return response;
-    } catch (error) {
-      console.error(`${logPrefix} Failed ${description}:`, error.message);
-      throw error;
-    }
+  return new Promise((resolve, reject) => {
+    const item = { request, description, logPrefix, rank, resolve, reject, started: false };
+    apiLanes[rank].push(item);
+    onQueued?.(item);
+    void pumpApiQueue();
   });
-  apiRequestQueue = queuedRequest.catch(() => {});
-  return queuedRequest;
 }
 
 async function waitIfRateLimited() {
@@ -91,6 +153,11 @@ function describeApiRequest(endpoint) {
 
   const beatmapMatch = path.match(/^beatmaps\/(\d+)$/);
   if (beatmapMatch) return `fetch beatmap ${beatmapMatch[1]}`;
+
+  if (path === 'users') {
+    const ids = [...new URLSearchParams(query || '').getAll('ids[]')];
+    if (ids.length) return `fetch ${ids.length} user${ids.length === 1 ? '' : 's'}`;
+  }
 
   if (path === 'beatmaps') {
     const ids = [...new URLSearchParams(query || '').getAll('ids[]')];
@@ -205,28 +272,50 @@ async function getAccessToken() {
   return accessTokenRequest;
 }
 
-// Helper to make authenticated requests to osu! API
-async function apiFetch(endpoint, rateLimitRetries = 0) {
+// Helper to make authenticated requests to osu! API. Identical concurrent GETs
+// share one call; a higher-priority caller promotes the queued call.
+function apiFetch(endpoint) {
+  const rank = currentApiRank();
+  const existing = inflightApiFetches.get(endpoint);
+  if (existing) {
+    existing.promote(rank);
+    return existing.promise;
+  }
+
+  const entry = {
+    rank,
+    item: null,
+    promote(nextRank) {
+      this.rank = Math.min(this.rank, nextRank);
+      promoteQueuedApiRequest(this.item, this.rank);
+    },
+  };
+  entry.promise = performApiFetch(endpoint, entry).finally(() => inflightApiFetches.delete(endpoint));
+  inflightApiFetches.set(endpoint, entry);
+  return entry.promise;
+}
+
+async function performApiFetch(endpoint, entry) {
   pendingApiRequests++;
   const requestDescription = describeApiRequest(endpoint);
   try {
-    const token = await getAccessToken();
     const url = endpoint.startsWith('http') ? endpoint : `https://osu.ppy.sh/api/v2/${endpoint.replace(/^\//, '')}`;
+    let response;
+    for (let rateLimitRetries = 0; ; rateLimitRetries++) {
+      const token = await runWithApiPriority(API_PRIORITIES[entry.rank], () => getAccessToken());
+      response = await queueApiRequest(() => fetchWithTimeout(url, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/json',
+          'x-api-version': '20220705'
+        }
+      }), requestDescription, { rank: entry.rank, onQueued: item => { entry.item = item; } });
 
-    const response = await queueApiRequest(() => fetchWithTimeout(url, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Accept': 'application/json',
-        'x-api-version': '20220705'
-      }
-    }), requestDescription);
-
-    if (response.status === 429) {
+      if (response.status !== 429) break;
       if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
         throw new Error('osu! API rate limit persisted after several retries.');
       }
       await waitIfRateLimited();
-      return apiFetch(endpoint, rateLimitRetries + 1);
     }
 
     if (!response.ok) {
@@ -258,11 +347,13 @@ function getApiStatus() {
   }));
   const queuedJobRequests = jobs.reduce((total, job) => total + job.remainingRequests, 0);
   const throttleSeconds = Math.ceil(((pendingApiRequests + queuedJobRequests) * MIN_REQUEST_INTERVAL) / 1000);
+  const queuedByPriority = Object.fromEntries(API_PRIORITIES.map((priority, rank) => [priority, apiLanes[rank].length]));
 
   return {
     pendingRequests: pendingApiRequests,
     queuedRequests: queuedJobRequests,
     jobs,
+    queuedByPriority,
     throttleMs: MIN_REQUEST_INTERVAL,
     estimatedSeconds: Math.max(throttleSeconds, rateLimitSeconds),
     rateLimitedSeconds: rateLimitSeconds,
@@ -335,6 +426,26 @@ async function fetchBeatmaps(beatmapIds, { onBatchError } = {}) {
   return normalizedIds.map(id => id === null ? null : beatmapsById.get(id) || null);
 }
 
+// Fetch up to 50 users per call. Returns a Map of user ID to user for every
+// user osu! returned; IDs from a failed batch are reported through onBatchError.
+async function fetchUsers(userIds, { onBatchError } = {}) {
+  const ids = [...new Set((userIds || []).map(Number).filter(id => Number.isSafeInteger(id) && id > 0))];
+  const usersById = new Map();
+  for (let i = 0; i < ids.length; i += MAX_USERS_PER_REQUEST) {
+    const batch = ids.slice(i, i + MAX_USERS_PER_REQUEST);
+    try {
+      const data = await apiFetch(`users?${batch.map(id => `ids[]=${id}`).join('&')}`);
+      for (const user of Array.isArray(data?.users) ? data.users : []) {
+        if (Number.isSafeInteger(user?.id)) usersById.set(user.id, user);
+      }
+    } catch (error) {
+      console.error(`Failed to fetch user batch starting with ID ${batch[0]}:`, error.message);
+      onBatchError?.(batch, error);
+    }
+  }
+  return usersById;
+}
+
 // Fetch user profile (caches requesters)
 async function fetchUser(userIdOrUsername) {
   // If it's a numeric ID, search by ID, otherwise by username
@@ -399,6 +510,7 @@ module.exports = {
   fetchBeatmap,
   fetchBeatmaps,
   fetchUser,
+  fetchUsers,
   downloadCover,
   getCredentials,
   getApiStatus,
@@ -408,5 +520,12 @@ module.exports = {
   finishApiJob,
   clearAccessToken,
   isAllowedCoverUrl,
-  verifyCredentials
+  verifyCredentials,
+  runWithApiPriority,
+  API_PRIORITIES,
+  testUtils: {
+    setMinRequestIntervals(intervals) {
+      minRequestIntervals = intervals ? [...intervals] : [...DEFAULT_MIN_REQUEST_INTERVALS];
+    },
+  },
 };

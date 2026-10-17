@@ -4,6 +4,7 @@ const path = require('path');
 const { getDatabase, coversDir } = require('./db');
 const { waitForBackupUnlock } = require('./utils/backupLock');
 const { corsOriginCallback, localApiGuard } = require('./utils/httpSecurity');
+const { runWithApiPriority } = require('./osuApi');
 
 // Load local backend/.env when running outside a process manager.
 try {
@@ -40,6 +41,9 @@ app.use('/api/migration/import-json', express.raw({ type: 'application/json', li
 app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: REQUEST_BODY_LIMIT }));
 app.use(waitForBackupUnlock);
+// osu! API calls made while answering a UI request jump ahead of bulk jobs and
+// background upkeep; long-running work re-labels itself where it starts.
+app.use((req, res, next) => runWithApiPriority('interactive', next));
 
 // Serve cover images statically from the SQLite data folder
 app.use('/uploads/covers', express.static(coversDir));
@@ -138,7 +142,7 @@ async function startServer() {
   await initializeMetadataSyncWorker();
   const { refreshKnownCreatorIdentities } = require('./routes/beatmaps');
   const { trackBackgroundTask } = require('./utils/backgroundTasks');
-  trackBackgroundTask(refreshKnownCreatorIdentities(await getDatabase()).catch(error => {
+  trackBackgroundTask(runWithApiPriority('background', async () => refreshKnownCreatorIdentities(await getDatabase())).catch(error => {
     console.error('[user-identities] Background refresh failed:', error.message);
   }));
   console.log('Database initialized successfully.');

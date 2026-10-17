@@ -1,5 +1,6 @@
 const { getDatabase } = require('../db');
 const { refreshAndCacheBeatmapset } = require('../routes/beatmaps');
+const { runWithApiPriority } = require('../osuApi');
 
 const MAX_ATTEMPTS = 3;
 const RETRY_DELAYS_MS = [30000, 120000];
@@ -181,7 +182,7 @@ function kickMetadataSyncWorker() {
     wakeTimer = null;
   }
   workerRunning = true;
-  const currentWorker = new Promise(resolve => setImmediate(resolve)).then(() => runMetadataSyncWorker()).catch(async error => {
+  const currentWorker = new Promise(resolve => setImmediate(resolve)).then(() => runWithApiPriority('bulk', () => runMetadataSyncWorker())).catch(async error => {
     console.error('[metadata-sync] Worker stopped unexpectedly:', error.message);
     try {
       const db = await getDatabase();

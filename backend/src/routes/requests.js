@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db');
-const { fetchBeatmap, fetchBeatmapset, fetchUser, downloadCover } = require('../osuApi');
+const { fetchBeatmap, fetchBeatmaps, fetchBeatmapset, fetchUser, downloadCover, runWithApiPriority } = require('../osuApi');
 const { refreshAndCacheBeatmapset } = require('./beatmaps');
-const { createApiJob, updateApiJob, finishApiJob } = require('../osuApi');
+const { createApiJob, addApiJobWork, updateApiJob, finishApiJob } = require('../osuApi');
 const { findUserDifficulties, isGuestDifficulty, normalizeGamemode, parseOsuLink, parseOsuUserLink } = require('../utils/requestUtils');
 const { trackBackgroundTask } = require('../utils/backgroundTasks');
 const { canonicalDifficultyNames, recordUserIdentity } = require('../utils/userIdentity');
@@ -1220,7 +1220,10 @@ router.testUtils = {
   createRefreshDateResult,
   formatLifecycleDate,
   getEffectiveBeatmapDate,
+  lifecycleFromBeatmapset,
   normalizedRequestIds,
+  representativeBeatmapIds,
+  runRefreshDateJob,
   refreshDateJobResponse,
 };
 
@@ -1346,6 +1349,131 @@ router.get('/refresh-dates/status/:jobId', (req, res) => {
 });
 
 // POST /api/requests/refresh-dates - Update added_date from each beatmapset's lifecycle date
+const LIFECYCLE_BATCH_SIZE = 50;
+
+function capitalizeStatus(status) {
+  return status ? status.charAt(0).toUpperCase() + status.slice(1).toLowerCase() : null;
+}
+
+// Pick one known difficulty ID per beatmapset so a single /beatmaps call can
+// return the lifecycle dates of up to 50 sets.
+function representativeBeatmapIds(cacheRows) {
+  const ids = new Map();
+  for (const row of cacheRows) {
+    try {
+      const difficulty = JSON.parse(row.difficulties_json || '[]').find(item => Number.isSafeInteger(Number(item?.id)) && Number(item.id) > 0);
+      if (difficulty) ids.set(row.beatmapset_id, Number(difficulty.id));
+    } catch {
+      // Sets with unreadable caches fall back to a full refresh.
+    }
+  }
+  return ids;
+}
+
+function lifecycleFromBeatmapset(beatmapset) {
+  if (!beatmapset) return null;
+  return {
+    ranked_status: capitalizeStatus(beatmapset.status),
+    ranked_date: beatmapset.ranked_date || null,
+    osu_last_updated: beatmapset.last_updated || null,
+    submitted_date: beatmapset.submitted_date || null,
+  };
+}
+
+async function applyRefreshedDate(db, job, row, lifecycle) {
+  const dateValue = formatLifecycleDate(getEffectiveBeatmapDate(lifecycle));
+  if (!dateValue) {
+    job.result.skippedNoUsableDate.push({ id: row.id, title: row.title });
+    return;
+  }
+  await db.run('UPDATE requests SET added_date = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', [dateValue, row.id]);
+  await db.run(
+    'INSERT INTO history (request_id, action_type, details) VALUES (?, ?, ?)',
+    [row.id, 'added_date_refreshed_from_osu', `Added date refreshed from osu!: ${dateValue}`]
+  );
+  job.result.updated++;
+}
+
+// Dates only need each set's status and lifecycle timestamps, which the
+// batched /beatmaps endpoint includes. Sets without a known difficulty (or
+// whose difficulty disappeared) fall back to a full single-set refresh.
+async function runRefreshDateJob(db, job, rows, apiJobId) {
+  try {
+    const setIds = [...new Set(rows.map(row => row.beatmapset_id))];
+    const cacheRows = [];
+    for (let i = 0; i < setIds.length; i += 500) {
+      const chunk = setIds.slice(i, i + 500);
+      cacheRows.push(...await db.all(
+        `SELECT beatmapset_id, difficulties_json FROM beatmap_cache WHERE beatmapset_id IN (${chunk.map(() => '?').join(', ')})`,
+        chunk
+      ));
+    }
+    const representatives = representativeBeatmapIds(cacheRows);
+    const rowsBySet = new Map();
+    for (const row of rows) {
+      if (!rowsBySet.has(row.beatmapset_id)) rowsBySet.set(row.beatmapset_id, []);
+      rowsBySet.get(row.beatmapset_id).push(row);
+    }
+
+    const batchedSetIds = setIds.filter(id => representatives.has(id));
+    const fallbackRows = rows.filter(row => !representatives.has(row.beatmapset_id));
+    addApiJobWork(apiJobId, Math.ceil(batchedSetIds.length / LIFECYCLE_BATCH_SIZE) + fallbackRows.length);
+
+    for (let i = 0; i < batchedSetIds.length; i += LIFECYCLE_BATCH_SIZE) {
+      const batch = batchedSetIds.slice(i, i + LIFECYCLE_BATCH_SIZE);
+      let batchFailed = false;
+      const beatmaps = await fetchBeatmaps(batch.map(id => representatives.get(id)), { onBatchError: () => { batchFailed = true; } });
+      updateApiJob(apiJobId, 1);
+      for (let index = 0; index < batch.length; index++) {
+        const beatmapsetId = batch[index];
+        const lifecycle = lifecycleFromBeatmapset(beatmaps[index]?.beatmapset);
+        for (const row of rowsBySet.get(beatmapsetId)) {
+          if (!lifecycle) {
+            if (batchFailed) {
+              job.result.failed.push({ id: row.id, title: row.title });
+              job.processed++;
+            } else {
+              fallbackRows.push(row);
+              addApiJobWork(apiJobId, 1);
+            }
+            continue;
+          }
+          try {
+            await db.run(`
+              UPDATE beatmap_cache
+              SET ranked_status = COALESCE(?, ranked_status), ranked_date = ?, osu_last_updated = ?, submitted_date = COALESCE(?, submitted_date)
+              WHERE beatmapset_id = ?
+            `, [lifecycle.ranked_status, lifecycle.ranked_date, lifecycle.osu_last_updated, lifecycle.submitted_date, beatmapsetId]);
+            await applyRefreshedDate(db, job, row, lifecycle);
+          } catch (error) {
+            console.error(`Failed to refresh request date for request ${row.id} (beatmapset ${beatmapsetId}):`, error.message);
+            job.result.failed.push({ id: row.id, title: row.title });
+          } finally {
+            job.processed++;
+          }
+        }
+      }
+    }
+
+    for (const row of fallbackRows) {
+      try {
+        const cacheEntry = await refreshAndCacheBeatmapset(db, row.beatmapset_id, apiJobId);
+        await applyRefreshedDate(db, job, row, cacheEntry);
+      } catch (error) {
+        console.error(`Failed to refresh request date for request ${row.id} (beatmapset ${row.beatmapset_id}):`, error.message);
+        job.result.failed.push({ id: row.id, title: row.title });
+      } finally {
+        job.processed++;
+      }
+    }
+  } finally {
+    finishApiJob(apiJobId);
+    job.status = 'completed';
+    job.completedAt = Date.now();
+    console.log(`[refresh-dates] Updated request dates for ${job.result.updated}/${job.total} requests.`);
+  }
+}
+
 router.post('/refresh-dates', async (req, res, next) => {
   try {
     const db = await getDatabase();
@@ -1366,109 +1494,39 @@ router.post('/refresh-dates', async (req, res, next) => {
       ? await db.all(`${rowSelect} WHERE r.id IN (${requestedIds.map(() => '?').join(', ')})`, requestedIds)
       : await db.all(`${rowSelect} WHERE r.beatmapset_id IS NOT NULL`);
 
-    if (rows.length === 0) {
-      return res.json({ success: true, message: 'No osu! link requests found to update.' });
-    }
-
     const manual = rows
       .filter(row => !row.is_osu_link || !row.beatmapset_id)
       .map(row => ({ id: row.id, title: row.title }));
     const linkedRows = rows.filter(row => row.is_osu_link && row.beatmapset_id);
 
-    // A selected refresh needs an observable completion result so the UI can
-    // tell the user exactly which selected maps did not expose a usable date.
-    if (requestedIds) {
-      if (linkedRows.length === 0) {
-        return res.json({
-          success: true,
-          completed: true,
-          message: 'The selected requests are manual and were skipped.',
-          result: createRefreshDateResult(manual)
-        });
-      }
-
-      pruneRefreshDateJobs();
-      const job = {
-        id: `refresh-dates-${nextRefreshDateJobId++}`,
-        status: 'running',
-        total: linkedRows.length,
-        processed: 0,
-        result: createRefreshDateResult(manual),
-        completedAt: null
-      };
-      refreshDateJobs.set(job.id, job);
-      const apiJobId = createApiJob('Refreshing selected request dates', linkedRows.length);
-
-      res.status(202).json({
+    if (linkedRows.length === 0) {
+      return res.json({
         success: true,
-        message: `Refreshing dates for ${linkedRows.length} selected osu!-linked request${linkedRows.length === 1 ? '' : 's'} in the background.`,
-        ...refreshDateJobResponse(job)
+        completed: true,
+        message: requestedIds ? 'The selected requests are manual and were skipped.' : 'No osu!-linked requests found to update.',
+        result: createRefreshDateResult(manual)
       });
-
-      trackBackgroundTask((async () => {
-        try {
-          for (const row of linkedRows) {
-            try {
-              const cacheEntry = await refreshAndCacheBeatmapset(db, row.beatmapset_id, apiJobId);
-              const dateValue = formatLifecycleDate(getEffectiveBeatmapDate(cacheEntry));
-              if (!dateValue) {
-                job.result.skippedNoUsableDate.push({ id: row.id, title: row.title });
-              } else {
-                await db.run('UPDATE requests SET added_date = ?, last_updated = CURRENT_TIMESTAMP WHERE id = ?', [dateValue, row.id]);
-                await db.run(
-                  'INSERT INTO history (request_id, action_type, details) VALUES (?, ?, ?)',
-                  [row.id, 'added_date_refreshed_from_osu', `Added date refreshed from osu!: ${dateValue}`]
-                );
-                job.result.updated++;
-              }
-            } catch (error) {
-              console.error(`Failed to refresh selected request date for request ${row.id} (beatmapset ${row.beatmapset_id}):`, error.message);
-              job.result.failed.push({ id: row.id, title: row.title });
-            } finally {
-              job.processed++;
-            }
-          }
-        } finally {
-          finishApiJob(apiJobId);
-          job.status = 'completed';
-          job.completedAt = Date.now();
-        }
-      })());
-      return;
     }
 
-    const apiJobId = createApiJob('Refreshing request dates', linkedRows.length);
+    pruneRefreshDateJobs();
+    const job = {
+      id: `refresh-dates-${nextRefreshDateJobId++}`,
+      status: 'running',
+      total: linkedRows.length,
+      processed: 0,
+      result: createRefreshDateResult(manual),
+      completedAt: null
+    };
+    refreshDateJobs.set(job.id, job);
+    const apiJobId = createApiJob(requestedIds ? 'Refreshing selected request dates' : 'Refreshing request dates', 0);
 
-    // Respond immediately; process in the background (throttled osu! API calls)
-    res.json({
+    res.status(202).json({
       success: true,
-      message: `Refreshing request dates for ${linkedRows.length} requests in the background. This may take a while due to API rate limiting.`
+      message: `Refreshing dates for ${linkedRows.length} osu!-linked request${linkedRows.length === 1 ? '' : 's'} in the background.`,
+      ...refreshDateJobResponse(job)
     });
 
-    trackBackgroundTask((async () => {
-      let updated = 0;
-      try {
-        for (const row of linkedRows) {
-          try {
-            // Full refresh also caches the creator profile and osu! dates
-            const cacheEntry = await refreshAndCacheBeatmapset(db, row.beatmapset_id, apiJobId);
-            const effectiveDate = getEffectiveBeatmapDate(cacheEntry);
-            if (effectiveDate) {
-              await db.run(
-                'UPDATE requests SET added_date = ? WHERE id = ?',
-                [formatLifecycleDate(effectiveDate), row.id]
-              );
-              updated++;
-            }
-          } catch (err) {
-            console.error(`Failed to refresh request date for request ${row.id} (beatmapset ${row.beatmapset_id}):`, err.message);
-          }
-        }
-      } finally {
-        finishApiJob(apiJobId);
-      }
-      console.log(`[refresh-dates] Updated request dates for ${updated}/${linkedRows.length} requests.`);
-    })());
+    trackBackgroundTask(runWithApiPriority('bulk', () => runRefreshDateJob(db, job, linkedRows, apiJobId)));
   } catch (error) {
     next(error);
   }

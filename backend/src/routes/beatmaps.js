@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDatabase } = require('../db');
-const { fetchBeatmapset, fetchUser, downloadCover, addApiJobWork, updateApiJob } = require('../osuApi');
+const { fetchBeatmapset, fetchUser, fetchUsers, downloadCover, addApiJobWork, updateApiJob } = require('../osuApi');
 const {
   canonicalDifficultyNames,
   getUnavailableUserIds,
@@ -181,19 +181,26 @@ async function refreshKnownCreatorIdentities(db) {
   }
   const existingUsers = new Map((await db.all('SELECT id, last_updated FROM users_cache')).map(user => [user.id, user]));
   const unavailableUserIds = await getUnavailableUserIds(db);
-  let refreshed = 0;
-  for (const id of ids) {
-    if (unavailableUserIds.has(id)) continue;
+  const staleIds = [...ids].filter(id => {
+    if (unavailableUserIds.has(id)) return false;
     const cached = existingUsers.get(id);
     const age = cached?.last_updated ? Date.now() - new Date(cached.last_updated).getTime() : Infinity;
-    if (Number.isFinite(age) && age < 7 * 24 * 60 * 60 * 1000) continue;
-    const user = await fetchUser(id);
+    return !(Number.isFinite(age) && age < 7 * 24 * 60 * 60 * 1000);
+  });
+  if (staleIds.length === 0) return 0;
+
+  // One osu! call covers up to 50 users. Users missing from a successful
+  // batch are restricted or deleted; a failed batch is simply retried next time.
+  const failedIds = new Set();
+  const usersById = await fetchUsers(staleIds, { onBatchError: batch => batch.forEach(id => failedIds.add(id)) });
+  let refreshed = 0;
+  for (const id of staleIds) {
+    const user = usersById.get(id);
     if (user) {
       await recordUserIdentity(db, user);
       refreshed += 1;
-    } else {
+    } else if (!failedIds.has(id)) {
       await recordUnavailableUser(db, id, usernamesById.get(id));
-      unavailableUserIds.add(id);
     }
   }
   return refreshed;

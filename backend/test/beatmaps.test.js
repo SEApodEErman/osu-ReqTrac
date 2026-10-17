@@ -56,18 +56,23 @@ test('refreshAndCacheBeatmapset reuses the embedded creator without a user API c
   assert.equal(userRequests, 0);
 });
 
-test('startup identity refresh records HTTP 404 users and permanently skips them', async () => {
+test('startup identity refresh batches users, records missing ones, and retries failed batches', async () => {
   const userRequests = [];
+  let failNextBatch = true;
   require.cache[osuApiModulePath] = {
     id: osuApiModulePath,
     filename: osuApiModulePath,
     loaded: true,
     exports: {
       fetchBeatmapset: async () => null,
-      fetchUser: async (id) => {
-        userRequests.push(Number(id));
-        if (Number(id) === 20) return null;
-        return { id: Number(id), username: 'CurrentUser', avatar_url: 'avatar', country_code: 'MY' };
+      fetchUsers: async (ids, { onBatchError } = {}) => {
+        userRequests.push(...ids.map(Number));
+        if (failNextBatch) {
+          failNextBatch = false;
+          onBatchError?.(ids, new Error('network down'));
+          return new Map();
+        }
+        return new Map(ids.map(Number).filter(id => id !== 20).map(id => [id, { id, username: 'CurrentUser', avatar_url: 'avatar', country_code: 'MY' }]));
       },
       downloadCover: async () => null,
       addApiJobWork: () => {},
@@ -114,9 +119,12 @@ test('startup identity refresh records HTTP 404 users and permanently skips them
     );
   `);
 
+  // A failed batch marks nobody unavailable, so the next run retries both.
+  assert.equal(await refreshKnownCreatorIdentities(db), 0);
+  assert.equal((await db.all('SELECT user_id FROM unavailable_osu_users')).length, 1);
   assert.equal(await refreshKnownCreatorIdentities(db), 1);
   assert.equal(await refreshKnownCreatorIdentities(db), 0);
-  assert.deepEqual(userRequests, [20, 30]);
+  assert.deepEqual(userRequests, [20, 30, 20, 30]);
   assert.deepEqual(
     await db.all('SELECT user_id, username FROM unavailable_osu_users ORDER BY user_id'),
     [
