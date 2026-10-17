@@ -15,9 +15,13 @@ try {
 const app = express();
 const isElectron = process.env.ELECTRON_RUN === '1';
 const REQUEST_BODY_LIMIT = '50mb';
-// In Electron production we bind to an OS-assigned free port (0) to avoid conflicts.
-// In standalone/dev we keep the fixed port for the Vite proxy.
-const PORT = process.env.PORT || (isElectron ? 0 : 3001);
+// In standalone/dev we keep the fixed port for the Vite proxy. In Electron we
+// prefer a stable port so the renderer origin (and its per-origin storage)
+// stays the same between launches, and fall back to an OS-assigned free port
+// when something else already holds it.
+const ELECTRON_PREFERRED_PORT = 47391;
+const PORT = process.env.PORT || (isElectron ? ELECTRON_PREFERRED_PORT : 3001);
+const canFallBackToFreePort = isElectron && !process.env.PORT;
 
 // CORS setup — allow both Vite dev server and Electron file:// protocol.
 // Only loopback origins are reflected; the local API is not a web API and
@@ -139,8 +143,8 @@ async function startServer() {
   }));
   console.log('Database initialized successfully.');
 
-  return new Promise((resolve, reject) => {
-    const server = app.listen(PORT, '127.0.0.1', () => {
+  const listen = (port) => new Promise((resolve, reject) => {
+    const server = app.listen(port, '127.0.0.1', () => {
       const actualPort = server.address().port;
       console.log(`Server is running on port ${actualPort}`);
       resolve(actualPort);
@@ -150,6 +154,14 @@ async function startServer() {
     server.timeout = 0;
     server.keepAliveTimeout = 300000;
   });
+
+  try {
+    return await listen(PORT);
+  } catch (error) {
+    if (!canFallBackToFreePort || error.code !== 'EADDRINUSE') throw error;
+    console.warn(`[server] Port ${PORT} is in use; falling back to a free port.`);
+    return listen(0);
+  }
 }
 
 module.exports = { startServer, app };

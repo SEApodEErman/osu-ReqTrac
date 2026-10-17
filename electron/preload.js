@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     close: () => ipcRenderer.invoke('window:close'),
     flashFrame: () => ipcRenderer.invoke('window:flash-frame'),
   },
+  readClipboardText: () => ipcRenderer.invoke('clipboard:read-text'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   onUpdateDownloaded: (callback) => {
     const listener = (_event, update) => callback(update);

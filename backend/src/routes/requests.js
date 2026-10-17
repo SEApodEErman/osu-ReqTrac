@@ -27,6 +27,23 @@ function pruneRefreshDateJobs() {
   }
 }
 
+// The request list only needs the difficulty fields that client-side search
+// filters on; full difficulty details are loaded per request when opened.
+function toSearchDifficulty(difficulty) {
+  const stars = Number(difficulty.stars);
+  return {
+    name: difficulty.name,
+    mode: difficulty.mode,
+    stars: Number.isFinite(stars) ? Math.round(stars * 100) / 100 : 0,
+    cs: difficulty.cs,
+    ar: difficulty.ar,
+    od: difficulty.od,
+    hp: difficulty.hp,
+    bpm: difficulty.bpm,
+    drain: difficulty.drain,
+  };
+}
+
 // Helper to update or cache a user profile
 async function fetchAndCacheUser(db, userIdOrUsername) {
   try {
@@ -272,7 +289,7 @@ router.get('/', async (req, res, next) => {
         categories,
         tags,
         highest_stars: highestStars,
-        search_difficulties: difficulties,
+        search_difficulties: difficulties.map(toSearchDifficulty),
         num_difficulties: numDifficulties,
         // Guest difficulty info
         highest_guest_stars: highestGuestStars,

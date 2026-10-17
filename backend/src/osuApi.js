@@ -166,6 +166,33 @@ async function requestAccessToken(rateLimitRetries = 0) {
   return accessToken;
 }
 
+// Exchange the given credentials for a token without caching it, so the
+// first-run setup can tell the user whether osu! actually accepts them.
+async function verifyCredentials(clientId, clientSecret) {
+  const numericClientId = Number.parseInt(String(clientId ?? '').trim(), 10);
+  const secret = String(clientSecret ?? '').trim();
+  if (!Number.isSafeInteger(numericClientId) || numericClientId <= 0) {
+    return { ok: false, error: 'The Client ID must be the number shown on your osu! OAuth application.' };
+  }
+  if (!secret) return { ok: false, error: 'Enter the Client Secret from your osu! OAuth application.' };
+
+  try {
+    const response = await queueApiRequest(() => fetchWithTimeout('https://osu.ppy.sh/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ client_id: numericClientId, client_secret: secret, grant_type: 'client_credentials', scope: 'public' }),
+    }), 'POST OAuth credential verification');
+    if (response.ok) return { ok: true };
+    if (response.status === 400 || response.status === 401) {
+      return { ok: false, error: 'osu! rejected these credentials. Check that the Client ID and Client Secret belong to the same OAuth application.' };
+    }
+    if (response.status === 429) return { ok: false, error: 'osu! is rate limiting requests right now. Try again in a minute.' };
+    return { ok: false, error: `osu! returned an unexpected response (HTTP ${response.status}). Try again later.` };
+  } catch (error) {
+    return { ok: false, error: `Could not reach osu! to verify the credentials: ${error.message}` };
+  }
+}
+
 async function getAccessToken() {
   if (accessToken && tokenExpiresAt && Date.now() < tokenExpiresAt) {
     return accessToken;
@@ -380,5 +407,6 @@ module.exports = {
   updateApiJob,
   finishApiJob,
   clearAccessToken,
-  isAllowedCoverUrl
+  isAllowedCoverUrl,
+  verifyCredentials
 };

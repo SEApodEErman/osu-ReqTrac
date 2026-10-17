@@ -1,12 +1,73 @@
 const express = require('express');
 const router = express.Router();
 const { getDatabase, coversDir, BUILTIN_CATEGORIES } = require('../db');
-const { getCredentials, fetchBeatmapset, fetchUser, clearAccessToken } = require('../osuApi');
+const { getCredentials, fetchBeatmapset, fetchUser, clearAccessToken, verifyCredentials } = require('../osuApi');
+const { parseOsuUserLink } = require('../utils/requestUtils');
 const { consumeState, issueState } = require('../utils/oauthState');
 const { acquireBackupLock } = require('../utils/backupLock');
 const { waitForBackgroundTasks } = require('../utils/backgroundTasks');
 const { pauseMetadataSyncWorker, initializeMetadataSyncWorker } = require('../services/beatmapMetadataSync');
 const { getCoverStorageUsage, readCoverFiles, writeCoverFiles } = require('../utils/backup');
+
+const PREFERENCES_KEY = 'ui_preferences';
+const MAX_PREFERENCES_BYTES = 64 * 1024;
+
+async function readPreferences(db) {
+  const row = await db.get('SELECT value FROM settings WHERE key = ?', PREFERENCES_KEY);
+  if (!row?.value) return {};
+  try {
+    const parsed = JSON.parse(row.value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+// Accepts a numeric osu! user ID, a profile URL, or a username.
+function parseUserIdentityInput(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const profileId = parseOsuUserLink(text);
+  if (profileId) return { id: profileId };
+  if (/^\d+$/.test(text)) return { id: Number(text) };
+  return { username: text.replace(/^@/, '') };
+}
+
+async function saveConnectedUser(db, identity) {
+  if (!identity) {
+    await db.run('DELETE FROM settings WHERE key IN (?, ?, ?)', 'connected_user_id', 'connected_username', 'connected_avatar');
+    return { connected: false };
+  }
+
+  let userData = null;
+  let lookupError = null;
+  try {
+    userData = await fetchUser(identity.id ? String(identity.id) : identity.username);
+  } catch (error) {
+    lookupError = error;
+  }
+
+  if (!userData) {
+    if (identity.id && lookupError) {
+      // Keep the ID even when the profile lookup is unavailable; it is enough
+      // for guest-difficulty matching on the next request refresh.
+      console.warn('Could not resolve connected osu! user:', lookupError.message);
+      await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'connected_user_id', String(identity.id));
+      await db.run('DELETE FROM settings WHERE key IN (?, ?)', 'connected_username', 'connected_avatar');
+      return { connected: true, verified: false };
+    }
+    const error = new Error(lookupError
+      ? 'Usernames can only be looked up once your osu! API credentials work. Enter your numeric user ID or profile link instead.'
+      : `No osu! user was found for “${identity.username || identity.id}”.`);
+    error.status = lookupError ? 400 : 404;
+    throw error;
+  }
+
+  await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'connected_user_id', String(userData.id));
+  await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'connected_username', userData.username);
+  await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'connected_avatar', userData.avatar_url || '');
+  return { connected: true, verified: true, username: userData.username };
+}
 
 // Get redirect URI from environment or use default
 function getRedirectUri() {
@@ -36,7 +97,8 @@ router.get('/', async (req, res, next) => {
         id: userIdRow ? parseInt(userIdRow.value, 10) : null
       } : null,
       oauthConfigured: isConfigured,
-      redirectUri: getRedirectUri()
+      redirectUri: getRedirectUri(),
+      preferences: await readPreferences(db)
     });
   } catch (error) {
     next(error);
@@ -56,39 +118,82 @@ router.get('/data-usage', async (req, res, next) => {
 // POST /api/settings - configure client credentials
 router.post('/', async (req, res, next) => {
   try {
-    const { client_id, client_secret, user_id } = req.body;
+    const { client_id, client_secret, user_id, user } = req.body;
     const db = await getDatabase();
 
     if (client_id !== undefined) {
-      await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'osu_client_id', client_id.toString().trim());
+      const normalizedClientId = client_id.toString().trim();
+      if (normalizedClientId && !/^\d+$/.test(normalizedClientId)) {
+        return res.status(400).json({ error: 'The osu! Client ID must be numeric.' });
+      }
+      await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'osu_client_id', normalizedClientId);
     }
     if (client_secret !== undefined) {
       await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'osu_client_secret', client_secret.toString().trim());
     }
-    if (user_id !== undefined) {
+    if (client_id !== undefined || client_secret !== undefined) clearAccessToken();
+
+    let account = null;
+    if (user !== undefined) {
+      account = await saveConnectedUser(db, parseUserIdentityInput(user));
+    } else if (user_id !== undefined) {
       const normalizedUserId = user_id.toString().trim();
       if (normalizedUserId && !/^\d+$/.test(normalizedUserId)) {
         return res.status(400).json({ error: 'osu! User ID must be numeric.' });
       }
-      if (normalizedUserId) {
-        await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'connected_user_id', normalizedUserId);
-        try {
-          const userData = await fetchUser(normalizedUserId);
-          if (userData) {
-            await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'connected_username', userData.username);
-            await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'connected_avatar', userData.avatar_url || '');
-          }
-        } catch (error) {
-          // Keep the ID even when profile lookup is unavailable; it is enough
-          // for guest-difficulty matching on the next request refresh.
-          console.warn('Could not resolve connected osu! user:', error.message);
-        }
-      } else {
-        await db.run('DELETE FROM settings WHERE key IN (?, ?, ?)', 'connected_user_id', 'connected_username', 'connected_avatar');
-      }
+      account = await saveConnectedUser(db, normalizedUserId ? { id: Number(normalizedUserId) } : null);
     }
 
-    res.json({ success: true, message: 'Settings saved successfully' });
+    res.json({ success: true, message: 'Settings saved successfully', account });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    next(error);
+  }
+});
+
+// POST /api/settings/test-credentials - verify osu! OAuth credentials with osu!
+// Omitted fields fall back to the stored values so a saved setup can be re-tested.
+router.post('/test-credentials', async (req, res, next) => {
+  try {
+    const stored = await getCredentials();
+    const clientId = String(req.body?.client_id ?? '').trim() || stored.client_id;
+    const clientSecret = String(req.body?.client_secret ?? '').trim() || stored.client_secret;
+    const result = await verifyCredentials(clientId, clientSecret);
+    res.status(result.ok ? 200 : 422).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET/PATCH /api/settings/preferences - renderer preferences (theme, columns,
+// filters). Stored in SQLite because the packaged renderer origin is not a
+// stable home for localStorage, and so preferences travel with backups.
+router.get('/preferences', async (req, res, next) => {
+  try {
+    res.json(await readPreferences(await getDatabase()));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/preferences', async (req, res, next) => {
+  try {
+    const updates = req.body;
+    if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
+      return res.status(400).json({ error: 'Preferences must be a JSON object.' });
+    }
+    const db = await getDatabase();
+    const merged = { ...(await readPreferences(db)) };
+    for (const [key, value] of Object.entries(updates)) {
+      if (value === null) delete merged[key];
+      else merged[key] = value;
+    }
+    const serialized = JSON.stringify(merged);
+    if (Buffer.byteLength(serialized) > MAX_PREFERENCES_BYTES) {
+      return res.status(413).json({ error: 'Preferences are too large to store.' });
+    }
+    await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', PREFERENCES_KEY, serialized);
+    res.json(merged);
   } catch (error) {
     next(error);
   }
@@ -333,3 +438,4 @@ router.get('/oauth-validate', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.testUtils = { parseUserIdentityInput, readPreferences };

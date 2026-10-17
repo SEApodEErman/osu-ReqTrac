@@ -1,11 +1,26 @@
-const { app, BrowserWindow, Menu, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, clipboard, ipcMain, screen, shell } = require('electron');
+const fs = require('fs');
 const path = require('path');
 
 // Set a stable app name so userData resolves to a clean, consistent folder
 app.setName('osu!ReqTrac');
 // The default Electron menu is visually out of place for this desktop app.
 // Navigation and actions are presented in the renderer's app-style top bar.
-Menu.setApplicationMenu(null);
+// macOS still needs an application menu: without the Edit roles, Cmd+C/V/X/A/Z
+// and Cmd+Q stop working.
+if (process.platform === 'darwin') {
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { role: 'appMenu' },
+    { role: 'editMenu' },
+    {
+      label: 'View',
+      submenu: [{ role: 'reload' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }],
+    },
+    { role: 'windowMenu' },
+  ]));
+} else {
+  Menu.setApplicationMenu(null);
+}
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -31,6 +46,69 @@ if (!gotSingleInstanceLock) {
 let mainWindow;
 let backendPort;
 let flashFrameTimer;
+
+const APP_BACKGROUND = '#121016';
+const DEFAULT_BOUNDS = { width: 1400, height: 900 };
+const windowStatePath = () => path.join(app.getPath('userData'), 'window-state.json');
+
+function readWindowState() {
+  try {
+    const state = JSON.parse(fs.readFileSync(windowStatePath(), 'utf8'));
+    const bounds = state?.bounds;
+    if (!bounds || !Number.isFinite(bounds.width) || !Number.isFinite(bounds.height)) return null;
+    // Only restore a position that is still visible on a connected display.
+    const visible = screen.getAllDisplays().some(({ workArea }) => (
+      bounds.x < workArea.x + workArea.width - 80 && bounds.x + bounds.width > workArea.x + 80
+      && bounds.y >= workArea.y - 20 && bounds.y < workArea.y + workArea.height - 80
+    ));
+    return { bounds: visible ? bounds : { width: bounds.width, height: bounds.height }, isMaximized: Boolean(state.isMaximized) };
+  } catch {
+    return null;
+  }
+}
+
+function trackWindowState(window) {
+  let saveTimer = null;
+  const save = () => {
+    if (window.isDestroyed() || window.isMinimized()) return;
+    const state = { bounds: window.isMaximized() ? window.getNormalBounds() : window.getBounds(), isMaximized: window.isMaximized() };
+    try {
+      fs.writeFileSync(windowStatePath(), JSON.stringify(state));
+    } catch (error) {
+      console.warn('Could not save window state:', error.message);
+    }
+  };
+  const scheduleSave = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(save, 400);
+  };
+  window.on('resize', scheduleSave);
+  window.on('move', scheduleSave);
+  window.on('maximize', scheduleSave);
+  window.on('unmaximize', scheduleSave);
+  window.on('close', () => {
+    clearTimeout(saveTimer);
+    save();
+  });
+}
+
+function escapeHtml(text) {
+  const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+  return String(text).replace(/[&<>"]/g, character => entities[character]);
+}
+
+// Self-contained page shown while the local server starts, or when it fails.
+function statusPage(title, message, { spinner = false, closable = false } = {}) {
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>osu!ReqTrac</title><style>
+    html,body{margin:0;height:100%;background:${APP_BACKGROUND};color:#ece9f2;font:14px system-ui,-apple-system,'Segoe UI',sans-serif;-webkit-app-region:drag}
+    main{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;box-sizing:border-box}
+    h1{margin:0;font-size:18px;font-weight:700}p{margin:0;max-width:520px;color:#9591a1;line-height:1.5;white-space:pre-wrap}
+    .spinner{width:28px;height:28px;border-radius:50%;border:3px solid #302b3a;border-top-color:#ff66aa;animation:spin 0.9s linear infinite}
+    button{-webkit-app-region:no-drag;margin-top:6px;padding:8px 16px;border:0;border-radius:8px;background:#ff66aa;color:#fff;font:inherit;font-weight:600;cursor:pointer}
+    @keyframes spin{to{transform:rotate(360deg)}}@media (prefers-reduced-motion: reduce){.spinner{animation-duration:3s}}
+  </style></head><body><main>${spinner ? '<div class="spinner"></div>' : ''}<h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p>${closable ? '<button onclick="window.close()">Close osu!ReqTrac</button>' : ''}</main></body></html>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+}
 
 function focusMainWindow() {
   if (!mainWindow) return;
@@ -76,6 +154,7 @@ ipcMain.handle('window:flash-frame', () => {
   return true;
 });
 ipcMain.handle('update:install', () => installUpdate());
+ipcMain.handle('clipboard:read-text', () => clipboard.readText());
 ipcMain.handle('open-external', (_event, url) => {
   if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
     throw new Error('Only HTTP(S) URLs can be opened externally.');
@@ -84,12 +163,14 @@ ipcMain.handle('open-external', (_event, url) => {
 });
 
 async function createWindow() {
+  const savedState = readWindowState();
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    ...DEFAULT_BOUNDS,
+    ...(savedState?.bounds || {}),
     minWidth: 1000,
     minHeight: 700,
     frame: false,
+    backgroundColor: APP_BACKGROUND,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -100,8 +181,10 @@ async function createWindow() {
   });
 
   mainWindow.once('ready-to-show', () => {
+    if (savedState?.isMaximized) mainWindow.maximize();
     mainWindow.show();
   });
+  trackWindowState(mainWindow);
 
   const sendMaximizedState = () => {
     if (!mainWindow?.isDestroyed()) {
@@ -128,37 +211,58 @@ async function createWindow() {
     }
   });
 
-  // Removing Electron's native menu also removes its normal Ctrl+R reload
-  // accelerator. Restore it for the focused app window only.
+  // Removing Electron's native menu also removes its normal reload and zoom
+  // accelerators. Restore them for the focused app window only (macOS gets
+  // them from its application menu instead).
   mainWindow.webContents.on('before-input-event', (event, input) => {
-    if (input.type === 'keyDown' && input.key.toLowerCase() === 'r' && (input.control || input.meta)) {
+    if (process.platform === 'darwin' || input.type !== 'keyDown' || !(input.control || input.meta)) return;
+    const key = input.key.toLowerCase();
+    const contents = mainWindow.webContents;
+    if (key === 'r') {
       event.preventDefault();
       mainWindow.reload();
+    } else if (key === '=' || key === '+') {
+      event.preventDefault();
+      contents.setZoomLevel(Math.min(contents.getZoomLevel() + 0.5, 3));
+    } else if (key === '-') {
+      event.preventDefault();
+      contents.setZoomLevel(Math.max(contents.getZoomLevel() - 0.5, -3));
+    } else if (key === '0') {
+      event.preventDefault();
+      contents.setZoomLevel(0);
     }
   });
 
+  // Show the window straight away with a loading screen while the local
+  // server opens the database and runs migrations.
+  await mainWindow.loadURL(statusPage('Starting osu!ReqTrac', 'Opening your request database…', { spinner: true }));
+}
+
+async function loadApplication() {
   if (isDev) {
     // Dev: Vite dev server (which proxies /api to the standalone backend on 3001)
-    mainWindow.loadURL('http://localhost:3000');
-    // mainWindow.webContents.openDevTools();
-  } else {
+    await mainWindow.loadURL('http://localhost:3000');
+    return;
+  }
+  try {
     // Prod: the backend serves the built frontend on its own port,
     // so relative /api and /uploads URLs resolve correctly.
-    mainWindow.loadURL(`http://127.0.0.1:${backendPort}`);
+    backendPort ??= await startServer();
+    await mainWindow.loadURL(`http://127.0.0.1:${backendPort}`);
+  } catch (err) {
+    console.error('Failed to start backend:', err);
+    await mainWindow.loadURL(statusPage(
+      'osu!ReqTrac could not start',
+      `The local request database could not be opened.\n\n${err?.message || err}\n\nClose the app and try again. If this keeps happening, report it on GitHub with this message.`,
+      { closable: true },
+    ));
   }
 }
 
 app.whenReady().then(async () => {
-  try {
-    app.setAsDefaultProtocolClient('osureqtrac');
-    // In dev the standalone backend runs separately; don't double-start it.
-    if (!isDev) {
-      backendPort = await startServer();
-    }
-  } catch (err) {
-    console.error('Failed to start backend:', err);
-  }
+  app.setAsDefaultProtocolClient('osureqtrac');
   await createWindow();
+  await loadApplication();
 
   // Check for updates in production (no-op when unpackaged/dev).
   if (!isDev) {
@@ -170,6 +274,8 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+app.on('activate', async () => {
+  if (BrowserWindow.getAllWindows().length > 0) return;
+  await createWindow();
+  await loadApplication();
 });

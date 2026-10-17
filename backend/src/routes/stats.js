@@ -43,6 +43,28 @@ function getEffectiveYear(row) {
   return isNaN(year) ? null : year;
 }
 
+// Calendar dates (deadlines) are stored as local YYYY-MM-DD values, so "today"
+// must be the local calendar day rather than the UTC one.
+function localDateString(date) {
+  const pad = value => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function monthKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+}
+
+// The connected mapper is the one receiving requests, so they never count as
+// a requester in rankings.
+function createRequesterExclusion({ excludeUserId = null, excludeUsername = null } = {}) {
+  const userId = Number(excludeUserId);
+  const username = typeof excludeUsername === 'string' ? excludeUsername.toLowerCase() : null;
+  return (requester) => Boolean(requester && (
+    (Number.isSafeInteger(userId) && userId > 0 && Number(requester.id) === userId)
+    || (username && String(requester.name || '').toLowerCase() === username)
+  ));
+}
+
 function getCategoryScope(categoryId, requestAlias = 'r') {
   if (!categoryId) return { predicate: '1 = 1', params: [] };
   return {
@@ -78,8 +100,9 @@ async function resolveStatsCategoryId(db, rawCategoryId) {
   return categoryId;
 }
 
-async function getDashboardStats(db, { categoryId = null, now = new Date() } = {}) {
+async function getDashboardStats(db, { categoryId = null, now = new Date(), excludeUserId = null, excludeUsername = null } = {}) {
   const scope = getCategoryScope(categoryId);
+  const isExcludedRequester = createRequesterExclusion({ excludeUserId, excludeUsername });
 
   // 1. Overview counts
   const totalRequestsRow = await db.get(`
@@ -102,8 +125,8 @@ async function getDashboardStats(db, { categoryId = null, now = new Date() } = {
   const oneWeekLater = new Date(now);
   oneWeekLater.setDate(now.getDate() + 7);
 
-  const nowStr = now.toISOString().split('T')[0];
-  const oneWeekLaterStr = oneWeekLater.toISOString().split('T')[0];
+  const nowStr = localDateString(now);
+  const oneWeekLaterStr = localDateString(oneWeekLater);
 
   const dueSoonRow = await db.get(`
     SELECT COUNT(*) AS count
@@ -114,6 +137,36 @@ async function getDashboardStats(db, { categoryId = null, now = new Date() } = {
       AND deadline >= ?
       AND deadline <= ?
   `, [...scope.params, nowStr, oneWeekLaterStr]);
+
+  const overdueRow = await db.get(`
+    SELECT COUNT(*) AS count
+    FROM requests r
+    WHERE ${scope.predicate}
+      AND r.request_status IN ('Accepted', 'Considering', 'Working')
+      AND deadline IS NOT NULL
+      AND deadline != ''
+      AND deadline < ?
+  `, [...scope.params, nowStr]);
+
+  // 12-month activity trend: requests added and completed per calendar month.
+  const firstMonth = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+  const months = Array.from({ length: 12 }, (_, index) => monthKey(new Date(firstMonth.getFullYear(), firstMonth.getMonth() + index, 1)));
+  const activityRows = await db.all(`
+    SELECT substr(r.added_date, 1, 7) AS month, 'added' AS kind, COUNT(*) AS count
+    FROM requests r
+    WHERE ${scope.predicate} AND r.added_date IS NOT NULL AND substr(r.added_date, 1, 7) >= ?
+    GROUP BY month
+    UNION ALL
+    SELECT substr(r.completed_date, 1, 7) AS month, 'completed' AS kind, COUNT(*) AS count
+    FROM requests r
+    WHERE ${scope.predicate} AND r.request_status = 'Completed' AND r.completed_date IS NOT NULL AND substr(r.completed_date, 1, 7) >= ?
+    GROUP BY month
+  `, [...scope.params, months[0], ...scope.params, months[0]]);
+  const activityByMonth = new Map(months.map(month => [month, { month, added: 0, completed: 0 }]));
+  for (const row of activityRows) {
+    const bucket = activityByMonth.get(row.month);
+    if (bucket) bucket[row.kind] += row.count;
+  }
 
   // User cache for avatars/countries
   const usersList = await db.all('SELECT * FROM users_cache');
@@ -154,7 +207,7 @@ async function getDashboardStats(db, { categoryId = null, now = new Date() } = {
 
     // Count requesters (using creator fallback)
     const eff = getEffectiveRequester(req, userMap);
-    if (eff && eff.name) {
+    if (eff && eff.name && !isExcludedRequester(eff)) {
       requesterCounts[eff.name] = (requesterCounts[eff.name] || 0) + 1;
     }
   });
@@ -198,7 +251,7 @@ async function getDashboardStats(db, { categoryId = null, now = new Date() } = {
     yearSummary[year].drainSeconds += maxDrain;
 
     const eff = getEffectiveRequester(req, userMap);
-    if (eff && eff.name) {
+    if (eff && eff.name && !isExcludedRequester(eff)) {
       yearSummary[year].requesters[eff.name] = (yearSummary[year].requesters[eff.name] || 0) + 1;
     }
   });
@@ -232,7 +285,7 @@ async function getDashboardStats(db, { categoryId = null, now = new Date() } = {
   const requesterMap = {};
   allRequests.forEach(req => {
     const eff = getEffectiveRequester(req, userMap);
-    if (!eff || !eff.name) return;
+    if (!eff || !eff.name || isExcludedRequester(eff)) return;
     if (!requesterMap[eff.name]) {
       const cache = eff.id ? userMap.get(eff.id) : null;
       requesterMap[eff.name] = {
@@ -255,7 +308,8 @@ async function getDashboardStats(db, { categoryId = null, now = new Date() } = {
       total: totalRequestsRow.count,
       active: activeRequestsRow.count,
       completed: completedRequestsRow.count,
-      dueSoon: dueSoonRow.count
+      dueSoon: dueSoonRow.count,
+      overdue: overdueRow.count
     },
     stats: {
       completedCount: completedRequestsRow.count,
@@ -264,7 +318,8 @@ async function getDashboardStats(db, { categoryId = null, now = new Date() } = {
       mostFrequentRequester
     },
     yearSummary: yearSummaryList,
-    requesterBreakdown
+    requesterBreakdown,
+    monthlyActivity: [...activityByMonth.values()]
   };
 }
 
@@ -273,7 +328,13 @@ router.get('/', async (req, res, next) => {
   try {
     const db = await getDatabase();
     const categoryId = await resolveStatsCategoryId(db, req.query.categoryId);
-    res.json(await getDashboardStats(db, { categoryId }));
+    const connectedRows = await db.all("SELECT key, value FROM settings WHERE key IN ('connected_user_id', 'connected_username')");
+    const connected = new Map(connectedRows.map(row => [row.key, row.value]));
+    res.json(await getDashboardStats(db, {
+      categoryId,
+      excludeUserId: connected.get('connected_user_id') || null,
+      excludeUsername: connected.get('connected_username') || null,
+    }));
   } catch (error) {
     next(error);
   }

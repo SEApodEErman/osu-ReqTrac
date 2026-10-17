@@ -18,7 +18,8 @@ async function createStatsDatabase() {
       requester_username TEXT,
       request_status TEXT NOT NULL,
       deadline TEXT,
-      completed_date TEXT
+      completed_date TEXT,
+      added_date TEXT
     );
     CREATE TABLE request_categories (
       request_id INTEGER NOT NULL,
@@ -50,9 +51,9 @@ async function createStatsDatabase() {
       (10, 'Alice', 'alice.png', 'MY'),
       (20, 'Bob', 'bob.png', 'US');
     INSERT INTO requests VALUES
-      (1, 101, 10, 'OldAlice', 'Completed', NULL, '2025-04-01'),
-      (2, 102, 20, 'Bob', 'Working', '2026-07-25', NULL),
-      (3, 103, 10, 'Alice', 'Completed', NULL, '2026-02-01');
+      (1, 101, 10, 'OldAlice', 'Completed', NULL, '2025-04-01', '2025-03-10T00:00:00Z'),
+      (2, 102, 20, 'Bob', 'Working', '2026-07-25', NULL, '2026-07-02'),
+      (3, 103, 10, 'Alice', 'Completed', NULL, '2026-02-01', '2026-01-20T12:00:00Z');
     INSERT INTO request_categories VALUES
       (1, 1), (1, 2),
       (2, 1),
@@ -70,12 +71,12 @@ test('dashboard statistics scope every panel by category without duplicating mul
   const now = new Date('2026-07-21T00:00:00.000Z');
 
   const all = await getDashboardStats(db, { now });
-  assert.deepEqual(all.overview, { total: 3, active: 1, completed: 2, dueSoon: 1 });
+  assert.deepEqual(all.overview, { total: 3, active: 1, completed: 2, dueSoon: 1, overdue: 0 });
   assert.equal(all.stats.totalDrainTime, '1.2 hours');
   assert.equal(all.requesterBreakdown.find(row => row.username === 'Alice').count, 2);
 
   const hitsounds = await getDashboardStats(db, { categoryId: 1, now });
-  assert.deepEqual(hitsounds.overview, { total: 2, active: 1, completed: 1, dueSoon: 1 });
+  assert.deepEqual(hitsounds.overview, { total: 2, active: 1, completed: 1, dueSoon: 1, overdue: 0 });
   assert.deepEqual(hitsounds.stats, {
     completedCount: 1,
     totalDrainTime: '10 minutes',
@@ -94,17 +95,41 @@ test('dashboard statistics scope every panel by category without duplicating mul
   ]);
 
   const storyboards = await getDashboardStats(db, { categoryId: 2, now });
-  assert.deepEqual(storyboards.overview, { total: 2, active: 0, completed: 2, dueSoon: 0 });
+  assert.deepEqual(storyboards.overview, { total: 2, active: 0, completed: 2, dueSoon: 0, overdue: 0 });
   assert.equal(storyboards.stats.totalDrainTime, '1.2 hours');
   assert.equal(storyboards.stats.rankedCompletedCount, 1);
   assert.deepEqual(storyboards.yearSummary.map(row => row.year), [2026, 2025]);
 
   const empty = await getDashboardStats(db, { categoryId: 4, now });
-  assert.deepEqual(empty.overview, { total: 0, active: 0, completed: 0, dueSoon: 0 });
+  assert.deepEqual(empty.overview, { total: 0, active: 0, completed: 0, dueSoon: 0, overdue: 0 });
   assert.equal(empty.stats.totalDrainTime, '0 hours');
   assert.deepEqual(empty.yearSummary, []);
   assert.deepEqual(empty.requesterBreakdown, []);
 
+  await db.close();
+});
+
+test('dashboard statistics exclude the connected mapper from requester rankings', async () => {
+  const db = await createStatsDatabase();
+  const now = new Date(2026, 6, 21);
+  const stats = await getDashboardStats(db, { now, excludeUserId: '10', excludeUsername: 'Alice' });
+  assert.deepEqual(stats.requesterBreakdown.map(row => row.username), ['Bob']);
+  assert.equal(stats.stats.mostFrequentRequester, 'None');
+  assert.ok(stats.yearSummary.every(row => row.mostRequestedUser === 'None'));
+  await db.close();
+});
+
+test('dashboard statistics report overdue work and a 12-month activity trend', async () => {
+  const db = await createStatsDatabase();
+  const now = new Date(2026, 6, 30);
+  const stats = await getDashboardStats(db, { now });
+  assert.equal(stats.overview.overdue, 1);
+  assert.equal(stats.overview.dueSoon, 0);
+  assert.equal(stats.monthlyActivity.length, 12);
+  assert.equal(stats.monthlyActivity.at(-1).month, '2026-07');
+  assert.deepEqual(stats.monthlyActivity.find(row => row.month === '2026-07'), { month: '2026-07', added: 1, completed: 0 });
+  assert.deepEqual(stats.monthlyActivity.find(row => row.month === '2026-01'), { month: '2026-01', added: 1, completed: 0 });
+  assert.deepEqual(stats.monthlyActivity.find(row => row.month === '2026-02'), { month: '2026-02', added: 0, completed: 1 });
   await db.close();
 });
 
