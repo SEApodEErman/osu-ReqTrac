@@ -41,6 +41,13 @@ import {
 import { REQUEST_COLUMNS, defaultVisibleColumns, moveColumn, normalizeColumnOrder, requestColumnClassName } from '../utils/requestColumns';
 
 const ROW_HEIGHT = { comfortable: 64, compact: 46 };
+// Mirrors the column widths in index.css; the beatmap column gets at least
+// SONG_MIN_WIDTH and any extra space.
+const COLUMN_WIDTHS = {
+  select: 40, cover: 72, requester: 130, tags: 150, modes: 112, beatmap_status: 108,
+  request_status: 128, priority: 100, deadline: 120, notes: 170, added: 100, actions: 104,
+};
+const SONG_MIN_WIDTH = 280;
 const OVERSCAN = 8;
 const DEFAULT_VIEW = { search: '', status: '', priority: '', tag: '', due: '', sync: '', sortBy: 'added_date', sortOrder: 'desc' };
 const DESCENDING_FIRST = new Set(['added_date']);
@@ -699,7 +706,11 @@ export default function RequestsTable({
         aria-label={`${title} requests. Use the arrow keys to move, Enter to open, Space to select.`}
       >
         {filteredRequests.length === 0 ? renderEmpty() : (
-          <table className={`requests-table${density === 'compact' ? ' is-compact' : ''}`} style={{ '--row-height': `${rowHeight}px` }} aria-rowcount={filteredRequests.length + 1}>
+          <table
+            className={`requests-table${density === 'compact' ? ' is-compact' : ''}`}
+            style={{ '--row-height': `${rowHeight}px`, minWidth: columns.reduce((sum, key) => sum + (key === 'song' ? SONG_MIN_WIDTH : COLUMN_WIDTHS[key] || 0), COLUMN_WIDTHS.select) }}
+            aria-rowcount={filteredRequests.length + 1}
+          >
             <colgroup>
               <col className="col-select" />
               {columns.map(key => <col key={key} className={requestColumnClassName(key)} />)}

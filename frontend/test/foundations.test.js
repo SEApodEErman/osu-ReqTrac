@@ -86,3 +86,9 @@ test('star colours follow the osu! spectrum', () => {
   assert.equal(starRatingTextColor(3), 'rgba(0, 0, 0, 0.78)');
   assert.equal(starRatingTextColor(7), '#f6f05c');
 });
+
+test('calendar dates are shown without an invented time of day', async () => {
+  const { formatDateTime } = await import('../src/utils/dates.js');
+  assert.doesNotMatch(formatDateTime('2026-07-14'), /:/);
+  assert.match(formatDateTime('2026-07-14 09:40:03'), /:/);
+});

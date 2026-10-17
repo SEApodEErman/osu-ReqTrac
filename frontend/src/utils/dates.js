@@ -48,6 +48,8 @@ export function formatDate(value, fallback = '—') {
 }
 
 export function formatDateTime(value, fallback = '—') {
+  // Calendar dates have no time of day to show.
+  if (DATE_ONLY.test(String(value ?? '').trim())) return formatDate(value, fallback);
   const date = parseAppDate(value);
   return date
     ? `${date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}, ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`

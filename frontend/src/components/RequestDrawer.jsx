@@ -108,13 +108,17 @@ function formFromRequest(request, definitions) {
   };
 }
 
+function isConnectedUsersDifficulty(difficulty, connectedAccount) {
+  if (!connectedAccount) return false;
+  const owners = Array.isArray(difficulty.creator_names) && difficulty.creator_names.length ? difficulty.creator_names : [difficulty.creator_name].filter(Boolean);
+  return (Array.isArray(difficulty.creator_ids) && difficulty.creator_ids.map(Number).includes(Number(connectedAccount.id)))
+    || owners.some(owner => owner?.toLowerCase() === connectedAccount.username?.toLowerCase());
+}
+
 function DifficultyCard({ difficulty, connectedAccount, selectable, selected, onToggle }) {
   const mode = normalizeGamemode(difficulty.mode);
   const owners = Array.isArray(difficulty.creator_names) && difficulty.creator_names.length ? difficulty.creator_names : [difficulty.creator_name].filter(Boolean);
-  const isYours = connectedAccount && (
-    (Array.isArray(difficulty.creator_ids) && difficulty.creator_ids.map(Number).includes(Number(connectedAccount.id)))
-    || owners.some(owner => owner?.toLowerCase() === connectedAccount.username?.toLowerCase())
-  );
+  const isYours = isConnectedUsersDifficulty(difficulty, connectedAccount);
   const stats = mode === 'mania'
     ? [`${difficulty.cs ?? '?'}K`, `OD ${difficulty.od ?? '—'}`, `HP ${difficulty.hp ?? '—'}`]
     : mode === 'taiko'
@@ -593,7 +597,11 @@ export default function RequestDrawer({
                   <p className="muted">{pending ? 'Difficulties will appear when the sync from osu! finishes.' : 'No difficulty details are cached yet. Use Refresh from osu! above.'}</p>
                 ) : (
                   <div className="diff-grid">
-                    {[...difficulties].sort((a, b) => (Number(a.stars) || 0) - (Number(b.stars) || 0)).map(difficulty => (
+                    {[...difficulties].sort((a, b) => {
+                      // Your marked or owned difficulties first, then by star rating.
+                      const rank = difficulty => (isDifficultySelected(form.guest_difficulties, difficulty.id) || isConnectedUsersDifficulty(difficulty, connectedAccount) ? 0 : 1);
+                      return rank(a) - rank(b) || (Number(a.stars) || 0) - (Number(b.stars) || 0);
+                    }).map(difficulty => (
                       <DifficultyCard
                         key={difficulty.id}
                         difficulty={difficulty}
