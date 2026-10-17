@@ -44,6 +44,8 @@ const ROW_HEIGHT = { comfortable: 64, compact: 46 };
 const OVERSCAN = 8;
 const DEFAULT_VIEW = { search: '', status: '', priority: '', tag: '', due: '', sync: '', sortBy: 'added_date', sortOrder: 'desc' };
 const DESCENDING_FIRST = new Set(['added_date']);
+// Deleting this many at once asks first; smaller deletes rely on Undo.
+const CONFIRM_DELETE_AT = 10;
 
 const SORT_FIELDS = {
   song: 'title',
@@ -444,6 +446,21 @@ export default function RequestsTable({
     }
   }, [actions]);
 
+  const deleteSelected = async () => {
+    const ids = [...selectedVisibleIds];
+    if (!ids.length) return;
+    if (ids.length >= CONFIRM_DELETE_AT) {
+      const confirmed = await onRequestConfirmation({
+        title: `Delete ${ids.length} requests?`,
+        message: 'They’re removed from every category, along with their history. You can still undo for a few seconds afterwards.',
+        confirmLabel: `Delete ${ids.length} requests`,
+      });
+      if (!confirmed) return;
+    }
+    actions.deleteRequests(ids);
+    setSelectedIds(new Set());
+  };
+
   const toggleSort = (field) => {
     if (view.sortBy === field) updateView({ sortOrder: view.sortOrder === 'asc' ? 'desc' : 'asc' });
     else updateView({ sortBy: field, sortOrder: DESCENDING_FIRST.has(field) ? 'desc' : 'asc' });
@@ -489,8 +506,7 @@ export default function RequestsTable({
     } else if (event.key === 'Delete') {
       event.preventDefault();
       if (selectedVisibleIds.length) {
-        actions.deleteRequests(selectedVisibleIds);
-        setSelectedIds(new Set());
+        void deleteSelected();
       } else if (focusedIndex >= 0) {
         handleDelete(filteredRequests[focusedIndex]);
       }
@@ -794,10 +810,7 @@ export default function RequestsTable({
           <button
             type="button"
             className="btn btn-danger btn-sm"
-            onClick={() => {
-              actions.deleteRequests(selectedVisibleIds);
-              setSelectedIds(new Set());
-            }}
+            onClick={() => void deleteSelected()}
             title="Delete selected (can be undone)"
           >
             <Trash2 size={13} />Delete
