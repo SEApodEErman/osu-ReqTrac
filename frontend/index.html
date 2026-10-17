@@ -4,16 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <script>
+      // Apply the last-used theme before first paint. The authoritative value
+      // lives in the app's preferences; this is only a flash-free cache.
       (() => {
-        const preference = localStorage.getItem('theme') || 'system';
+        let preference = 'system';
+        try {
+          preference = localStorage.getItem('theme') || 'system';
+        } catch {
+          // Storage can be unavailable; fall back to the system theme.
+        }
         const systemTheme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
         document.documentElement.dataset.theme = preference === 'system' ? systemTheme : preference;
       })();
     </script>
-    <title>osu!ReqTrac - Request Tracker</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <title>osu!ReqTrac</title>
   </head>
   <body>
     <div id="root"></div>

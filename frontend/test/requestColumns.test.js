@@ -13,8 +13,7 @@ test('column drag operation moves a column before its drop target without losing
   assert.deepEqual([...reordered].sort(), [...DEFAULT_COLUMN_ORDER].sort());
 });
 
-test('column keys map to the hyphenated class names used by table width rules', () => {
-  assert.equal(requestColumnClassName('beatmap_status'), 'request-col-beatmap-status');
-  assert.equal(requestColumnClassName('request_status'), 'request-col-request-status');
-  assert.equal(requestColumnClassName('song'), 'request-col-song');
+test('column keys map to the class names used by table width rules', () => {
+  assert.equal(requestColumnClassName('beatmap_status'), 'col-beatmap_status');
+  assert.equal(requestColumnClassName('song'), 'col-song');
 });

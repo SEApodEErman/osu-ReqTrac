@@ -1,506 +1,343 @@
-import React from 'react';
+import React, { useMemo } from 'react';
+import { ArrowRight, Calendar, FileSpreadsheet, KeyRound, ListPlus, Plus } from 'lucide-react';
 import { countryCodeToFlag } from '../utils/countryFlag';
-import { getRecentDashboardRequests } from '../utils/dashboard';
-import { 
-  FileText, 
-  Play, 
-  CheckCircle, 
-  AlertTriangle, 
-  Clock, 
-  Award, 
-  User, 
-  Flame,
-  Calendar
-} from 'lucide-react';
+import { buildAttentionGroups } from '../utils/attention';
+import { describeDeadline, compareAppDates, formatRelativeTime } from '../utils/dates';
+import { requestBelongsToDashboardCategory, getRecentDashboardRequests } from '../utils/dashboard';
+import { PRIORITY_SORT_ORDER, requestDisplayTitle } from '../utils/requestConstants';
+import { StatusPill } from './ui/Badges';
+import Avatar from './ui/Avatar';
+import CoverImage, { coverBackground } from './ui/CoverImage';
 
-export default function Dashboard({
-  statsData,
-  statsLoading = false,
-  requestsList,
-  onOpenRequest,
-  connectedAccount,
-  categoryDefinitions = [],
-  selectedCategoryId = 'all',
-  onCategoryChange,
-}) {
-  const displayedStats = statsLoading ? {} : statsData;
-  const { overview = {}, stats = {}, yearSummary = [], requesterBreakdown = [] } = displayedStats || {};
-  const connectedUsername = connectedAccount?.username || null;
+const ATTENTION_PREVIEW = 4;
 
-  // Exclude the connected user from the breakdown (dashboard is for their own use)
-  const filteredBreakdown = connectedUsername
-    ? requesterBreakdown.filter(r => r.username !== connectedUsername)
-    : requesterBreakdown;
+function pickNowWorking(requests) {
+  const working = requests.filter(request => request.request_status === 'Working');
+  const pool = working.length ? working : requests.filter(request => request.request_status === 'Accepted');
+  return [...pool].sort((a, b) => (
+    compareAppDates(a.deadline, b.deadline)
+    || PRIORITY_SORT_ORDER.indexOf(a.priority || 'Low') - PRIORITY_SORT_ORDER.indexOf(b.priority || 'Low')
+    || compareAppDates(b.last_updated, a.last_updated)
+  ))[0] || null;
+}
 
-  // Determine top requester excluding the connected user (fallback to next in line)
-  const nextTopRequester = filteredBreakdown.length > 0 ? filteredBreakdown[0].username : 'None';
-  const displayTopRequester = (connectedUsername && stats.mostFrequentRequester === connectedUsername)
-    ? nextTopRequester
-    : (stats.mostFrequentRequester || 'None');
+function DeadlineText({ request }) {
+  const deadline = describeDeadline(request.deadline, request.request_status);
+  if (!deadline) return null;
+  return (
+    <span className={`deadline-text deadline-${deadline.tone}`}>
+      <Calendar size={12} />
+      {deadline.text}
+    </span>
+  );
+}
 
-  const maxRequesterCount = filteredBreakdown.length > 0
-    ? Math.max(...filteredBreakdown.map(r => r.count))
-    : 1;
-  
-  // Scope recent requests to the same category as the dashboard statistics.
-  const recentlyAdded = getRecentDashboardRequests(requestsList, selectedCategoryId);
+function RequestListItem({ request, onOpen, aside }) {
+  return (
+    <button type="button" className="request-list-item" onClick={() => onOpen(request)}>
+      <CoverImage src={request.local_cover_path} className="request-list-cover" />
+      <span style={{ minWidth: 0 }}>
+        <div className="request-list-title">{requestDisplayTitle(request)}</div>
+        <div className="request-list-meta">
+          {[request.artist, request.creator && `mapped by ${request.creator}`, request.requester_username && request.requester_username !== request.creator && `for ${request.requester_username}`].filter(Boolean).join(' · ')}
+        </div>
+      </span>
+      <span className="request-list-aside">{aside ?? <StatusPill status={request.request_status} />}</span>
+    </button>
+  );
+}
 
-  // SVG Chart Calculation
-  const maxCompleted = yearSummary.length > 0 
-    ? Math.max(...yearSummary.map(y => y.completedCount)) 
-    : 10;
-  
-  const chartHeight = 120;
-  const chartWidth = 320;
-  const barPadding = 16;
-  const barWidth = yearSummary.length > 0 
-    ? (chartWidth - (barPadding * (yearSummary.length + 1))) / yearSummary.length 
-    : 40;
+function ActivityChart({ months = [] }) {
+  const width = 560;
+  const height = 150;
+  const top = 12;
+  const bottom = 22;
+  const max = Math.max(1, ...months.flatMap(month => [month.added, month.completed]));
+  const slot = width / Math.max(months.length, 1);
+  const barWidth = Math.min(14, slot / 3);
+  const y = value => top + (height - top - bottom) * (1 - value / max);
+  const label = month => new Date(Number(month.month.slice(0, 4)), Number(month.month.slice(5, 7)) - 1, 1).toLocaleDateString(undefined, { month: 'short' });
+  const totalAdded = months.reduce((sum, month) => sum + month.added, 0);
+  const totalCompleted = months.reduce((sum, month) => sum + month.completed, 0);
 
   return (
-    <div
-      aria-busy={statsLoading}
-      style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '24px' }}
-    >
-      
-      {/* Welcome Header */}
-      <div className="dashboard-header">
-        <div>
-          <h1 style={{ fontSize: '24px', fontWeight: '700', fontFamily: 'var(--font-display)', marginBottom: '4px' }}>
-            Overview
-          </h1>
-          <p style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
-            Welcome back! Here is a summary of your osu! request tracking workspace.
-          </p>
-        </div>
-        <label className="dashboard-category-control">
-          <span>Category</span>
-          <select
-            className="input-text dashboard-category-select"
-            value={selectedCategoryId}
-            onChange={event => onCategoryChange?.(event.target.value)}
-            aria-label="Dashboard statistics category"
-          >
-            <option value="all">All</option>
-            {categoryDefinitions.map(category => (
-              <option key={category.id} value={String(category.id)}>
-                {category.name}
-              </option>
-            ))}
-          </select>
-        </label>
+    <div>
+      <div className="chart-legend" style={{ marginBottom: 8 }}>
+        <span><i style={{ background: 'var(--border-strong)' }} />Added · {totalAdded}</span>
+        <span><i style={{ background: 'var(--accent)' }} />Completed · {totalCompleted}</span>
       </div>
+      <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Requests added and completed per month over the last 12 months: ${totalAdded} added, ${totalCompleted} completed.`}>
+        {[0.5, 1].map(fraction => (
+          <line key={fraction} className="chart-grid" x1={0} x2={width} y1={y(max * fraction)} y2={y(max * fraction)} />
+        ))}
+        <text className="chart-axis" x={0} y={y(max) - 3}>{max}</text>
+        {months.map((month, index) => {
+          const center = slot * index + slot / 2;
+          return (
+            <g key={month.month}>
+              <title>{`${label(month)} ${month.month.slice(0, 4)}: ${month.added} added, ${month.completed} completed`}</title>
+              <rect x={center - barWidth - 1} y={y(month.added)} width={barWidth} height={Math.max(0, height - bottom - y(month.added))} rx={3} fill="var(--border-strong)" />
+              <rect x={center + 1} y={y(month.completed)} width={barWidth} height={Math.max(0, height - bottom - y(month.completed))} rx={3} fill="var(--accent)" />
+              <text className="chart-axis" x={center} y={height - 6} textAnchor="middle">{label(month)}</text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
 
-      {statsLoading && (
-        <div className="dashboard-loading" role="status">Loading category statistics…</div>
-      )}
-
-      {/* Grid of 4 Cards */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-        gap: '16px'
-      }}>
-        {/* Card 1: Total */}
-        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <div style={{ 
-            backgroundColor: 'var(--hover-bg)', 
-            color: 'var(--text-main)', 
-            padding: '12px', 
-            borderRadius: '10px' 
-          }}>
-            <FileText size={22} />
-          </div>
-          <div>
-            <div style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase' }}>
-              Total Requests
-            </div>
-            <div style={{ fontSize: '24px', fontWeight: '700', fontFamily: 'var(--font-display)' }}>
-              {overview.total || 0}
-            </div>
-          </div>
-        </div>
-
-        {/* Card 2: Active */}
-        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <div style={{ 
-            backgroundColor: 'rgba(52, 152, 219, 0.1)', 
-            color: 'var(--req-working)', 
-            padding: '12px', 
-            borderRadius: '10px' 
-          }}>
-            <Play size={22} />
-          </div>
-          <div>
-            <div style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase' }}>
-              Active
-            </div>
-            <div style={{ fontSize: '24px', fontWeight: '700', fontFamily: 'var(--font-display)', color: 'var(--req-working)' }}>
-              {overview.active || 0}
-            </div>
-          </div>
-        </div>
-
-        {/* Card 3: Completed */}
-        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <div style={{ 
-            backgroundColor: 'rgba(46, 204, 113, 0.1)', 
-            color: 'var(--req-completed)', 
-            padding: '12px', 
-            borderRadius: '10px' 
-          }}>
-            <CheckCircle size={22} />
-          </div>
-          <div>
-            <div style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase' }}>
-              Completed
-            </div>
-            <div style={{ fontSize: '24px', fontWeight: '700', fontFamily: 'var(--font-display)', color: 'var(--req-completed)' }}>
-              {overview.completed || 0}
-            </div>
-          </div>
-        </div>
-
-        {/* Card 4: Due within week */}
-        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <div style={{ 
-            backgroundColor: 'rgba(231, 76, 60, 0.1)', 
-            color: 'var(--req-cancelled)', 
-            padding: '12px', 
-            borderRadius: '10px' 
-          }}>
-            <AlertTriangle size={22} />
-          </div>
-          <div>
-            <div style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: '600', textTransform: 'uppercase' }}>
-              Due This Week
-            </div>
-            <div style={{ fontSize: '24px', fontWeight: '700', fontFamily: 'var(--font-display)', color: overview.dueSoon > 0 ? 'var(--req-cancelled)' : 'var(--text-muted)' }}>
-              {overview.dueSoon || 0}
-            </div>
-          </div>
+function OnboardingEmptyState({ isConfigured, onAddRequest, onImport, onOpenSetup }) {
+  return (
+    <div className="panel">
+      <div className="empty-state">
+        <span className="empty-state-icon"><ListPlus size={22} /></span>
+        <h3>Track your first request</h3>
+        <p>
+          Paste an osu! beatmap link and ReqTrac fills in the title, mapper, difficulties, and cover for you.
+          Already keep a list somewhere? Import it from a spreadsheet or a list of links.
+        </p>
+        <div className="view-actions">
+          {!isConfigured && (
+            <button type="button" className="btn btn-primary" onClick={onOpenSetup}><KeyRound size={15} />Connect osu! first</button>
+          )}
+          <button type="button" className={isConfigured ? 'btn btn-primary' : 'btn btn-secondary'} onClick={onAddRequest}><Plus size={15} />Add request</button>
+          <button type="button" className="btn btn-secondary" onClick={onImport}><FileSpreadsheet size={15} />Import requests</button>
         </div>
       </div>
+    </div>
+  );
+}
 
-      {/* Main Grid: Recently Added vs Stats */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: '1.2fr 0.8fr',
-        gap: '24px'
-      }}>
-        {/* Left Side: Recently Added */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <h3 style={{ fontSize: '15px', fontWeight: '700' }}>Recently Added</h3>
-            <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Newest requests</span>
+export default function Dashboard({
+  stats,
+  statsLoading,
+  requests,
+  requestsLoaded,
+  categories,
+  selectedCategoryId,
+  onCategoryChange,
+  onOpenRequest,
+  onShowRequests,
+  onAddRequest,
+  onImport,
+  onOpenSetup,
+  isConfigured,
+}) {
+  const scopedRequests = useMemo(
+    () => requests.filter(request => requestBelongsToDashboardCategory(request, selectedCategoryId)),
+    [requests, selectedCategoryId],
+  );
+  const attentionGroups = useMemo(() => buildAttentionGroups(scopedRequests), [scopedRequests]);
+  const nowWorking = useMemo(() => pickNowWorking(scopedRequests), [scopedRequests]);
+  const recentlyAdded = useMemo(() => getRecentDashboardRequests(requests, selectedCategoryId, 5), [requests, selectedCategoryId]);
+  const categoryKey = selectedCategoryId === 'all' ? 'all' : selectedCategoryId;
+  const overview = stats?.overview || {};
+  const summary = stats?.stats || {};
+  const requesters = stats?.requesterBreakdown || [];
+  const maxRequesterCount = Math.max(1, ...requesters.map(requester => requester.count));
+  const loadingValue = value => (statsLoading && !stats ? '–' : value ?? 0);
+
+  const kpis = [
+    { label: 'Active', value: overview.active, tone: 'working', foot: 'Considering, accepted, or working', filter: { status: 'active' } },
+    { label: 'Overdue', value: overview.overdue, tone: overview.overdue ? 'overdue' : undefined, foot: 'Past their deadline', filter: { due: 'overdue' } },
+    { label: 'Due this week', value: overview.dueSoon, tone: overview.dueSoon ? 'soon' : undefined, foot: 'Next 7 days', filter: { due: 'week' } },
+    { label: 'Completed', value: overview.completed, tone: 'done', foot: `${summary.totalDrainTime || '0 hours'} of drain time`, filter: { status: 'Completed' } },
+    { label: 'All requests', value: overview.total, foot: `${summary.rankedCompletedCount || 0} completed maps ranked`, filter: {} },
+  ];
+
+  const isEmptyLibrary = requestsLoaded && requests.length === 0;
+
+  return (
+    <div className="view">
+      <div className="view-inner">
+        <div className="view-header">
+          <div>
+            <h1 className="view-title">Overview</h1>
+            <p className="view-subtitle">What needs your attention, and how your requests are going.</p>
           </div>
+          <div className="view-actions">
+            <select
+              className="input"
+              style={{ width: 'auto', minWidth: 170 }}
+              value={selectedCategoryId}
+              onChange={event => onCategoryChange(event.target.value)}
+              aria-label="Show statistics for"
+            >
+              <option value="all">All categories</option>
+              {categories.map(category => <option key={category.id} value={String(category.id)}>{category.name}</option>)}
+            </select>
+            <button type="button" className="btn btn-primary" onClick={onAddRequest} title="Add request (Ctrl+N)">
+              <Plus size={15} />Add request
+            </button>
+          </div>
+        </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {recentlyAdded.length === 0 ? (
-              <div style={{ 
-                padding: '32px', 
-                textAlign: 'center', 
-                color: 'var(--text-muted)',
-                backgroundColor: 'var(--bg-app)',
-                borderRadius: '8px',
-                border: '1px dashed var(--border)'
-              }}>
-                No requests found. Paste an osu! link in the Requests panel to get started!
-              </div>
-            ) : (
-              recentlyAdded.map(req => (
-                <div 
-                  key={req.id} 
-                  onClick={() => onOpenRequest(req)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '10px 14px',
-                    borderRadius: '8px',
-                    backgroundColor: 'var(--bg-app)',
-                    border: '1px solid var(--border)',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s'
-                  }}
-                  className="recent-req-item"
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.borderColor = 'var(--osu-pink)';
-                    e.currentTarget.style.transform = 'translateX(4px)';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.borderColor = 'var(--border)';
-                    e.currentTarget.style.transform = 'translateX(0)';
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
-                    <img
-                      src={req.local_cover_path} 
-                      alt="cover" 
-                      width={48}
-                      height={28}
-                      style={{ 
-                        width: '48px', 
-                        height: '28px', 
-                        borderRadius: '4px', 
-                        objectFit: 'cover',
-                        border: '1px solid var(--border)'
-                      }}
-                      onError={(e) => {
-                        e.target.src = '/uploads/covers/default.jpg';
-                      }}
-                    />
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ 
-                        fontSize: '13px', 
-                        fontWeight: '600', 
-                        whiteSpace: 'nowrap', 
-                        overflow: 'hidden', 
-                        textOverflow: 'ellipsis',
-                        color: 'var(--text-main)'
-                      }}>
-                        {req.artist} - {req.title}
-                      </div>
-                      <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                        Mapped by {req.creator} • Requester: {req.requester_username}
-                      </div>
+        {isEmptyLibrary ? (
+          <OnboardingEmptyState isConfigured={isConfigured} onAddRequest={onAddRequest} onImport={onImport} onOpenSetup={onOpenSetup} />
+        ) : (
+          <>
+            {nowWorking && (
+              <section className="now-working" aria-label="Up next">
+                <div className="now-working-cover" style={coverBackground(nowWorking.local_cover_path)} />
+                <div className="now-working-content">
+                  <div style={{ minWidth: 0 }}>
+                    <div className="now-working-eyebrow">{nowWorking.request_status === 'Working' ? 'You’re working on' : 'Up next'}</div>
+                    <h2 className="now-working-title">{requestDisplayTitle(nowWorking)}</h2>
+                    <div className="now-working-meta">
+                      {[nowWorking.artist, nowWorking.creator && `mapped by ${nowWorking.creator}`, (nowWorking.categories || []).map(category => category.category_name).join(', ')].filter(Boolean).join(' · ')}
                     </div>
                   </div>
-
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                    {req.deadline && (
-                      <span style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <Calendar size={12} />
-                        {new Date(req.deadline).toLocaleDateString()}
-                      </span>
-                    )}
-                    <span className={`badge badge-${req.request_status.toLowerCase()}`}>
-                      {req.request_status}
-                    </span>
+                  <div className="view-actions">
+                    <DeadlineText request={nowWorking} />
+                    <button type="button" className="btn btn-secondary" onClick={() => onOpenRequest(nowWorking)}>Open request</button>
                   </div>
                 </div>
-              ))
+              </section>
             )}
-          </div>
-        </div>
 
-        {/* Right Side: Statistics Summary */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          <h3 style={{ fontSize: '15px', fontWeight: '700' }}>Statistics</h3>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            {/* Stat: Completed count */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--text-muted)' }}>
-                <CheckCircle size={16} />
-                <span>Completed Requests</span>
-              </div>
-              <span style={{ fontWeight: '700' }}>{stats.completedCount || 0}</span>
+            <div className="kpi-row" aria-busy={statsLoading}>
+              {kpis.map(kpi => (
+                <button key={kpi.label} type="button" className="kpi" onClick={() => onShowRequests(categoryKey, kpi.filter)} title={`Show ${kpi.label.toLowerCase()} requests`}>
+                  <span className="kpi-label">{kpi.label}</span>
+                  <span className="kpi-value" data-tone={kpi.tone}>{loadingValue(kpi.value)}</span>
+                  <span className="kpi-foot">{kpi.foot}</span>
+                </button>
+              ))}
             </div>
 
-            {/* Stat: Drain time */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--text-muted)' }}>
-                <Clock size={16} />
-                <span>Drain Time Worked</span>
-              </div>
-              <span style={{ fontWeight: '700' }}>{stats.totalDrainTime || '0 hours'}</span>
-            </div>
-
-            {/* Stat: Ranked maps */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--text-muted)' }}>
-                <Award size={16} style={{ color: 'var(--status-ranked)' }} />
-                <span>Ranked Completed</span>
-              </div>
-              <span style={{ fontWeight: '700', color: 'var(--status-ranked)' }}>{stats.rankedCompletedCount || 0}</span>
-            </div>
-
-            {/* Stat: Most frequent requester */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--text-muted)' }}>
-                <User size={16} />
-                <span>Top Requester</span>
-              </div>
-              <span style={{ fontWeight: '700', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {displayTopRequester}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Bottom Grid: Year Summary and Year SVG Chart */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: '1fr 1fr',
-        gap: '24px'
-      }}>
-        {/* Year Table */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          <h3 style={{ fontSize: '15px', fontWeight: '700' }}>Yearly Breakdown</h3>
-
-          {yearSummary.length === 0 ? (
-            <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)' }}>
-              No yearly records yet. Completing requests will populate this summary.
-            </div>
-          ) : (
-            <div className="table-container" style={{ border: 'none' }}>
-              <table className="compact-table" style={{ width: '100%' }}>
-                <thead>
-                  <tr>
-                    <th style={{ backgroundColor: 'transparent', paddingLeft: 0 }}>Year</th>
-                    <th style={{ backgroundColor: 'transparent' }}>Completed</th>
-                    <th style={{ backgroundColor: 'transparent' }}>Drain Time</th>
-                    <th style={{ backgroundColor: 'transparent', paddingRight: 0 }}>Top User</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {yearSummary.map(y => (
-                    <tr key={y.year} style={{ cursor: 'default', backgroundColor: 'transparent' }}>
-                      <td style={{ fontWeight: '600', paddingLeft: 0 }}>{y.year}</td>
-                      <td>{y.completedCount} requests</td>
-                      <td>{y.totalDrainTime}</td>
-                      <td style={{ paddingRight: 0 }}>{connectedUsername && y.mostRequestedUser === connectedUsername ? nextTopRequester : y.mostRequestedUser}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        {/* Year Chart */}
-        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px', justifyContent: 'space-between' }}>
-          <h3 style={{ fontSize: '15px', fontWeight: '700' }}>Year Completed Summary</h3>
-
-          {yearSummary.length === 0 ? (
-            <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)', flexGrow: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              No data to chart.
-            </div>
-          ) : (
-            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-end', height: '140px', paddingBottom: '10px' }}>
-              <svg width={chartWidth} height={chartHeight} style={{ overflow: 'visible' }}>
-                {/* Chart grid lines */}
-                <line x1={0} y1={chartHeight} x2={chartWidth} y2={chartHeight} stroke="var(--border)" strokeWidth={1} />
-                <line x1={0} y1={chartHeight / 2} x2={chartWidth} y2={chartHeight / 2} stroke="var(--border)" strokeWidth={1} strokeDasharray="4 4" />
-                <line x1={0} y1={0} x2={chartWidth} y2={0} stroke="var(--border)" strokeWidth={1} strokeDasharray="4 4" />
-
-                {yearSummary.map((y, index) => {
-                  const barX = barPadding + index * (barWidth + barPadding);
-                  const barValHeight = (y.completedCount / maxCompleted) * (chartHeight - 20); // leave 20px gap for label
-                  const barY = chartHeight - barValHeight;
-                  
-                  return (
-                    <g key={y.year}>
-                      {/* Bar shadow/hover handle */}
-                      <rect 
-                        x={barX} 
-                        y={0} 
-                        width={barWidth} 
-                        height={chartHeight} 
-                        fill="transparent" 
-                        style={{ cursor: 'pointer' }}
-                      />
-                      {/* Bar Fill */}
-                      <rect 
-                        x={barX} 
-                        y={barY} 
-                        width={barWidth} 
-                        height={barValHeight} 
-                        fill="var(--osu-pink)" 
-                        rx={4}
-                        style={{ transition: 'all 0.3s' }}
-                      />
-                      {/* Value label */}
-                      <text 
-                        x={barX + barWidth / 2} 
-                        y={barY - 6} 
-                        fill="var(--text-main)" 
-                        fontSize={10} 
-                        fontWeight={700}
-                        textAnchor="middle"
-                      >
-                        {y.completedCount}
-                      </text>
-                      {/* Year label */}
-                      <text 
-                        x={barX + barWidth / 2} 
-                        y={chartHeight + 14} 
-                        fill="var(--text-muted)" 
-                        fontSize={10} 
-                        fontWeight={500}
-                        textAnchor="middle"
-                      >
-                        {y.year}
-                      </text>
-                    </g>
-                  );
-                })}
-              </svg>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Requester Breakdown */}
-      <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h3 style={{ fontSize: '15px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <User size={16} />
-            Requester Breakdown
-          </h3>
-          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Top requesters by request count</span>
-        </div>
-
-        {filteredBreakdown.length === 0 ? (
-          <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)' }}>
-            No requester data yet.
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {filteredBreakdown.map((r, index) => (
-              <div key={r.username + index} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <img
-                  src={r.avatar_url || '/uploads/covers/default.jpg'}
-                  alt={r.username}
-                  width={32}
-                  height={32}
-                  style={{ width: '32px', height: '32px', borderRadius: '50%', objectFit: 'cover', border: '1px solid var(--border)', flexShrink: 0 }}
-                  onError={(e) => { e.target.src = '/uploads/covers/default.jpg'; }}
-                />
-                <div style={{ flexGrow: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                    <span style={{ fontSize: '13px', fontWeight: '600', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {r.country_code && (
-                        <span
-                          title={r.country_code.toUpperCase()}
-                          aria-label={`Country: ${r.country_code.toUpperCase()}`}
-                          className="country-flag"
-                          style={{ marginRight: '6px' }}
-                        >
-                          {countryCodeToFlag(r.country_code)}
-                        </span>
-                      )}
-                      {r.username}
-                    </span>
-                    <span style={{ fontSize: '12px', fontWeight: '700', color: 'var(--osu-pink)', flexShrink: 0, marginLeft: '8px' }}>
-                      {r.count}
-                    </span>
+            <div className="overview-grid">
+              <div className="overview-column">
+                <section className="panel">
+                  <header className="panel-header">
+                    <div>
+                      <h2 className="panel-title">Needs attention</h2>
+                      <p className="panel-subtitle">Deadlines first, then decisions and sync problems.</p>
+                    </div>
+                  </header>
+                  <div className="panel-body">
+                    {attentionGroups.length === 0 ? (
+                      <p className="muted" style={{ fontSize: 'var(--text-md)' }}>
+                        Nothing is overdue or waiting on you. {overview.active ? 'Pick up an active request whenever you’re ready.' : ''}
+                      </p>
+                    ) : attentionGroups.map(group => (
+                      <div key={group.key} className={`attention-group tone-${group.tone}`}>
+                        <div className="attention-group-header">
+                          <span className="attention-group-title">{group.title}<span className="count-badge">{group.requests.length}</span></span>
+                          {group.requests.length > ATTENTION_PREVIEW && (
+                            <button type="button" className="btn-link" style={{ fontSize: 'var(--text-sm)' }} onClick={() => onShowRequests(categoryKey, group.filter)}>
+                              Show all<ArrowRight size={13} />
+                            </button>
+                          )}
+                        </div>
+                        <div className="request-list">
+                          {group.requests.slice(0, ATTENTION_PREVIEW).map(request => (
+                            <RequestListItem
+                              key={request.id}
+                              request={request}
+                              onOpen={onOpenRequest}
+                              aside={group.key === 'sync-failed'
+                                ? <span className="pill map-failed">Sync failed</span>
+                                : describeDeadline(request.deadline, request.request_status)
+                                  ? <DeadlineText request={request} />
+                                  : <StatusPill status={request.request_status} />}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                  <div style={{ height: '6px', backgroundColor: 'var(--bg-app)', borderRadius: '3px', overflow: 'hidden' }}>
-                    <div style={{
-                      height: '100%',
-                      width: `${(r.count / maxRequesterCount) * 100}%`,
-                      backgroundColor: 'var(--osu-pink)',
-                      borderRadius: '3px',
-                      transition: 'width 0.3s'
-                    }} />
+                </section>
+
+                <section className="panel">
+                  <header className="panel-header">
+                    <h2 className="panel-title">Recently added</h2>
+                    <button type="button" className="btn-link" style={{ fontSize: 'var(--text-sm)' }} onClick={() => onShowRequests(categoryKey, {})}>
+                      All requests<ArrowRight size={13} />
+                    </button>
+                  </header>
+                  <div className="panel-body request-list">
+                    {recentlyAdded.length === 0
+                      ? <p className="muted">No requests in this category yet.</p>
+                      : recentlyAdded.map(request => (
+                        <RequestListItem
+                          key={request.id}
+                          request={request}
+                          onOpen={onOpenRequest}
+                          aside={<><span className="muted">{formatRelativeTime(request.added_date)}</span><StatusPill status={request.request_status} /></>}
+                        />
+                      ))}
                   </div>
-                </div>
+                </section>
               </div>
-            ))}
-          </div>
+
+              <div className="overview-column">
+                <section className="panel">
+                  <header className="panel-header">
+                    <div>
+                      <h2 className="panel-title">Last 12 months</h2>
+                      <p className="panel-subtitle">Requests added and completed each month.</p>
+                    </div>
+                  </header>
+                  <div className="panel-body">
+                    {stats?.monthlyActivity ? <ActivityChart months={stats.monthlyActivity} /> : <div className="skeleton" style={{ height: 150 }} />}
+                  </div>
+                </section>
+
+                <section className="panel">
+                  <header className="panel-header">
+                    <div>
+                      <h2 className="panel-title">Top requesters</h2>
+                      <p className="panel-subtitle">Who sends you the most work. Your own maps aren’t counted.</p>
+                    </div>
+                  </header>
+                  <div className="panel-body">
+                    {requesters.length === 0 ? <p className="muted">No requesters yet.</p> : requesters.slice(0, 8).map(requester => (
+                      <div key={requester.username} className="requester-row">
+                        <Avatar src={requester.avatar_url} name={requester.username} />
+                        <div style={{ minWidth: 0 }}>
+                          <div className="truncate" style={{ fontWeight: 600, fontSize: 'var(--text-md)' }}>
+                            {requester.country_code && <span className="country-flag" title={requester.country_code.toUpperCase()} style={{ marginRight: 6 }}>{countryCodeToFlag(requester.country_code)}</span>}
+                            {requester.username}
+                          </div>
+                          <div className="requester-bar"><span style={{ width: `${(requester.count / maxRequesterCount) * 100}%` }} /></div>
+                        </div>
+                        <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{requester.count}</strong>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="panel">
+                  <header className="panel-header">
+                    <div>
+                      <h2 className="panel-title">By year</h2>
+                      <p className="panel-subtitle">Completed requests, by the map’s ranked or last-updated year.</p>
+                    </div>
+                  </header>
+                  <div className="panel-body">
+                    {(stats?.yearSummary || []).length === 0 ? <p className="muted">Completed requests will appear here.</p> : (
+                      <table className="simple-table">
+                        <thead>
+                          <tr><th>Year</th><th className="numeric">Completed</th><th className="numeric">Drain time</th><th>Top requester</th></tr>
+                        </thead>
+                        <tbody>
+                          {stats.yearSummary.map(year => (
+                            <tr key={year.year}>
+                              <td style={{ fontWeight: 650 }}>{year.year}</td>
+                              <td className="numeric">{year.completedCount}</td>
+                              <td className="numeric">{year.totalDrainTime}</td>
+                              <td className="truncate" style={{ maxWidth: 160 }}>{year.mostRequestedUser === 'None' ? '—' : year.mostRequestedUser}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </section>
+              </div>
+            </div>
+          </>
         )}
       </div>
     </div>

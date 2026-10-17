@@ -25,3 +25,12 @@ test('recent dashboard requests are scoped before sorting and limiting', () => {
   assert.deepEqual(getRecentDashboardRequests(requests, '2').map(request => request.id), [3, 1]);
   assert.deepEqual(getRecentDashboardRequests(requests, '999'), []);
 });
+
+test('recent dashboard requests list dated requests before undated imports', () => {
+  const mixed = [
+    { id: 1, added_date: null, categories: [] },
+    { id: 2, added_date: '2026-07-01', categories: [] },
+    { id: 3, added_date: '2026-07-21 10:00:00', categories: [] },
+  ];
+  assert.deepEqual(getRecentDashboardRequests(mixed, 'all').map(request => request.id), [3, 2, 1]);
+});

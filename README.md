@@ -12,31 +12,27 @@ osu!ReqTrac is a local-first request tracker for osu! beatmap work such as hitso
 
 ## Features
 
-- **Request management** — Create, edit, organize, and delete requests with statuses, priorities, deadlines, notes, and history logs.
-- **Request statuses** — Accepted, Considering, Working, Completed, and Cancelled.
-- **Categories and tags** — Track Hitsounds, Guest Difficulties, Storyboards, custom categories, and searchable tags.
-- **Individual requests** — Add an osu! beatmap link or create a manual/non-osu entry with artist, title, creator, requester, and an optional reference link.
-- **Bulk requests** — Use **Add Multiple Requests** on the Requests page to import one osu! beatmap link per line and assign categories to all imported requests.
-- **Migration support** — Use **Import Requests from Spreadsheet** on the Settings page to import your existing spreadsheet with guided header mapping.
-- **osu! integration** — Connect an osu! account through OAuth to sync beatmap metadata, covers, difficulties, ranked status, and user information.
-- **Beatmap caching** — Cache artist, title, creator, cover art, dates, and difficulties locally for faster access and offline viewing.
-- **Dashboard and statistics** — View request totals, status distribution, workload, and other summary information.
-- **Bulk operations** — Update statuses, priorities, categories, or delete multiple requests at once.
-- **Google Sheets export** — Publish a sanitized, read-only table containing osu!-linked requests.
-- **Local-first data** — Request data is stored in the application data directory and persists across updates.
-- **Automatic updates** — Packaged desktop builds can receive updates through GitHub Releases.
-- **Cross-platform builds** — Windows, macOS, and Linux AppImage distributions are supported.
+- **Overview that tells you what to do next** — Overdue and due-this-week requests, high-priority work you haven't started, requests waiting for your decision, and maps whose details failed to sync, each one click away from a filtered list.
+- **Add a request by pasting a link** — ReqTrac previews the beatmap (cover, mapper, difficulties) as you paste, remembers the categories you used last, pre-selects the difficulties you own for guest difficulty requests, and catches maps you already track.
+- **Requests for anything** — Hitsounds, guest difficulties, storyboards, and your own categories. Requests without an osu! link (unuploaded maps, Drive or Discord links) work too, and can be linked to osu! later.
+- **Fast request table** — osu!-style search (`creator="..." stars>=5.5 mode=mania keys=7 added>=2026-01-01`), status, priority, deadline, and tag filters, sortable and reorderable columns, compact rows, keyboard navigation, shift-click range selection, and CSV export. Filters and layout are remembered per category.
+- **Bulk changes** — Set status or priority, add or move categories, tag, set added dates from osu!, export, or delete many requests at once. Deletes can be undone for a few seconds.
+- **Imports** — Paste a list of beatmap links, or import a CSV, Excel, or public Google Sheets spreadsheet with guided column matching.
+- **osu! metadata** — Titles, mappers (including renamed users), difficulties, star ratings, ranked status, dates, and covers are cached locally for fast, offline viewing.
+- **Respectful of osu!'s rate limits** — API calls are paced at osu!'s recommended rate; anything you click goes ahead of background syncing, and bulk refreshes look up 50 maps per call.
+- **Google Sheets publishing** — Publish a read-only copy of your osu!-linked requests to your own Google Drive.
+- **Local-first data** — Everything lives on your computer and survives updates. Back up and restore with one file.
+- **Desktop niceties** — Remembers window size and position, keyboard shortcuts (press <kbd>?</kbd>), zoom, drag a beatmap link onto the window to add it, and an offer to add osu! links you copy.
+- **Automatic updates** and **Windows, macOS, and Linux** builds.
 
 ## Typical Workflow
 
-1. Open the **Requests** page.
-2. Select **Add Request** for one request or **Add Multiple Requests** for several osu! links.
-3. Select one or more request categories.
-4. Review or edit the request details.
-5. Open a request to update its status, dates, notes, tags, and category progress.
-6. Use **Refresh Added Dates** in Settings when dates need to be refreshed from osu! metadata.
+1. Copy a beatmap link from osu!, Discord, or the forum. ReqTrac offers to add it when you switch back (or press <kbd>Ctrl</kbd>+<kbd>N</kbd> and paste).
+2. Pick what was requested — hitsounds, a guest difficulty, a storyboard — and optionally a deadline.
+3. Work from the **Overview**: it lists what's overdue, due soon, and waiting on you.
+4. Change status and priority straight from the request table, or open a request to edit everything else.
 
-Manual and non-osu! requests remain local. Their reference links can be opened from the request modal, but they are excluded from public Google Sheets exports.
+Manual and non-osu! requests stay local. Their reference links can be opened from the request, but they are excluded from public Google Sheets exports.
 
 ## Screenshots
 
@@ -50,8 +46,7 @@ Manual and non-osu! requests remain local. Their reference links can be opened f
 
 1. Download the package for your operating system from the [Releases page](https://github.com/SEApodEErman/osu-ReqTrac/releases).
 2. Install and open osu!ReqTrac.
-3. Complete the first-launch setup if prompted.
-4. Configure osu! OAuth in **Settings** if you want automatic metadata and user syncing.
+3. Follow the first-run setup: connect the osu! API (see below) and tell ReqTrac your osu! username. Both steps can be skipped and done later in **Settings**.
 
 Node.js is not required to run a packaged release.
 
@@ -87,17 +82,19 @@ npm run build:dir            # Build an unpacked application directory
 npm test --prefix backend    # Run backend tests
 ```
 
-## osu! OAuth Setup
+## osu! API Setup
 
-OAuth is optional, but recommended for automatic beatmap metadata and user syncing.
+ReqTrac reads public beatmap and profile data from osu! with your own OAuth application. It never signs in as you.
 
-1. Visit <https://osu.ppy.sh/home/account/edit> and open the **OAuth** section.
-2. Create a new application.
-3. Configure the redirect URI required by the current application setup.
-4. Enter the client ID and client secret in **Settings**.
-5. Save the configuration and connect the account when prompted.
+1. Open your [osu! account settings](https://osu.ppy.sh/home/account/edit#oauth) and scroll to **OAuth**.
+2. Click **New OAuth Application** and give it any name, for example "ReqTrac".
+3. The callback URL is not used. Leave it empty, or enter `http://localhost` if osu! asks for one.
+4. Paste the **Client ID** and **Client Secret** into the first-run setup or **Settings** → **osu! connection**. ReqTrac checks them with osu! before saving.
+5. Optionally enter your osu! username so ReqTrac can recognise your own guest difficulties and leave you out of your requester rankings.
 
-The application uses osu! as an external service. API availability, rate limits, returned data, and account access are controlled by osu! and its API policies.
+Without the osu! API you can still track requests by hand.
+
+The application uses osu! as an external service. API availability, rate limits, returned data, and account access are controlled by osu! and its API policies. ReqTrac paces its calls at osu!'s recommended rate of about one per second.
 
 ## Google Sheets Export
 
@@ -111,7 +108,7 @@ To configure Google Sheets for a development build:
 4. Copy `backend/google-oauth.json.example` to `backend/google-oauth.json`.
 5. Add the client ID to the configuration file.
 6. Build and start osu!ReqTrac.
-7. Open **Settings** → **Public Google Sheet** and connect Google Drive.
+7. Open **Settings** → **Google Sheets** and connect Google Drive.
 
 The export includes osu!-linked request metadata, categories, tags, statuses, dates, difficulties, and osu! links. It excludes manual/non-osu entries, Discord links, OAuth credentials, settings, and database internals.
 
@@ -132,7 +129,9 @@ The directory contains:
 - `database.sqlite` — Requests, categories, tags, history, settings, and cached metadata.
 - `covers/` — Cached beatmap cover images.
 
-Use **Settings** → **Database Backup & Restore** to export or restore a `backup.json` file. Back up the database before reinstalling, changing versions, or restoring data.
+The parent directory also holds `window-state.json` (window size and position). Interface preferences such as theme, columns, and filters are stored in the database, so they are included in backups.
+
+Use **Settings** → **Data and backups** to export or restore a `backup.json` file. Back up the database before reinstalling, changing versions, or restoring data.
 
 ## Privacy and Security
 

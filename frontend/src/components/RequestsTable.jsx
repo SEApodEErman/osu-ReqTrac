@@ -1,924 +1,812 @@
-import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { 
-  ArrowUpDown, 
-  Search, 
-  Trash2, 
-  Edit3, 
-  ChevronRight, 
+import React, { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   Calendar,
-  X,
+  Columns3,
+  Download,
   ExternalLink,
-  MessageSquare,
-  Tag,
+  FileSpreadsheet,
+  HelpCircle,
+  ListPlus,
+  Plus,
   RefreshCw,
-  AlertCircle
+  Search,
+  Tag,
+  Trash2,
+  X,
 } from 'lucide-react';
 import TagInput from './TagInput';
+import CoverImage from './ui/CoverImage';
+import { DifficultyStrip, PrioritySelect, StarBadge, StatusSelect } from './ui/Badges';
+import { usePopover } from './ui/usePopover';
 import { requestMatchesSearch } from '../utils/requestSearch';
+import { requestMatchesQuickFilters } from '../utils/attention';
+import { compareAppDates, describeDeadline, formatDate } from '../utils/dates';
+import { requestsToCsv, downloadTextFile } from '../utils/csv';
+import { beatmapsetUrl, openExternal } from '../utils/osuLinks';
+import {
+  ACTIVE_REQUEST_STATUSES,
+  BEATMAP_STATUS_SORT_ORDER,
+  PRIORITIES,
+  PRIORITY_SORT_ORDER,
+  REQUEST_STATUSES,
+  REQUEST_STATUS_SORT_ORDER,
+  beatmapStatusClass,
+  beatmapStatusLabel,
+  isMetadataPending,
+  requestDisplayTitle,
+} from '../utils/requestConstants';
 import { REQUEST_COLUMNS, defaultVisibleColumns, moveColumn, normalizeColumnOrder, requestColumnClassName } from '../utils/requestColumns';
 
-// osu! official star difficulty spectrum from osu.Game.Rulesets.Osu.Difficulty.OsuColour
-// https://github.com/ppy/osu/blob/master/osu.Game.Rulesets.Osu/Difficulty/OsuColour.cs
-const STAR_DIFFICULTY_SPECTRUM = [
-  { stars: 0.0, color: '#aaaaaa' },
-  { stars: 0.1, color: '#aaaaaa' },
-  { stars: 0.1, color: '#4290fb' },
-  { stars: 1.25, color: '#4fc0ff' },
-  { stars: 2.0, color: '#4fffd5' },
-  { stars: 2.5, color: '#7cff4f' },
-  { stars: 3.3, color: '#f6f05c' },
-  { stars: 4.2, color: '#ff8068' },
-  { stars: 4.9, color: '#ff4e6f' },
-  { stars: 5.8, color: '#c645b8' },
-  { stars: 6.7, color: '#6563de' },
-  { stars: 7.7, color: '#18158e' },
-  { stars: 9.0, color: '#000000' },
-  { stars: 10.0, color: '#000000' },
-];
+const ROW_HEIGHT = { comfortable: 64, compact: 46 };
+const OVERSCAN = 8;
+const DEFAULT_VIEW = { search: '', status: '', priority: '', tag: '', due: '', sync: '', sortBy: 'added_date', sortOrder: 'desc' };
+const DESCENDING_FIRST = new Set(['added_date']);
 
-function getStarDifficultyColor(stars) {
-  if (stars <= 0) return '#aaaaaa';
-  if (stars >= 10) return '#000000';
-  
-  // Find the two spectrum points to interpolate between
-  for (let i = 0; i < STAR_DIFFICULTY_SPECTRUM.length - 1; i++) {
-    const current = STAR_DIFFICULTY_SPECTRUM[i];
-    const next = STAR_DIFFICULTY_SPECTRUM[i + 1];
-    
-    if (stars >= current.stars && stars <= next.stars) {
-      // Linear interpolation between the two colors
-      const ratio = (stars - current.stars) / (next.stars - current.stars);
-      return interpolateColor(current.color, next.color, ratio);
-    }
-  }
-  
-  // Fallback
-  return '#aaaaaa';
-}
+const SORT_FIELDS = {
+  song: 'title',
+  requester: 'requester_username',
+  beatmap_status: 'ranked_status',
+  request_status: 'request_status',
+  priority: 'priority',
+  deadline: 'deadline',
+  added: 'added_date',
+};
 
-// osu! text colour logic from StarRatingDisplay.cs
-// < 6.5★: Black, 6.5–9.0★: Orange, 9.0★+: gradient spectrum
-const STAR_TEXT_CUTOFF = 6.5;
-const STAR_TEXT_GRADIENT_CUTOFF = 9.0;
-const STAR_TEXT_SPECTRUM = [
-  { stars: 9.0, color: '#f6f05c' },
-  { stars: 9.9, color: '#ff8068' },
-  { stars: 10.6, color: '#ff4e6f' },
-  { stars: 11.5, color: '#c645b8' },
-  { stars: 12.4, color: '#6563de' },
-];
+const STATUS_FILTER_LABELS = { active: 'Active', 'not-working': 'Not started' };
+const DUE_FILTER_LABELS = { overdue: 'Overdue or due today', week: 'Due in 7 days', 'any-deadline': 'Has a deadline' };
 
-const BEATMAP_STATUS_ORDER = ['Manual', 'WIP', 'Pending', 'Qualified', 'Loved', 'Ranked'];
-const REQUEST_STATUS_ORDER = ['Working', 'Accepted', 'Considering', 'Completed', 'Cancelled'];
-const PRIORITY_ORDER = ['High', 'Medium', 'Low'];
-const RANKED_SORT_FIELDS = new Set(['ranked_status', 'request_status', 'priority']);
-const VIRTUAL_ROW_HEIGHT = 72;
-const VIRTUAL_OVERSCAN = 8;
-
-function getOrderedValue(value, order) {
-  const normalizedValue = (value || '').toString().toLowerCase();
-  const index = order.findIndex(item => item.toLowerCase() === normalizedValue);
+function orderedIndex(value, order) {
+  const index = order.indexOf(value);
   return index === -1 ? order.length : index;
 }
 
-function getStarDifficultyTextColor(stars) {
-  if (stars < STAR_TEXT_CUTOFF) return 'rgba(0,0,0,0.75)';
-  if (stars < STAR_TEXT_GRADIENT_CUTOFF) return '#f6f05c';
-
-  for (let i = 0; i < STAR_TEXT_SPECTRUM.length - 1; i++) {
-    const current = STAR_TEXT_SPECTRUM[i];
-    const next = STAR_TEXT_SPECTRUM[i + 1];
-    if (stars >= current.stars && stars <= next.stars) {
-      const ratio = (stars - current.stars) / (next.stars - current.stars);
-      return interpolateColor(current.color, next.color, ratio);
-    }
-  }
-
-  return '#6563de';
-}
-
-function interpolateColor(color1, color2, ratio) {
-  // Parse hex colors to RGB
-  const hex1 = color1.replace('#', '');
-  const hex2 = color2.replace('#', '');
-  
-  const r1 = parseInt(hex1.substring(0, 2), 16);
-  const g1 = parseInt(hex1.substring(2, 4), 16);
-  const b1 = parseInt(hex1.substring(4, 6), 16);
-  
-  const r2 = parseInt(hex2.substring(0, 2), 16);
-  const g2 = parseInt(hex2.substring(2, 4), 16);
-  const b2 = parseInt(hex2.substring(4, 6), 16);
-  
-  // Interpolate
-  const r = Math.round(r1 + (r2 - r1) * ratio);
-  const g = Math.round(g1 + (g2 - g1) * ratio);
-  const b = Math.round(b1 + (b2 - b1) * ratio);
-  
-  // Convert back to hex
-  const toHex = (c) => c.toString(16).padStart(2, '0');
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-}
-
-function StarRatingBadge({ stars }) {
-  if (!(stars > 0)) return null;
-
-  const color = getStarDifficultyColor(stars);
-  const textColor = getStarDifficultyTextColor(stars);
-  const [r, g, b] = [
-    parseInt(color.slice(1, 3), 16),
-    parseInt(color.slice(3, 5), 16),
-    parseInt(color.slice(5, 7), 16),
-  ];
-
-  return (
-    <span
-      title="Highest star rating"
-      aria-label={`Highest star rating: ${stars.toFixed(2)}`}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        padding: '2px 7px',
-        borderRadius: '12px',
-        fontSize: '10px',
-        lineHeight: 1.2,
-        fontWeight: '700',
-        background: `rgba(${r}, ${g}, ${b}, 0.7)`,
-        color: textColor,
-        border: `1px solid rgba(${r}, ${g}, ${b}, 1.0)`,
-        whiteSpace: 'nowrap',
-        flexShrink: 0,
-      }}
-    >
-      {'\u2605'} {stars.toFixed(2)}
-    </span>
-  );
-}
-
-function GuestDifficultySummary({ stars, difficulties = [] }) {
-  return (
-    <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: '3px', flexShrink: 0 }}>
-      <StarRatingBadge stars={stars} />
-      {difficulties.length > 0 && <span aria-label={`${difficulties.length} guest difficulties`} style={{ display: 'inline-flex', gap: '2px', minHeight: '4px' }}>
-        {difficulties.slice(0, 8).map((difficulty, index) => {
-          const color = getStarDifficultyColor(Number(difficulty.stars) || 0);
-          return <span key={difficulty.id || difficulty.assignment_id || `${difficulty.mode}-${difficulty.name}-${index}`} title={`${difficulty.name || 'Unnamed difficulty'} (${difficulty.mode === 'fruits' ? 'catch' : difficulty.mode || 'osu'}) - ${Number(difficulty.stars || 0).toFixed(2)} stars${difficulty.pending ? ' (pending)' : ''}`} style={{ width: '8px', height: '4px', borderRadius: '3px', background: difficulty.pending ? 'transparent' : color, border: `1px solid ${color}` }} />;
-        })}
-        {difficulties.length > 8 && <span style={{ fontSize: '9px', lineHeight: '5px', color: 'var(--text-muted)' }}>+{difficulties.length - 8}</span>}
-      </span>}
-    </span>
-  );
-}
-
-function SortableHeader({ label, shortLabel = label, onSort, dragProps }) {
-  return (
-    <th onClick={onSort} className="sortable-header" title={label} aria-label={`Sort by ${label}`} style={{ cursor: 'pointer', ...dragProps?.style }} {...dragProps}>
-      <span className="sortable-header-content">
-        <span><span className="header-label-full">{label}</span><span className="header-label-short">{shortLabel}</span></span>
-        <ArrowUpDown size={12} />
-      </span>
-    </th>
-  );
-}
-
-export default function RequestsTable({ 
-  requestsList, 
-  onOpenRequest, 
-  onDeleteRequest, 
-  onUpdateRequest,
-  onForceRefreshBeatmap,
-  refreshingRequestId = null,
-  onBulkUpdateStatus,
-  isBulkStatusUpdating = false,
-  onBulkRefreshDates,
-  isBulkDateRefreshing = false,
-  onBulkUpdatePriority,
-  onBulkUpdateCategory,
-  onBulkAddTags,
-  onBulkDelete,
-  onRequestConfirmation = async () => false,
-  activeCategory,
-  activeCategoryDefinition,
-  categoryDefinitions = [],
-  tagSuggestions = [],
-  sortBy,
-  sortOrder,
-  onSortChange,
-}) {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-  const [priorityFilter, setPriorityFilter] = useState('');
-  const [tagFilter, setTagFilter] = useState('');
-  const [selectedIds, setSelectedIds] = useState([]);
-  const [bulkTags, setBulkTags] = useState([]);
-  const [isBulkTagsOpen, setIsBulkTagsOpen] = useState(false);
-  const [isWindowMaximized, setIsWindowMaximized] = useState(false);
-  const columnStorageKey = `request-columns:${activeCategoryDefinition?.id || 'all'}`;
-  const columnOrderStorageKey = `${columnStorageKey}:order`;
-  const [visibleColumns, setVisibleColumns] = useState(() => defaultVisibleColumns(activeCategoryDefinition));
-  const [columnOrder, setColumnOrder] = useState(() => normalizeColumnOrder());
-  const [draggedColumn, setDraggedColumn] = useState(null);
-  const tableContainerRef = useRef(null);
-  const scrollFrameRef = useRef(null);
-  const [virtualViewport, setVirtualViewport] = useState({ scrollTop: 0, height: 600 });
-
-  useEffect(() => {
-    const controls = window.electronAPI?.windowControls;
-    let isActive = true;
-
-    void controls?.isMaximized?.().then(isMaximized => {
-      if (isActive) setIsWindowMaximized(Boolean(isMaximized));
-    });
-    const removeMaximizedListener = controls?.onMaximizedChange?.(isMaximized => {
-      setIsWindowMaximized(Boolean(isMaximized));
-    });
-
-    return () => {
-      isActive = false;
-      removeMaximizedListener?.();
-    };
-  }, []);
-  
-  const toggleSort = (field) => {
-    if (sortBy === field) {
-      onSortChange(field, sortOrder === 'asc' ? 'desc' : 'asc');
-    } else {
-      onSortChange(field, RANKED_SORT_FIELDS.has(field) ? 'asc' : 'desc');
-    }
-  };
-
-  // Compile list of unique tags for the tag filter dropdown
-  const allAvailableTags = useMemo(() => {
-    const tags = new Set();
-    requestsList.forEach(r => {
-      if (r.tags) r.tags.forEach(t => tags.add(t));
-    });
-    return Array.from(tags).sort();
-  }, [requestsList]);
-
-  // Calculate deadline colors dynamically
-  const getDeadlineInfo = (deadlineStr, requestStatus) => {
-    if (!deadlineStr) return null;
-    const deadline = new Date(deadlineStr);
-    const today = new Date();
-    today.setHours(0,0,0,0);
-    deadline.setHours(0,0,0,0);
-
-    const diffTime = deadline - today;
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-    let color = 'var(--req-completed)'; // Green (> 30 days)
-    let text = `${diffDays} days left`;
-
-    if (requestStatus === 'Completed' && diffDays < 0) {
-      color = 'var(--req-completed)';
-      text = `${Math.abs(diffDays)}d ago`;
-    } else if (requestStatus === 'Completed' && diffDays === 0) {
-      color = 'var(--req-completed)';
-      text = 'Completed today';
-    } else if (diffDays <= 0) {
-      color = 'var(--req-cancelled)'; // Red
-      text = diffDays === 0 ? 'Today' : `${Math.abs(diffDays)}d overdue`;
-    } else if (diffDays <= 3) {
-      color = 'var(--priority-high)'; // Orange/Red
-    } else if (diffDays <= 7) {
-      color = 'var(--priority-medium)'; // Yellow/Orange
-    } else if (diffDays <= 30) {
-      color = '#cca000'; // Yellow
-    }
-
-    return { color, text };
-  };
-
-  // Filter requests
-  const filteredRequests = useMemo(() => {
-    let result = [...requestsList];
-
-    // Search filter
-    if (searchTerm.trim()) {
-      result = result.filter(r => requestMatchesSearch(r, searchTerm));
-    }
-
-    // Category filter (Left Sidebar navigation)
-    if (activeCategory && activeCategory !== 'All') {
-      result = result.filter(r => r.categories.some(c => c.category_name === activeCategory));
-    }
-
-    // Status filter
-    if (statusFilter) {
-      result = result.filter(r => r.request_status === statusFilter);
-    }
-
-    // Priority filter
-    if (priorityFilter) {
-      result = result.filter(r => r.priority === priorityFilter);
-    }
-
-    // Tag filter
-    if (tagFilter) {
-      result = result.filter(r => r.tags && r.tags.includes(tagFilter));
-    }
-
-    // Apply sorting
-    result.sort((a, b) => {
-      let valA = a[sortBy];
-      let valB = b[sortBy];
-
-      // Handle custom ordering fields
-      if (sortBy === 'ranked_status') {
-        valA = getOrderedValue(a.ranked_status || 'Manual', BEATMAP_STATUS_ORDER);
-        valB = getOrderedValue(b.ranked_status || 'Manual', BEATMAP_STATUS_ORDER);
-      } else if (sortBy === 'request_status') {
-        valA = getOrderedValue(a.request_status, REQUEST_STATUS_ORDER);
-        valB = getOrderedValue(b.request_status, REQUEST_STATUS_ORDER);
-      } else if (sortBy === 'priority') {
-        valA = getOrderedValue(a.priority, PRIORITY_ORDER);
-        valB = getOrderedValue(b.priority, PRIORITY_ORDER);
-      } else if (sortBy === 'added_date' || sortBy === 'deadline' || sortBy === 'last_updated') {
-        valA = valA ? new Date(valA) : (sortOrder === 'asc' ? new Date(9999, 11) : new Date(0));
-        valB = valB ? new Date(valB) : (sortOrder === 'asc' ? new Date(9999, 11) : new Date(0));
-      } else {
-        valA = (valA || '').toString().toLowerCase();
-        valB = (valB || '').toString().toLowerCase();
-      }
-
-      if (valA < valB) return sortOrder === 'asc' ? -1 : 1;
-      if (valA > valB) return sortOrder === 'asc' ? 1 : -1;
+function compareRequests(a, b, sortBy) {
+  switch (sortBy) {
+    case 'ranked_status':
+      return orderedIndex(beatmapStatusLabel(a), BEATMAP_STATUS_SORT_ORDER) - orderedIndex(beatmapStatusLabel(b), BEATMAP_STATUS_SORT_ORDER);
+    case 'request_status':
+      return orderedIndex(a.request_status, REQUEST_STATUS_SORT_ORDER) - orderedIndex(b.request_status, REQUEST_STATUS_SORT_ORDER);
+    case 'priority':
+      return orderedIndex(a.priority || 'Low', PRIORITY_SORT_ORDER) - orderedIndex(b.priority || 'Low', PRIORITY_SORT_ORDER);
+    case 'deadline':
+    case 'added_date':
       return 0;
-    });
+    default:
+      return String(a[sortBy] || '').localeCompare(String(b[sortBy] || ''), undefined, { sensitivity: 'base', numeric: true });
+  }
+}
 
-    return result;
-  }, [requestsList, searchTerm, activeCategory, statusFilter, priorityFilter, tagFilter, sortBy, sortOrder]);
-
-  useEffect(() => {
-    const container = tableContainerRef.current;
-    if (!container) return undefined;
-
-    const updateHeight = () => {
-      setVirtualViewport(current => ({ ...current, height: container.clientHeight || 600 }));
-    };
-    updateHeight();
-
-    const observer = new ResizeObserver(updateHeight);
-    observer.observe(container);
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const container = tableContainerRef.current;
-    if (container) container.scrollTop = 0;
-    setVirtualViewport(current => ({ ...current, scrollTop: 0 }));
-  }, [searchTerm, activeCategory, statusFilter, priorityFilter, tagFilter, sortBy, sortOrder]);
-
-  useEffect(() => () => {
-    if (scrollFrameRef.current) cancelAnimationFrame(scrollFrameRef.current);
-  }, []);
-
-  const handleVirtualScroll = useCallback((event) => {
-    const container = event.currentTarget;
-    if (scrollFrameRef.current) return;
-    scrollFrameRef.current = requestAnimationFrame(() => {
-      scrollFrameRef.current = null;
-      setVirtualViewport({
-        scrollTop: container.scrollTop,
-        height: container.clientHeight || 600,
-      });
-    });
-  }, []);
-
-  const virtualWindow = useMemo(() => {
-    const visibleCount = Math.ceil(virtualViewport.height / VIRTUAL_ROW_HEIGHT);
-    const start = Math.max(0, Math.floor(virtualViewport.scrollTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_OVERSCAN);
-    const end = Math.min(filteredRequests.length, start + visibleCount + (VIRTUAL_OVERSCAN * 2));
-    return {
-      rows: filteredRequests.slice(start, end),
-      start,
-      topSpacerHeight: start * VIRTUAL_ROW_HEIGHT,
-      bottomSpacerHeight: Math.max(0, (filteredRequests.length - end) * VIRTUAL_ROW_HEIGHT),
-    };
-  }, [filteredRequests, virtualViewport]);
-
-  // Bulk select toggles
-  const handleSelectAll = (e) => {
-    if (e.target.checked) {
-      setSelectedIds(filteredRequests.map(r => r.id));
-    } else {
-      setSelectedIds([]);
+function sortRequests(requests, sortBy, sortOrder) {
+  const direction = sortOrder === 'asc' ? 1 : -1;
+  return [...requests].sort((a, b) => {
+    if (sortBy === 'deadline' || sortBy === 'added_date') {
+      // Missing dates always sort last, whichever direction is chosen.
+      const aMissing = !a[sortBy];
+      const bMissing = !b[sortBy];
+      if (aMissing !== bMissing) return aMissing ? 1 : -1;
+      return direction * compareAppDates(a[sortBy], b[sortBy]) || b.id - a.id;
     }
-  };
-
-  const handleSelectRow = (e, id) => {
-    e.stopPropagation();
-    if (e.target.checked) {
-      setSelectedIds(prev => [...prev, id]);
-    } else {
-      setSelectedIds(prev => prev.filter(rowId => rowId !== id));
-    }
-  };
-
-  const handleClearFilters = () => {
-    setSearchTerm('');
-    setStatusFilter('');
-    setPriorityFilter('');
-    setTagFilter('');
-  };
-
-  const handleBulkCategoryAction = (event, mode) => {
-    if (!event.target.value) return;
-    onBulkUpdateCategory(selectedIds, event.target.value, mode);
-    setSelectedIds([]);
-    event.target.value = '';
-  };
-
-  const dismissBulkToolbar = () => {
-    setSelectedIds([]);
-    setBulkTags([]);
-    setIsBulkTagsOpen(false);
-  };
-
-  useEffect(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem(columnStorageKey));
-      const storedOrder = JSON.parse(localStorage.getItem(columnOrderStorageKey));
-      setVisibleColumns(Array.isArray(stored) ? new Set(stored) : defaultVisibleColumns(activeCategoryDefinition));
-      setColumnOrder(normalizeColumnOrder(storedOrder));
-    } catch {
-      setVisibleColumns(defaultVisibleColumns(activeCategoryDefinition));
-      setColumnOrder(normalizeColumnOrder());
-    }
-  }, [columnOrderStorageKey, columnStorageKey, activeCategoryDefinition]);
-
-  const setColumnVisible = (key, visible) => {
-    setVisibleColumns(current => {
-      const next = new Set(current);
-      if (visible) next.add(key); else next.delete(key);
-      localStorage.setItem(columnStorageKey, JSON.stringify([...next]));
-      return next;
-    });
-  };
-
-  const reorderColumns = (sourceKey, targetKey) => {
-    setColumnOrder(current => {
-      const next = moveColumn(current, sourceKey, targetKey);
-      localStorage.setItem(columnOrderStorageKey, JSON.stringify(next));
-      return next;
-    });
-  };
-
-  const visibleDataColumns = columnOrder.filter(key => key === 'song' || visibleColumns.has(key));
-  const showTags = visibleDataColumns.includes('tags');
-  const showModes = visibleDataColumns.includes('modes');
-  const showCover = visibleDataColumns.includes('cover');
-  const showBeatmapStatus = visibleDataColumns.includes('beatmap_status');
-  const showRequestStatus = visibleDataColumns.includes('request_status');
-  const showPriority = visibleDataColumns.includes('priority');
-  const showDeadline = visibleDataColumns.includes('deadline');
-  const showNotes = visibleDataColumns.includes('notes');
-  const showAdded = visibleDataColumns.includes('added');
-  const showActions = visibleDataColumns.includes('actions');
-  const columnCount = 1 + visibleDataColumns.length;
-
-  const renderColumnDefinition = (key) => <col key={key} className={requestColumnClassName(key)} />;
-
-  const getColumnDragProps = (key) => ({
-    draggable: true,
-    onDragStart: (event) => {
-      setDraggedColumn(key);
-      event.dataTransfer.effectAllowed = 'move';
-      event.dataTransfer.setData('text/plain', key);
-    },
-    onDragOver: (event) => event.preventDefault(),
-    onDrop: (event) => {
-      event.preventDefault();
-      const sourceKey = draggedColumn || event.dataTransfer.getData('text/plain');
-      if (sourceKey) reorderColumns(sourceKey, key);
-      setDraggedColumn(null);
-    },
-    onDragEnd: () => setDraggedColumn(null),
-    style: { cursor: draggedColumn === key ? 'grabbing' : 'grab', opacity: draggedColumn === key ? 0.55 : 1 },
+    return direction * compareRequests(a, b, sortBy) || compareAppDates(b.added_date, a.added_date) || b.id - a.id;
   });
+}
 
-  const renderColumnHeader = (key) => {
-    switch (key) {
-      case 'cover': return <th key={key} {...getColumnDragProps(key)}>Cover</th>;
-      case 'song': return <SortableHeader key={key} label="Song / Artist" onSort={() => toggleSort('title')} dragProps={getColumnDragProps(key)} />;
-      case 'tags': return <th key={key} {...getColumnDragProps(key)}>Tags</th>;
-      case 'modes': return <th key={key} {...getColumnDragProps(key)}>Gamemode</th>;
-      case 'beatmap_status': return <SortableHeader key={key} label="Beatmap Status" shortLabel="B. Status" onSort={() => toggleSort('ranked_status')} dragProps={getColumnDragProps(key)} />;
-      case 'request_status': return <SortableHeader key={key} label="Request Status" shortLabel="Status" onSort={() => toggleSort('request_status')} dragProps={getColumnDragProps(key)} />;
-      case 'priority': return <SortableHeader key={key} label="Priority" shortLabel="Prio" onSort={() => toggleSort('priority')} dragProps={getColumnDragProps(key)} />;
-      case 'deadline': return <SortableHeader key={key} label="Deadline" shortLabel="Due" onSort={() => toggleSort('deadline')} dragProps={getColumnDragProps(key)} />;
-      case 'notes': return <th key={key} {...getColumnDragProps(key)}>Notes</th>;
-      case 'added': return <SortableHeader key={key} label="Added" onSort={() => toggleSort('added_date')} dragProps={getColumnDragProps(key)} />;
-      case 'actions': return <th key={key} {...getColumnDragProps(key)} style={{ textAlign: 'right', ...getColumnDragProps(key).style }}>Actions</th>;
-      default: return null;
-    }
-  };
+function DeadlineCell({ request }) {
+  const deadline = describeDeadline(request.deadline, request.request_status);
+  if (!deadline) return <span className="cell-muted">—</span>;
+  return (
+    <span className={`deadline-text deadline-${deadline.tone}`} title={formatDate(request.deadline)}>
+      <Calendar size={12} />{deadline.text}
+    </span>
+  );
+}
 
-  const renderRequestColumn = (req, key, { deadlineInfo, isMetadataPending, metadataFailed }) => {
+const RequestRow = memo(function RequestRow({
+  request,
+  index,
+  columns,
+  showGuestDifficulties,
+  isSelected,
+  isFocused,
+  isRefreshing,
+  onToggleSelect,
+  onOpen,
+  onUpdate,
+  onDelete,
+  onRefresh,
+}) {
+  const pending = isMetadataPending(request);
+  const renderCell = (key) => {
     switch (key) {
       case 'cover':
-        return <td key={key}><img className="request-cover" src={req.local_cover_path} alt="cover" width={56} height={32} loading="lazy" decoding="async" onError={(event) => { event.currentTarget.src = '/uploads/covers/default.jpg'; }} /></td>;
+        return <td key={key}><CoverImage src={request.local_cover_path} /></td>;
       case 'song':
-        return <td key={key} className="request-song-cell">
-          <div className="request-song-content">
-            <div className="request-title-line">
-              <span className="request-title" title={req.title}>{req.title || (isMetadataPending ? 'Syncing metadata...' : `Beatmapset ${req.beatmapset_id}`)}</span>
-              {req.priority === 'High' && <span className="request-priority-dot" title="High Priority" aria-label="High Priority" />}
-              {showModes ? <GuestDifficultySummary stars={req.my_guest_highest_stars} difficulties={req.my_guest_difficulties} /> : <StarRatingBadge stars={req.highest_stars} />}
+        return (
+          <td key={key}>
+            <div className="song-cell">
+              <div className="song-title-line">
+                <span className="song-title" title={request.title || undefined}>{requestDisplayTitle(request)}</span>
+                {showGuestDifficulties ? <StarBadge stars={request.my_guest_highest_stars} /> : <StarBadge stars={request.highest_stars} title="Hardest difficulty" />}
+              </div>
+              <div className="song-meta">
+                {pending && !request.artist
+                  ? <span>Fetching details from osu!…</span>
+                  : <><span className="song-artist">{request.artist || 'Unknown artist'}</span>{request.creator && <span className="song-mapper">{request.creator}</span>}</>}
+              </div>
             </div>
-            <div className="request-song-subtitle">
-              {isMetadataPending && !req.artist ? 'Background sync in progress' : <><span className="request-artist" title={req.artist || 'Unknown artist'}>{req.artist || 'Unknown artist'}</span><span className="request-creator" title={req.creator || 'Unknown creator'}>{req.creator || 'Unknown creator'}</span></>}
-            </div>
-          </div>
-        </td>;
+          </td>
+        );
+      case 'requester':
+        return <td key={key} className="truncate" title={request.requester_username}>{request.requester_username || <span className="cell-muted">—</span>}</td>;
       case 'tags':
-        return <td key={key}>{req.tags?.length ? <div className="request-tags">{req.tags.slice(0, 2).map(tag => <span key={tag} className="tag-badge" title={tag}><Tag size={9} />{tag}</span>)}{req.tags.length > 2 && <span className="request-tags-more">+{req.tags.length - 2}</span>}</div> : <span className="request-empty">—</span>}</td>;
+        return (
+          <td key={key}>
+            {request.tags?.length
+              ? <div className="cell-tags">{request.tags.slice(0, 2).map(tag => <span key={tag} className="tag-chip" title={tag}><Tag size={9} />{tag}</span>)}{request.tags.length > 2 && <span className="cell-muted">+{request.tags.length - 2}</span>}</div>
+              : <span className="cell-muted">—</span>}
+          </td>
+        );
       case 'modes':
-        return <td key={key}><div className="request-modes">{(req.gamemodes || []).length > 0 ? req.gamemodes.map(mode => <span key={mode} className="badge badge-pending">{mode === 'fruits' ? 'catch' : mode}</span>) : <span className="request-empty">—</span>}</div></td>;
+        return <td key={key}>{request.my_guest_difficulties?.length ? <DifficultyStrip difficulties={request.my_guest_difficulties} /> : <span className="cell-muted">—</span>}</td>;
       case 'beatmap_status':
-        return <td key={key}><span title={metadataFailed ? req.metadata_sync_error : undefined} className={`badge request-beatmap-badge badge-${metadataFailed ? 'cancelled' : isMetadataPending ? 'pending' : (req.ranked_status || 'Manual').toLowerCase()}`}>{isMetadataPending && <RefreshCw size={10} className="spin" style={{ marginRight: '4px' }} />}{metadataFailed && <AlertCircle size={10} style={{ marginRight: '4px' }} />}{metadataFailed ? 'Sync failed' : isMetadataPending ? 'Syncing' : (req.ranked_status || 'Manual')}</span></td>;
+        return (
+          <td key={key}>
+            <span className={`pill ${beatmapStatusClass(request)}`} title={request.metadata_sync_status === 'Failed' ? request.metadata_sync_error || 'Sync failed' : undefined}>
+              {pending && <RefreshCw size={10} className="spin" />}
+              {beatmapStatusLabel(request)}
+            </span>
+          </td>
+        );
       case 'request_status':
-        return <td key={key} onClick={(event) => event.stopPropagation()}><div className={`status-badge-select request-table-select badge badge-${req.request_status.toLowerCase()}`}><select value={req.request_status} onChange={(event) => onUpdateRequest(req.id, { request_status: event.target.value })} className={`status-badge-inner badge badge-${req.request_status.toLowerCase()}`} aria-label="Request status"><option className="status-option-accepted" value="Accepted">Accepted</option><option className="status-option-considering" value="Considering">Considering</option><option className="status-option-working" value="Working">Working</option><option className="status-option-completed" value="Completed">Completed</option><option className="status-option-cancelled" value="Cancelled">Cancelled</option></select><div className="request-select-chevron"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg></div></div></td>;
+        return <td key={key}><StatusSelect value={request.request_status} onChange={status => onUpdate(request.id, { request_status: status })} /></td>;
       case 'priority':
-        return <td key={key} onClick={(event) => event.stopPropagation()}><div className={`status-badge-select request-table-select badge badge-priority-${(req.priority || 'Low').toLowerCase()}`}><select value={req.priority || 'Low'} onChange={(event) => onUpdateRequest(req.id, { priority: event.target.value })} className={`status-badge-inner badge badge-priority-${(req.priority || 'Low').toLowerCase()}`} aria-label="Priority"><option className="priority-option-low" value="Low">Low</option><option className="priority-option-medium" value="Medium">Medium</option><option className="priority-option-high" value="High">High</option></select><div className="request-select-chevron"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg></div></div></td>;
+        return <td key={key}><PrioritySelect value={request.priority} onChange={priority => onUpdate(request.id, { priority })} /></td>;
       case 'deadline':
-        return <td key={key}>{deadlineInfo ? <span className="request-deadline" style={{ color: deadlineInfo.color }}><Calendar size={12} />{deadlineInfo.text}</span> : <span className="request-empty">—</span>}</td>;
+        return <td key={key}><DeadlineCell request={request} /></td>;
       case 'notes':
-        return <td key={key} className="request-notes-cell" title={req.notes || undefined} style={{ color: req.notes ? 'var(--text-main)' : 'var(--text-muted)' }}><span className="request-notes">{req.notes || '—'}</span></td>;
+        return <td key={key} title={request.notes || undefined}>{request.notes ? <span className="cell-notes">{request.notes}</span> : <span className="cell-muted">—</span>}</td>;
       case 'added':
-        return <td key={key} className="request-added-date">{req.added_date ? new Date(req.added_date).toLocaleDateString() : '—'}</td>;
+        return <td key={key} className="muted" style={{ fontSize: 'var(--text-sm)' }}>{formatDate(request.added_date)}</td>;
       case 'actions':
-        return <td key={key} onClick={(event) => event.stopPropagation()} style={{ textAlign: 'right' }}><div className="request-row-actions"><button onClick={() => onOpenRequest(req)} title="Open Details" style={{ padding: '6px', borderRadius: '4px', color: 'var(--text-muted)', cursor: 'pointer' }} onMouseEnter={(event) => { event.currentTarget.style.backgroundColor = 'var(--hover-bg)'; }} onMouseLeave={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; }}><Edit3 size={14} /></button>{req.is_osu_link && req.beatmapset_id && <button onClick={() => onForceRefreshBeatmap?.(req)} disabled={refreshingRequestId === req.id} title="Force Refresh API" style={{ padding: '6px', borderRadius: '4px', color: 'var(--text-muted)', cursor: 'pointer' }}><RefreshCw size={14} className={refreshingRequestId === req.id ? 'spin' : undefined} /></button>}<button onClick={async () => { const confirmed = await onRequestConfirmation({ title: 'Delete request?', message: 'This request and its associated categories will be permanently deleted.', confirmLabel: 'Delete request' }); if (confirmed) onDeleteRequest(req.id); }} title="Delete" style={{ padding: '6px', borderRadius: '4px', color: 'var(--text-muted)', cursor: 'pointer' }} onMouseEnter={(event) => { event.currentTarget.style.backgroundColor = 'rgba(231, 76, 60, 0.1)'; event.currentTarget.style.color = 'var(--priority-high)'; }} onMouseLeave={(event) => { event.currentTarget.style.backgroundColor = 'transparent'; event.currentTarget.style.color = 'var(--text-muted)'; }}><Trash2 size={14} /></button></div></td>;
+        return (
+          <td key={key} onClick={event => event.stopPropagation()}>
+            <div className="row-actions">
+              {request.beatmapset_id && (
+                <button type="button" className="btn btn-ghost btn-icon btn-sm" onClick={() => openExternal(beatmapsetUrl(request.beatmapset_id))} title="Open on osu!" aria-label="Open on osu!">
+                  <ExternalLink size={14} />
+                </button>
+              )}
+              {request.is_osu_link && request.beatmapset_id && (
+                <button type="button" className="btn btn-ghost btn-icon btn-sm" onClick={() => onRefresh(request)} disabled={isRefreshing} title="Refresh from osu!" aria-label="Refresh from osu!">
+                  <RefreshCw size={14} className={isRefreshing ? 'spin' : undefined} />
+                </button>
+              )}
+              <button type="button" className="btn btn-ghost btn-icon btn-sm is-danger" onClick={() => onDelete(request)} title="Delete (can be undone)" aria-label="Delete request">
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </td>
+        );
       default:
         return null;
     }
   };
 
   return (
-    <div style={{ padding: '0 24px 24px 24px', display: 'flex', flexDirection: 'column', gap: '16px', position: 'relative' }}>
-      
-      {/* Header and Row Count */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <h2 style={{ fontSize: '18px', fontWeight: '700', fontFamily: 'var(--font-display)' }}>
-            {activeCategory === 'All' ? 'All Requests' : activeCategory}
-          </h2>
-          <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
-            Showing {filteredRequests.length} of {requestsList.length} total requests
-          </p>
+    <tr
+      className={`${isSelected ? 'is-selected' : ''}${isFocused ? ' is-focused' : ''}`}
+      onClick={() => onOpen(request)}
+      aria-rowindex={index + 2}
+      aria-selected={isSelected}
+      data-request-id={request.id}
+    >
+      <td className="col-select" onClick={event => { event.stopPropagation(); onToggleSelect(request.id, index, event.shiftKey); }}>
+        <input type="checkbox" checked={isSelected} onChange={() => {}} aria-label={`Select ${requestDisplayTitle(request)}`} />
+      </td>
+      {columns.map(renderCell)}
+    </tr>
+  );
+});
+
+function SearchHelp() {
+  const popover = usePopover();
+  return (
+    <span ref={popover.containerRef} style={{ position: 'relative', display: 'inline-flex' }}>
+      <button type="button" className="btn btn-ghost btn-icon btn-sm" onClick={popover.toggle} aria-label="Search syntax help" title="Search syntax">
+        <HelpCircle size={15} />
+      </button>
+      {popover.isOpen && (
+        <div className="popover popover-end popover-below search-help" role="dialog" aria-label="Search syntax">
+          <h3>Search like osu!</h3>
+          <p className="muted" style={{ marginBottom: 10 }}>Type words to match titles, artists, mappers, requesters, notes, and tags. Combine with filters:</p>
+          <dl>
+            <dt><code>creator="Sotarks"</code></dt><dd>Mapper, including old usernames</dd>
+            <dt><code>requester=peppy</code></dt><dd>Who asked for it</dd>
+            <dt><code>stars&gt;=5.5</code></dt><dd>Any difficulty at least 5.5★</dd>
+            <dt><code>mode=mania keys=7</code></dt><dd>Game mode and key count</dd>
+            <dt><code>mapstatus=ranked</code></dt><dd>Beatmap status</dd>
+            <dt><code>added&gt;=2026-01-01</code></dt><dd>Added on or after a date</dd>
+            <dt><code>deadline&lt;2026-11-01</code></dt><dd>Deadline before a date</dd>
+            <dt><code>tag=collab</code></dt><dd>Has a tag</dd>
+            <dt><code>bpm&gt;200 length&lt;=90</code></dt><dd>BPM and drain time in seconds</dd>
+          </dl>
         </div>
-      </div>
+      )}
+    </span>
+  );
+}
 
-      {/* Filters Row */}
-      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
-        {/* Search */}
-        <div style={{ position: 'relative', minWidth: '220px', flexGrow: 1 }}>
-          <span style={{ position: 'absolute', left: '10px', top: '9px', color: 'var(--text-muted)' }}>
-            <Search size={14} />
-          </span>
-          <input
-            type="text"
-            className="input-text"
-            placeholder={'Search or filter: creator="Mahiru Shiina"'}
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            style={{ paddingLeft: '32px', fontSize: '13px' }}
-          />
-          <span title={'Examples: creator="Mahiru Shiina" tag=collab mapstatus=Ranked added>=2026-01-01 stars>=5 mode=mania keys=4'} style={{ position: 'absolute', right: searchTerm ? '34px' : '10px', top: '9px', color: 'var(--text-muted)', fontSize: '11px', cursor: 'help' }}>?</span>
-          {searchTerm && (
-            <button 
-              onClick={() => setSearchTerm('')} 
-              style={{ position: 'absolute', right: '10px', top: '9px', color: 'var(--text-muted)', cursor: 'pointer' }}
-            >
-              <X size={14} />
-            </button>
-          )}
-        </div>
-
-        {/* Request Status Filter */}
-        <select 
-          className="input-text" 
-          style={{ width: '140px', fontSize: '13px' }}
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-        >
-          <option value="">All Statuses</option>
-          <option value="Accepted">Accepted</option>
-          <option value="Considering">Considering</option>
-          <option value="Working">Working</option>
-          <option value="Completed">Completed</option>
-          <option value="Cancelled">Cancelled</option>
-        </select>
-
-        {/* Priority Filter */}
-        <select 
-          className="input-text" 
-          style={{ width: '130px', fontSize: '13px' }}
-          value={priorityFilter}
-          onChange={(e) => setPriorityFilter(e.target.value)}
-        >
-          <option value="">All Priorities</option>
-          <option value="Low">Low</option>
-          <option value="Medium">Medium</option>
-          <option value="High">High</option>
-        </select>
-
-        {/* Tag Filter */}
-        <select 
-          className="input-text" 
-          style={{ width: '130px', fontSize: '13px' }}
-          value={tagFilter}
-          onChange={(e) => setTagFilter(e.target.value)}
-        >
-          <option value="">All Tags</option>
-          {allAvailableTags.map(tag => (
-            <option key={tag} value={tag}>{tag}</option>
-          ))}
-        </select>
-
-        {/* Clear Filters Button */}
-        {(searchTerm || statusFilter || priorityFilter || tagFilter) && (
-          <button 
-            onClick={handleClearFilters}
-            className="btn-secondary"
-            style={{ padding: '6px 12px', fontSize: '12px' }}
-          >
-            Clear Filters
-          </button>
-        )}
-        <details style={{ position: 'relative' }}>
-          <summary className="btn-secondary" style={{ listStyle: 'none', padding: '6px 12px', fontSize: '12px', cursor: 'pointer' }}>Columns</summary>
-          <div style={{ position: 'absolute', right: 0, zIndex: 30, minWidth: '190px', marginTop: '5px', padding: '10px', display: 'grid', gap: '7px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '8px', boxShadow: 'var(--shadow-lg)' }}>
-            <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Drag table headers to reorder columns</span>
-            {columnOrder.map(key => {
+function ColumnsMenu({ order, visible, density, onToggle, onDensityChange, onReset }) {
+  const popover = usePopover();
+  return (
+    <span ref={popover.containerRef} style={{ position: 'relative', display: 'inline-flex' }}>
+      <button type="button" className="btn btn-secondary" onClick={popover.toggle} aria-expanded={popover.isOpen}>
+        <Columns3 size={15} />View
+      </button>
+      {popover.isOpen && (
+        <div className="popover popover-end popover-below" style={{ width: 240 }}>
+          <div className="menu">
+            <div className="menu-label">Row height</div>
+            <div style={{ padding: '2px 6px 6px' }}>
+              <div className="segmented">
+                <button type="button" aria-pressed={density === 'comfortable'} onClick={() => onDensityChange('comfortable')}>Comfortable</button>
+                <button type="button" aria-pressed={density === 'compact'} onClick={() => onDensityChange('compact')}>Compact</button>
+              </div>
+            </div>
+            <div className="menu-separator" />
+            <div className="menu-label">Columns · drag headers to reorder</div>
+            {order.map(key => {
               const column = REQUEST_COLUMNS.find(item => item.key === key);
-              return <label
-                key={key}
-                style={{ display: 'flex', gap: '7px', alignItems: 'center', fontSize: '12px', cursor: 'pointer' }}
-              >
-                <input type="checkbox" disabled={column.required} checked={column.required || visibleColumns.has(key)} onChange={event => setColumnVisible(key, event.target.checked)} />
-                {column.label}
-              </label>;
+              return (
+                <label key={key} className="menu-item checkbox">
+                  <input type="checkbox" disabled={column.required} checked={column.required || visible.has(key)} onChange={event => onToggle(key, event.target.checked)} />
+                  {column.label}
+                </label>
+              );
             })}
+            <div className="menu-separator" />
+            <button type="button" className="menu-item" onClick={() => { onReset(); popover.close(); }}>Reset to default</button>
           </div>
-        </details>
+        </div>
+      )}
+    </span>
+  );
+}
+
+function BulkTagButton({ suggestions, onApply }) {
+  const popover = usePopover();
+  const [tags, setTags] = useState([]);
+  return (
+    <span ref={popover.containerRef} style={{ position: 'relative', display: 'inline-flex' }}>
+      <button type="button" className="btn btn-secondary btn-sm" onClick={popover.toggle}><Tag size={13} />Tag</button>
+      {popover.isOpen && (
+        <div className="popover popover-end popover-above bulk-tags-popover">
+          <TagInput value={tags} onChange={setTags} suggestions={suggestions} placeholder="Add tags…" compact autoFocus />
+          <div className="view-actions" style={{ justifyContent: 'flex-end', marginTop: 8 }}>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setTags([]); popover.close(); }}>Cancel</button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={tags.length === 0}
+              onClick={async () => {
+                if (await onApply(tags)) {
+                  setTags([]);
+                  popover.close();
+                }
+              }}
+            >
+              Add tags
+            </button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+export default function RequestsTable({
+  title,
+  categoryDefinition,
+  requests,
+  totalRequestCount,
+  categories,
+  tagSuggestions,
+  viewState,
+  onViewStateChange,
+  columnsPreference,
+  onColumnsPreferenceChange,
+  density = 'comfortable',
+  onDensityChange,
+  actions,
+  isDateRefreshRunning,
+  onOpenRequest,
+  onAddRequest,
+  onImport,
+  searchInputRef,
+  onRequestConfirmation,
+}) {
+  const view = { ...DEFAULT_VIEW, ...viewState };
+  const deferredSearch = useDeferredValue(view.search);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [focusedIndex, setFocusedIndex] = useState(-1);
+  const [refreshingIds, setRefreshingIds] = useState(() => new Set());
+  const [dragColumn, setDragColumn] = useState(null);
+  const [dropColumn, setDropColumn] = useState(null);
+  const [viewport, setViewport] = useState({ scrollTop: 0, height: 700 });
+  const scrollRef = useRef(null);
+  const scrollFrameRef = useRef(null);
+  const lastToggledIndexRef = useRef(null);
+  const rowHeight = ROW_HEIGHT[density] || ROW_HEIGHT.comfortable;
+
+  const visibleColumns = useMemo(() => (Array.isArray(columnsPreference?.visible)
+    ? new Set(columnsPreference.visible)
+    : defaultVisibleColumns(categoryDefinition)), [categoryDefinition, columnsPreference]);
+  const columnOrder = useMemo(() => normalizeColumnOrder(columnsPreference?.order), [columnsPreference]);
+  const columns = useMemo(() => columnOrder.filter(key => key === 'song' || visibleColumns.has(key)), [columnOrder, visibleColumns]);
+  const showGuestDifficulties = columns.includes('modes');
+
+  const availableTags = useMemo(() => [...new Set(requests.flatMap(request => request.tags || []))].sort((a, b) => a.localeCompare(b)), [requests]);
+  const activeCount = useMemo(() => requests.filter(request => ACTIVE_REQUEST_STATUSES.includes(request.request_status)).length, [requests]);
+
+  const filteredRequests = useMemo(() => {
+    const quick = { status: view.status, priority: view.priority, tag: view.tag, due: view.due, sync: view.sync };
+    const now = new Date();
+    const matching = requests.filter(request => requestMatchesQuickFilters(request, quick, now)
+      && (!deferredSearch.trim() || requestMatchesSearch(request, deferredSearch)));
+    return sortRequests(matching, view.sortBy, view.sortOrder);
+  }, [deferredSearch, requests, view.due, view.priority, view.sortBy, view.sortOrder, view.status, view.sync, view.tag]);
+
+  // Only rows the user can currently see are ever acted on in bulk.
+  const selectedVisibleIds = useMemo(
+    () => filteredRequests.filter(request => selectedIds.has(request.id)).map(request => request.id),
+    [filteredRequests, selectedIds],
+  );
+
+  const hasFilters = Boolean(view.search || view.status || view.priority || view.tag || view.due || view.sync);
+  const updateView = useCallback(patch => onViewStateChange(patch), [onViewStateChange]);
+
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return undefined;
+    const measure = () => setViewport(current => ({ ...current, height: container.clientHeight || 700 }));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    setViewport(current => ({ ...current, scrollTop: 0 }));
+    setFocusedIndex(-1);
+  }, [deferredSearch, view.status, view.priority, view.tag, view.due, view.sync, view.sortBy, view.sortOrder]);
+
+  useEffect(() => () => cancelAnimationFrame(scrollFrameRef.current), []);
+
+  const handleScroll = useCallback((event) => {
+    const container = event.currentTarget;
+    if (scrollFrameRef.current) return;
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      setViewport({ scrollTop: container.scrollTop, height: container.clientHeight || 700 });
+    });
+  }, []);
+
+  const windowed = useMemo(() => {
+    const headerHeight = 38;
+    const visibleCount = Math.ceil(viewport.height / rowHeight);
+    const start = Math.max(0, Math.floor(Math.max(0, viewport.scrollTop - headerHeight) / rowHeight) - OVERSCAN);
+    const end = Math.min(filteredRequests.length, start + visibleCount + OVERSCAN * 2);
+    return { start, rows: filteredRequests.slice(start, end), top: start * rowHeight, bottom: Math.max(0, (filteredRequests.length - end) * rowHeight) };
+  }, [filteredRequests, rowHeight, viewport]);
+
+  const filteredRef = useRef(filteredRequests);
+  filteredRef.current = filteredRequests;
+
+  const toggleSelect = useCallback((id, index, withRange) => {
+    setSelectedIds(current => {
+      const next = new Set(current);
+      const select = !current.has(id);
+      if (withRange && lastToggledIndexRef.current !== null) {
+        const [from, to] = [lastToggledIndexRef.current, index].sort((a, b) => a - b);
+        filteredRef.current.slice(from, to + 1).forEach(request => (select ? next.add(request.id) : next.delete(request.id)));
+      } else if (select) {
+        next.add(id);
+      } else {
+        next.delete(id);
+      }
+      return next;
+    });
+    lastToggledIndexRef.current = index;
+  }, []);
+
+  const handleUpdate = useCallback((id, patch) => {
+    void actions.updateRequest(id, patch, { quiet: true });
+  }, [actions]);
+
+  const handleDelete = useCallback((request) => {
+    actions.deleteRequests([request.id], `“${requestDisplayTitle(request)}”`);
+  }, [actions]);
+
+  const handleRefresh = useCallback(async (request) => {
+    setRefreshingIds(current => new Set(current).add(request.id));
+    window.dispatchEvent(new Event('reqtrac:api-activity'));
+    try {
+      await actions.refreshBeatmap(request.beatmapset_id, request.id);
+    } finally {
+      setRefreshingIds(current => {
+        const next = new Set(current);
+        next.delete(request.id);
+        return next;
+      });
+    }
+  }, [actions]);
+
+  const toggleSort = (field) => {
+    if (view.sortBy === field) updateView({ sortOrder: view.sortOrder === 'asc' ? 'desc' : 'asc' });
+    else updateView({ sortBy: field, sortOrder: DESCENDING_FIRST.has(field) ? 'desc' : 'asc' });
+  };
+
+  const setColumnVisible = (key, isVisible) => {
+    const next = new Set(visibleColumns);
+    if (isVisible) next.add(key); else next.delete(key);
+    onColumnsPreferenceChange({ ...columnsPreference, visible: [...next], order: columnOrder });
+  };
+
+  const scrollRowIntoView = (index) => {
+    const container = scrollRef.current;
+    if (!container) return;
+    const top = index * rowHeight + 38;
+    if (top < container.scrollTop + 38) container.scrollTop = top - 38;
+    else if (top + rowHeight > container.scrollTop + container.clientHeight) container.scrollTop = top + rowHeight - container.clientHeight;
+  };
+
+  const handleTableKeyDown = (event) => {
+    if (event.target.closest('select, input, button, textarea')) return;
+    const count = filteredRequests.length;
+    if (!count) return;
+    if (event.key === 'ArrowDown' || event.key === 'j') {
+      event.preventDefault();
+      const next = Math.min(count - 1, focusedIndex + 1);
+      setFocusedIndex(next);
+      scrollRowIntoView(next);
+    } else if (event.key === 'ArrowUp' || event.key === 'k') {
+      event.preventDefault();
+      const next = Math.max(0, focusedIndex - 1);
+      setFocusedIndex(next);
+      scrollRowIntoView(next);
+    } else if (event.key === 'Enter' && focusedIndex >= 0) {
+      event.preventDefault();
+      onOpenRequest(filteredRequests[focusedIndex]);
+    } else if (event.key === ' ' && focusedIndex >= 0) {
+      event.preventDefault();
+      toggleSelect(filteredRequests[focusedIndex].id, focusedIndex, event.shiftKey);
+    } else if ((event.key === 'a' || event.key === 'A') && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      setSelectedIds(new Set(filteredRequests.map(request => request.id)));
+    } else if (event.key === 'Delete') {
+      event.preventDefault();
+      if (selectedVisibleIds.length) {
+        actions.deleteRequests(selectedVisibleIds);
+        setSelectedIds(new Set());
+      } else if (focusedIndex >= 0) {
+        handleDelete(filteredRequests[focusedIndex]);
+      }
+    } else if (event.key === 'Escape' && selectedIds.size) {
+      event.preventDefault();
+      setSelectedIds(new Set());
+    }
+  };
+
+  const exportCsv = (rows, label) => {
+    const date = new Date().toISOString().slice(0, 10);
+    downloadTextFile(`reqtrac-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${date}.csv`, requestsToCsv(rows));
+  };
+
+  const renderHeader = (key) => {
+    const column = REQUEST_COLUMNS.find(item => item.key === key);
+    const sortField = SORT_FIELDS[key];
+    const isSorted = sortField && view.sortBy === sortField;
+    const SortIcon = !isSorted ? ArrowUpDown : view.sortOrder === 'asc' ? ArrowUp : ArrowDown;
+    const label = key === 'actions' ? <span className="sr-only">Quick actions</span> : column.label;
+    return (
+      <th
+        key={key}
+        className={`${requestColumnClassName(key)}${dragColumn === key ? ' is-dragging' : ''}${dropColumn === key && dragColumn !== key ? ' is-drop-target' : ''}`}
+        draggable
+        aria-sort={isSorted ? (view.sortOrder === 'asc' ? 'ascending' : 'descending') : undefined}
+        onDragStart={(event) => { setDragColumn(key); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', key); }}
+        onDragOver={(event) => { event.preventDefault(); setDropColumn(key); }}
+        onDragLeave={() => setDropColumn(current => (current === key ? null : current))}
+        onDrop={(event) => {
+          event.preventDefault();
+          const source = dragColumn || event.dataTransfer.getData('text/plain');
+          if (source) onColumnsPreferenceChange({ ...columnsPreference, visible: [...visibleColumns], order: moveColumn(columnOrder, source, key) });
+          setDragColumn(null);
+          setDropColumn(null);
+        }}
+        onDragEnd={() => { setDragColumn(null); setDropColumn(null); }}
+      >
+        {sortField ? (
+          <button type="button" className="sort-button" data-active={isSorted} onClick={() => toggleSort(sortField)} title={`Sort by ${column.label.toLowerCase()}`}>
+            <span className="truncate">{label}</span><SortIcon size={12} />
+          </button>
+        ) : label}
+      </th>
+    );
+  };
+
+  const filterChips = [
+    view.status && { key: 'status', label: STATUS_FILTER_LABELS[view.status] || view.status },
+    view.priority && { key: 'priority', label: `${view.priority} priority` },
+    view.tag && { key: 'tag', label: `Tag: ${view.tag}` },
+    view.due && { key: 'due', label: DUE_FILTER_LABELS[view.due] || view.due },
+    view.sync && { key: 'sync', label: 'Sync failed' },
+  ].filter(Boolean);
+
+  const renderEmpty = () => {
+    if (totalRequestCount === 0) {
+      return (
+        <div className="empty-state">
+          <span className="empty-state-icon"><ListPlus size={22} /></span>
+          <h3>No requests yet</h3>
+          <p>Paste an osu! link to add your first request, or bring in the list you already keep.</p>
+          <div className="view-actions">
+            <button type="button" className="btn btn-primary" onClick={onAddRequest}><Plus size={15} />Add request</button>
+            <button type="button" className="btn btn-secondary" onClick={onImport}><FileSpreadsheet size={15} />Import requests</button>
+          </div>
+        </div>
+      );
+    }
+    if (requests.length === 0) {
+      return (
+        <div className="empty-state">
+          <span className="empty-state-icon"><ListPlus size={22} /></span>
+          <h3>Nothing in {title} yet</h3>
+          <p>Requests you add here are tagged {title} automatically. You can also add existing requests from the bulk actions in All requests.</p>
+          <div className="view-actions"><button type="button" className="btn btn-primary" onClick={onAddRequest}><Plus size={15} />Add request</button></div>
+        </div>
+      );
+    }
+    return (
+      <div className="empty-state">
+        <span className="empty-state-icon"><Search size={22} /></span>
+        <h3>No requests match</h3>
+        <p>Nothing in {title} matches your search and filters.</p>
+        <div className="view-actions"><button type="button" className="btn btn-secondary" onClick={() => updateView({ ...DEFAULT_VIEW, sortBy: view.sortBy, sortOrder: view.sortOrder })}>Clear search and filters</button></div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="requests-view">
+      <div className="requests-header">
+        <div className="view-header">
+          <div>
+            <h1 className="view-title">{title}</h1>
+            <p className="view-subtitle">
+              {activeCount} active · {requests.length} total
+              {hasFilters && filteredRequests.length !== requests.length ? ` · showing ${filteredRequests.length}` : ''}
+            </p>
+          </div>
+          <div className="view-actions">
+            <button type="button" className="btn btn-secondary" onClick={() => exportCsv(filteredRequests, title)} disabled={!filteredRequests.length} title="Export the requests shown below as CSV">
+              <Download size={15} />Export
+            </button>
+            <button type="button" className="btn btn-secondary" onClick={onImport} title="Import requests (Ctrl+I)"><FileSpreadsheet size={15} />Import</button>
+            <button type="button" className="btn btn-primary" onClick={onAddRequest} title="Add request (Ctrl+N)"><Plus size={15} />Add request</button>
+          </div>
+        </div>
+
+        <div className="requests-toolbar">
+          <div className="input-group requests-search">
+            <Search size={15} />
+            <input
+              ref={searchInputRef}
+              className="input"
+              type="search"
+              placeholder="Search title, mapper, requester, notes… (Ctrl+F)"
+              value={view.search}
+              onChange={event => updateView({ search: event.target.value })}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape' && view.search) {
+                  event.stopPropagation();
+                  updateView({ search: '' });
+                } else if (event.key === 'ArrowDown') {
+                  event.preventDefault();
+                  scrollRef.current?.focus();
+                  setFocusedIndex(0);
+                }
+              }}
+              aria-label="Search requests"
+              style={{ paddingRight: 70 }}
+            />
+            <span className="input-group-end">
+              {view.search && <button type="button" className="btn btn-ghost btn-icon btn-sm" onClick={() => updateView({ search: '' })} aria-label="Clear search"><X size={14} /></button>}
+              <SearchHelp />
+            </span>
+          </div>
+          <select className="input" value={view.status} onChange={event => updateView({ status: event.target.value })} aria-label="Filter by status">
+            <option value="">Any status</option>
+            <option value="active">Active</option>
+            <option value="not-working">Not started</option>
+            {REQUEST_STATUSES.map(status => <option key={status} value={status}>{status}</option>)}
+          </select>
+          <select className="input" value={view.priority} onChange={event => updateView({ priority: event.target.value })} aria-label="Filter by priority">
+            <option value="">Any priority</option>
+            {PRIORITIES.map(priority => <option key={priority} value={priority}>{priority}</option>)}
+          </select>
+          <select className="input" value={view.due} onChange={event => updateView({ due: event.target.value })} aria-label="Filter by deadline">
+            <option value="">Any deadline</option>
+            <option value="overdue">Overdue or due today</option>
+            <option value="week">Due in 7 days</option>
+            <option value="any-deadline">Has a deadline</option>
+          </select>
+          {availableTags.length > 0 && (
+            <select className="input" value={view.tag} onChange={event => updateView({ tag: event.target.value })} aria-label="Filter by tag">
+              <option value="">Any tag</option>
+              {availableTags.map(tag => <option key={tag} value={tag}>{tag}</option>)}
+            </select>
+          )}
+          <ColumnsMenu
+            order={columnOrder}
+            visible={visibleColumns}
+            density={density}
+            onToggle={setColumnVisible}
+            onDensityChange={onDensityChange}
+            onReset={() => onColumnsPreferenceChange(null)}
+          />
+        </div>
+
+        {filterChips.length > 0 && (
+          <div className="filter-summary">
+            <span>Filtered by</span>
+            {filterChips.map(chip => (
+              <span key={chip.key} className="filter-chip">
+                {chip.label}
+                <button type="button" onClick={() => updateView({ [chip.key]: '' })} aria-label={`Remove ${chip.label} filter`}><X size={12} /></button>
+              </span>
+            ))}
+            <button type="button" className="btn-link" onClick={() => updateView({ status: '', priority: '', tag: '', due: '', sync: '' })}>Clear all</button>
+          </div>
+        )}
       </div>
 
-      {/* Main Table Container */}
       <div
-        ref={tableContainerRef}
-        className="table-container requests-table-container"
-        onScroll={handleVirtualScroll}
+        ref={scrollRef}
+        className="table-scroll"
+        onScroll={handleScroll}
+        tabIndex={0}
+        onKeyDown={handleTableKeyDown}
+        aria-label={`${title} requests. Use the arrow keys to move, Enter to open, Space to select.`}
       >
-        {filteredRequests.length === 0 ? (
-          <div style={{ padding: '48px 24px', textAlign: 'center', color: 'var(--text-muted)' }}>
-            No requests match your current filters.
-          </div>
-        ) : (
-          <table
-            className={`compact-table requests-table${showTags ? ' requests-table-with-tags' : ''}`}
-            aria-rowcount={filteredRequests.length}
-          >
+        {filteredRequests.length === 0 ? renderEmpty() : (
+          <table className={`requests-table${density === 'compact' ? ' is-compact' : ''}`} style={{ '--row-height': `${rowHeight}px` }} aria-rowcount={filteredRequests.length + 1}>
             <colgroup>
-              <col className="request-col-select" />
-              {visibleDataColumns.map(renderColumnDefinition)}
+              <col className="col-select" />
+              {columns.map(key => <col key={key} className={requestColumnClassName(key)} />)}
             </colgroup>
             <thead>
               <tr>
-                <th style={{ textAlign: 'center' }}>
-                  <input 
-                    type="checkbox" 
-                    onChange={handleSelectAll} 
-                    checked={selectedIds.length > 0 && selectedIds.length === filteredRequests.length}
-                    style={{ cursor: 'pointer' }}
+                <th className="col-select">
+                  <input
+                    type="checkbox"
+                    checked={selectedVisibleIds.length > 0 && selectedVisibleIds.length === filteredRequests.length}
+                    ref={element => { if (element) element.indeterminate = selectedVisibleIds.length > 0 && selectedVisibleIds.length < filteredRequests.length; }}
+                    onChange={event => setSelectedIds(event.target.checked ? new Set(filteredRequests.map(request => request.id)) : new Set())}
+                    aria-label="Select all shown requests"
                   />
                 </th>
-                {visibleDataColumns.map(renderColumnHeader)}
+                {columns.map(renderHeader)}
               </tr>
             </thead>
             <tbody>
-              {virtualWindow.topSpacerHeight > 0 && (
-                <tr className="virtual-spacer-row" aria-hidden="true">
-                  <td colSpan={columnCount} style={{ height: `${virtualWindow.topSpacerHeight}px` }} />
-                </tr>
-              )}
-              {virtualWindow.rows.map((req, virtualIndex) => {
-                const deadlineInfo = getDeadlineInfo(req.deadline, req.request_status);
-                const isChecked = selectedIds.includes(req.id);
-                const isMetadataPending = req.metadata_sync_status === 'Pending' || req.metadata_sync_status === 'Processing';
-                const metadataFailed = req.metadata_sync_status === 'Failed';
-                
-
-
+              {windowed.top > 0 && <tr className="spacer-row" aria-hidden="true"><td colSpan={columns.length + 1} style={{ height: windowed.top }} /></tr>}
+              {windowed.rows.map((request, offset) => {
+                const index = windowed.start + offset;
                 return (
-                  <tr 
-                    key={req.id} 
-                    onClick={() => onOpenRequest(req)}
-                    aria-rowindex={virtualWindow.start + virtualIndex + 2}
-                    style={{ backgroundColor: isChecked ? 'var(--hover-bg)' : '' }}
-                  >
-                    {/* Checkbox */}
-                    <td onClick={(e) => e.stopPropagation()} style={{ textAlign: 'center' }}>
-                      <input 
-                        type="checkbox" 
-                        checked={isChecked}
-                        onChange={(e) => handleSelectRow(e, req.id)}
-                        style={{ cursor: 'pointer' }}
-                      />
-                    </td>
-
-                    {visibleDataColumns.map(key => renderRequestColumn(req, key, { deadlineInfo, isMetadataPending, metadataFailed }))}
-
-                  </tr>
+                  <RequestRow
+                    key={request.id}
+                    request={request}
+                    index={index}
+                    columns={columns}
+                    showGuestDifficulties={showGuestDifficulties}
+                    isSelected={selectedIds.has(request.id)}
+                    isFocused={focusedIndex === index}
+                    isRefreshing={refreshingIds.has(request.id)}
+                    onToggleSelect={toggleSelect}
+                    onOpen={onOpenRequest}
+                    onUpdate={handleUpdate}
+                    onDelete={handleDelete}
+                    onRefresh={handleRefresh}
+                  />
                 );
               })}
-              {virtualWindow.bottomSpacerHeight > 0 && (
-                <tr className="virtual-spacer-row" aria-hidden="true">
-                  <td colSpan={columnCount} style={{ height: `${virtualWindow.bottomSpacerHeight}px` }} />
-                </tr>
-              )}
+              {windowed.bottom > 0 && <tr className="spacer-row" aria-hidden="true"><td colSpan={columns.length + 1} style={{ height: windowed.bottom }} /></tr>}
             </tbody>
           </table>
         )}
       </div>
 
-      {/* Sticky Bulk Action Bar */}
-      {selectedIds.length > 0 && (
-        <div className={`bulk-toolbar-shell${isWindowMaximized ? ' bulk-toolbar-shell-maximized' : ''}`}>
-          <div style={{
-          backgroundColor: 'var(--bg-card)',
-          border: '1px solid var(--osu-pink)',
-          boxShadow: 'var(--shadow-lg)',
-          borderRadius: '12px',
-          padding: '10px 16px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '10px',
-        }} className="bulk-action-bar">
-          <span className="bulk-selection-count" style={{ fontSize: '13px', fontWeight: '600' }}>
-            {selectedIds.length} request{selectedIds.length === 1 ? '' : 's'} selected{isBulkStatusUpdating ? ' · updating...' : ''}
-          </span>
-          
-          <div style={{ width: '1px', height: '24px', backgroundColor: 'var(--border)' }} />
-
+      {selectedVisibleIds.length > 0 && (
+        <div className="bulk-bar" role="toolbar" aria-label="Bulk actions">
+          <span className="bulk-count">{selectedVisibleIds.length} selected</span>
+          <select
+            className="input input-sm"
+            value=""
+            onChange={(event) => { if (event.target.value) void actions.bulkSetStatus(selectedVisibleIds, event.target.value); }}
+            aria-label="Set status"
+          >
+            <option value="">Set status…</option>
+            {REQUEST_STATUSES.map(status => <option key={status} value={status}>{status}</option>)}
+          </select>
+          <select
+            className="input input-sm"
+            value=""
+            onChange={(event) => { if (event.target.value) void actions.bulkSetPriority(selectedVisibleIds, event.target.value); }}
+            aria-label="Set priority"
+          >
+            <option value="">Set priority…</option>
+            {PRIORITIES.map(priority => <option key={priority} value={priority}>{priority}</option>)}
+          </select>
+          <select
+            className="input input-sm"
+            value=""
+            onChange={(event) => {
+              const [mode, id] = event.target.value.split(':');
+              if (id) void actions.bulkSetCategory(selectedVisibleIds, id, mode).then(ok => { if (ok && mode === 'move') setSelectedIds(new Set()); });
+            }}
+            aria-label="Change category"
+          >
+            <option value="">Category…</option>
+            <optgroup label="Add to">
+              {categories.map(category => <option key={`add-${category.id}`} value={`add:${category.id}`}>{category.name}</option>)}
+            </optgroup>
+            <optgroup label="Move to (replaces others)">
+              {categories.map(category => <option key={`move-${category.id}`} value={`move:${category.id}`}>{category.name}</option>)}
+            </optgroup>
+          </select>
+          <BulkTagButton suggestions={tagSuggestions} onApply={tags => actions.bulkAddTags(selectedVisibleIds, tags)} />
+          <span className="bulk-divider" />
           <button
             type="button"
-            className="btn-secondary bulk-refresh-button"
-            disabled={isBulkDateRefreshing}
+            className="btn btn-ghost btn-sm"
+            disabled={isDateRefreshRunning}
             onClick={async () => {
-              const ids = [...selectedIds];
+              const ids = [...selectedVisibleIds];
               const confirmed = await onRequestConfirmation({
-                title: `Refresh dates for ${ids.length} requests?`,
-                message: 'This replaces the Date Added value on selected osu!-linked requests. Manual requests will be skipped.',
-                confirmLabel: 'Refresh dates',
+                title: `Replace the added date of ${ids.length} request${ids.length === 1 ? '' : 's'}?`,
+                message: 'Each osu!-linked request gets its map’s ranked or loved date, or its last-updated date if it isn’t ranked or loved. Manual requests are skipped.',
+                confirmLabel: 'Use osu! dates',
+                tone: 'primary',
               });
-              if (confirmed && await onBulkRefreshDates?.(ids)) dismissBulkToolbar();
+              if (confirmed) void actions.refreshDates(ids);
             }}
-            style={{ padding: '6px 9px', fontSize: '12px', flexShrink: 0 }}
+            title="Set added dates from osu!"
           >
-            <RefreshCw size={12} className={isBulkDateRefreshing ? 'spin' : undefined} style={{ marginRight: '4px' }} />
-            <span className="bulk-refresh-label">{isBulkDateRefreshing ? 'Refreshing...' : 'Refresh dates'}</span>
+            <RefreshCw size={13} className={isDateRefreshRunning ? 'spin' : undefined} />osu! dates
           </button>
-
-          {/* Change Status Dropdown */}
-          <div className="bulk-toolbar-control" style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-            <span className="bulk-toolbar-label" style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Status:</span>
-            <select
-              onChange={(e) => {
-                if (e.target.value) {
-                  const updatedIds = [...selectedIds];
-                  void onBulkUpdateStatus(updatedIds, e.target.value).then(started => {
-                    if (started) setSelectedIds(current => current.filter(id => !updatedIds.includes(id)));
-                  });
-                  e.target.value = '';
-                }
-              }}
-              disabled={isBulkStatusUpdating}
-              className="input-text bulk-toolbar-select"
-              style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
-            >
-              <option value="">Change to...</option>
-              <option value="Accepted">Accepted</option>
-              <option value="Considering">Considering</option>
-              <option value="Working">Working</option>
-              <option value="Completed">Completed</option>
-              <option value="Cancelled">Cancelled</option>
-            </select>
-          </div>
-
-          {/* Change Priority Dropdown */}
-          <div className="bulk-toolbar-control" style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-            <span className="bulk-toolbar-label" style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Priority:</span>
-            <select
-              onChange={(e) => {
-                if (e.target.value) {
-                  onBulkUpdatePriority(selectedIds, e.target.value);
-                  dismissBulkToolbar();
-                  e.target.value = '';
-                }
-              }}
-              disabled={isBulkStatusUpdating}
-              className="input-text bulk-toolbar-select"
-              style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
-            >
-              <option value="">Change to...</option>
-              <option value="Low">Low</option>
-              <option value="Medium">Medium</option>
-              <option value="High">High</option>
-            </select>
-          </div>
-
-          {/* Change Request Type */}
-          <div className="bulk-toolbar-control" style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-            <span className="bulk-toolbar-label" style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Type:</span>
-            <select
-              onChange={(e) => handleBulkCategoryAction(e, 'move')}
-              disabled={isBulkStatusUpdating}
-              className="input-text bulk-toolbar-select"
-              style={{ padding: '4px 8px', fontSize: '12px', width: '110px' }}
-            >
-              <option value="">Move to...</option>
-              {categoryDefinitions.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}
-            </select>
-            <select
-              onChange={(e) => handleBulkCategoryAction(e, 'add')}
-              disabled={isBulkStatusUpdating}
-              className="input-text bulk-toolbar-select"
-              style={{ padding: '4px 8px', fontSize: '12px', width: '105px' }}
-            >
-              <option value="">Add to...</option>
-              {categoryDefinitions.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}
-            </select>
-          </div>
-
-          <div style={{ position: 'relative', flexShrink: 0 }}>
-            <button
-              type="button"
-              className="btn-secondary bulk-tags-button"
-              disabled={isBulkStatusUpdating}
-              onClick={() => setIsBulkTagsOpen(open => !open)}
-              style={{ padding: '6px 9px', fontSize: '12px' }}
-            >
-              <span className="bulk-tags-label">Add tags{bulkTags.length ? ` (${bulkTags.length})` : ''}</span>
-            </button>
-            {isBulkTagsOpen && (
-              <div className="bulk-tags-popover" style={{ position: 'absolute', right: 0, bottom: 'calc(100% + 8px)', zIndex: 130, padding: '10px', display: 'grid', gap: '8px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '8px', boxShadow: 'var(--shadow-lg)' }}>
-                <TagInput className="bulk-tag-editor" value={bulkTags} onChange={setBulkTags} suggestions={tagSuggestions} placeholder="Add tags..." compact />
-                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '6px' }}>
-                  <button type="button" className="btn-secondary" onClick={() => { setBulkTags([]); setIsBulkTagsOpen(false); }} style={{ padding: '5px 8px', fontSize: '11px' }}>Cancel</button>
-                  <button type="button" className="btn-primary" disabled={bulkTags.length === 0} onClick={async () => {
-                    const success = await onBulkAddTags(selectedIds, bulkTags);
-                    if (success) {
-                      setBulkTags([]);
-                      dismissBulkToolbar();
-                    }
-                  }} style={{ padding: '5px 8px', fontSize: '11px' }}>Add tags</button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <button
-            disabled={isBulkStatusUpdating}
-            onClick={async () => {
-              const confirmed = await onRequestConfirmation({
-                title: `Delete ${selectedIds.length} requests?`,
-                message: 'The selected requests and their associated categories will be permanently deleted.',
-                confirmLabel: 'Delete requests',
-              });
-              if (confirmed) {
-                onBulkDelete(selectedIds);
-                dismissBulkToolbar();
-              }
-            }}
-            className="btn-secondary bulk-delete-button"
-            style={{ 
-              padding: '6px 10px',
-              fontSize: '12px', 
-              flexShrink: 0,
-              color: 'var(--priority-high)',
-              borderColor: 'rgba(231, 76, 60, 0.3)',
-              backgroundColor: 'rgba(231, 76, 60, 0.05)'
-            }}
-          >
-            <Trash2 size={12} style={{ marginRight: '4px' }} />
-            <span className="bulk-delete-label">Delete Selected</span><span className="bulk-delete-label-compact">Delete</span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => exportCsv(filteredRequests.filter(request => selectedIds.has(request.id)), `${title} selection`)}>
+            <Download size={13} />Export
           </button>
-
-          </div>
           <button
             type="button"
-            aria-label="Close selection toolbar"
-            title="Close selection toolbar"
-            onClick={dismissBulkToolbar}
-            className="bulk-toolbar-close"
+            className="btn btn-danger btn-sm"
+            onClick={() => {
+              actions.deleteRequests(selectedVisibleIds);
+              setSelectedIds(new Set());
+            }}
+            title="Delete selected (can be undone)"
           >
-            <X size={16} />
+            <Trash2 size={13} />Delete
+          </button>
+          <button type="button" className="btn btn-ghost btn-icon btn-sm" onClick={() => setSelectedIds(new Set())} aria-label="Clear selection" title="Clear selection (Esc)">
+            <X size={15} />
           </button>
         </div>
       )}
-
     </div>
   );
 }

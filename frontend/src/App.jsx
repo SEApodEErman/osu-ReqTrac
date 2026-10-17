@@ -1,958 +1,525 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Plus } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
+import TopBar from './components/TopBar';
 import Dashboard from './components/Dashboard';
 import RequestsTable from './components/RequestsTable';
-import RequestDetailModal from './components/RequestDetailModal';
 import SettingsPanel from './components/SettingsPanel';
-import QuickAdd from './components/QuickAdd';
-import MultipleRequestsImport from './components/MultipleRequestsImport';
-import TopBar from './components/TopBar';
-import Toast from './components/Toast';
+import RequestDrawer from './components/RequestDrawer';
+import AddRequestDialog from './components/AddRequestDialog';
+import ImportDialog from './components/ImportDialog';
+import SetupDialog from './components/SetupDialog';
+import ShortcutsDialog from './components/ShortcutsDialog';
 import ConfirmModal from './components/ConfirmModal';
-import { fetchWithTimeout } from './api/client';
+import ToastStack from './components/Toast';
+import { isAnyDialogOpen } from './components/ui/Dialog';
+import { api } from './api/client';
 import { useAppData } from './hooks/useAppData';
+import { usePreferences } from './hooks/usePreferences';
+import { useToasts } from './hooks/useToasts';
+import { useRequestActions } from './hooks/useRequestActions';
+import { ACTIVE_REQUEST_STATUSES } from './utils/requestConstants';
+import { beatmapIdFromLink, beatmapsetIdFromLink, extractOsuBeatmapLink } from './utils/osuLinks';
 
-function getResolvedTheme(preference) {
+const METADATA_POLL_MS = 3000;
+const METADATA_LIST_REFRESH_MS = 10000;
+
+function resolveTheme(preference) {
   if (preference !== 'system') return preference;
   return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 }
 
-const METADATA_STATUS_POLL_MS = 3000;
-const METADATA_LIST_REFRESH_MS = 15000;
-const BULK_REQUEST_BATCH_SIZE = 400;
-const BULK_DATE_REFRESH_POLL_MS = 1000;
-
-function requestIdBatches(ids) {
-  const batches = [];
-  for (let index = 0; index < ids.length; index += BULK_REQUEST_BATCH_SIZE) {
-    batches.push(ids.slice(index, index + BULK_REQUEST_BATCH_SIZE));
-  }
-  return batches;
+function isTypingTarget(element) {
+  return Boolean(element?.closest?.('input, textarea, select, [contenteditable="true"]'));
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('dashboard');
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [theme, setTheme] = useState(() => {
-    if (typeof window === 'undefined') return 'dark';
-    return localStorage.getItem('theme') || 'system';
-  });
-  const [requestsList, setRequestsList] = useState([]);
-  const [requestSort, setRequestSort] = useState({ sortBy: 'added_date', sortOrder: 'desc' });
-  const [statsData, setStatsData] = useState({});
-  const [statsLoading, setStatsLoading] = useState(true);
-  const [dashboardCategoryId, setDashboardCategoryId] = useState('all');
-  const [settingsData, setSettingsData] = useState({});
-  const [categoryDefinitions, setCategoryDefinitions] = useState([]);
-  const [tagCatalog, setTagCatalog] = useState([]);
-  const [selectedRequest, setSelectedRequest] = useState(null);
-  const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
-  const [isMultipleImportOpen, setIsMultipleImportOpen] = useState(false);
-  const [showFirstLaunchSetup, setShowFirstLaunchSetup] = useState(false);
-  const [osuApiStatus, setOsuApiStatus] = useState(null);
+  const { preferences, isLoaded: preferencesLoaded, hydrate, setPreference, reload: reloadPreferences } = usePreferences();
+  const data = useAppData({ onSettingsLoaded: settings => hydrate(settings?.preferences) });
+  const toasts = useToasts();
+  const { showToast } = toasts;
+  const actions = useRequestActions({ data, toasts, categories: data.categories });
+
+  const [activeView, setActiveView] = useState('overview');
+  const [settingsSection, setSettingsSection] = useState(null);
+  const [openRequestId, setOpenRequestId] = useState(null);
+  const [addDialog, setAddDialog] = useState(null);
+  const [importDialog, setImportDialog] = useState(null);
+  const [isSetupOpen, setIsSetupOpen] = useState(false);
+  const [isShortcutsOpen, setIsShortcutsOpen] = useState(false);
+  const [confirmation, setConfirmation] = useState(null);
+  const [viewStates, setViewStates] = useState({});
   const [metadataSyncStatus, setMetadataSyncStatus] = useState(null);
-  const [toastNotice, setToastNotice] = useState(null);
-  const [confirmationRequest, setConfirmationRequest] = useState(null);
-  const [isBulkStatusUpdating, setIsBulkStatusUpdating] = useState(false);
-  const [isBulkDateRefreshing, setIsBulkDateRefreshing] = useState(false);
-  const [refreshingRequestId, setRefreshingRequestId] = useState(null);
-  const toastIdRef = useRef(0);
-  const bulkStatusUpdateRef = useRef(false);
-  const metadataProgressRef = useRef({ settled: null, lastListRefresh: 0 });
-  const dashboardCategoryIdRef = useRef('all');
-  const statsRequestIdRef = useRef(0);
+  const [isDraggingLink, setIsDraggingLink] = useState(false);
+  const searchInputRef = useRef(null);
+  const confirmResolverRef = useRef(null);
+  const offeredClipboardLinksRef = useRef(new Set());
+  const setupShownRef = useRef(false);
 
-  // QuickAdd duplicate check state
-  const [duplicateError, setDuplicateError] = useState(null);
+  const { requests: allRequests, settings, categories, tags, refreshRequests, refreshStats } = data;
+  const isConfigured = Boolean(settings?.isConfigured);
+  const connectedAccount = settings?.connectedAccount || null;
 
-  const showToast = useCallback((message, type = 'info', action = null) => {
-    setToastNotice({ id: ++toastIdRef.current, message, type, action });
-    if ((type === 'error' || type === 'warning') && window.electronAPI?.windowControls?.flashFrame) {
-      void window.electronAPI.windowControls.flashFrame();
-    }
-  }, []);
+  const requests = useMemo(
+    () => (actions.pendingDeleteIds.size ? allRequests.filter(request => !actions.pendingDeleteIds.has(request.id)) : allRequests),
+    [actions.pendingDeleteIds, allRequests],
+  );
 
-  const dismissToast = useCallback(() => setToastNotice(null), []);
+  // ---- Theme ---------------------------------------------------------------
+  useEffect(() => {
+    const apply = () => document.documentElement.setAttribute('data-theme', resolveTheme(preferences.theme));
+    apply();
+    if (preferences.theme !== 'system') return undefined;
+    const media = window.matchMedia('(prefers-color-scheme: light)');
+    media.addEventListener?.('change', apply);
+    return () => media.removeEventListener?.('change', apply);
+  }, [preferences.theme]);
 
-  const confirmationResolverRef = useRef(null);
-  const requestConfirmation = useCallback((options) => new Promise((resolve) => {
-    if (confirmationResolverRef.current) confirmationResolverRef.current(false);
-    confirmationResolverRef.current = resolve;
-    setConfirmationRequest(options);
+  // ---- Confirmation dialog -------------------------------------------------
+  const requestConfirmation = useCallback(options => new Promise((resolve) => {
+    confirmResolverRef.current?.(false);
+    confirmResolverRef.current = resolve;
+    setConfirmation(options);
   }), []);
 
   const finishConfirmation = useCallback((confirmed) => {
-    const resolve = confirmationResolverRef.current;
-    confirmationResolverRef.current = null;
-    setConfirmationRequest(null);
+    const resolve = confirmResolverRef.current;
+    confirmResolverRef.current = null;
+    setConfirmation(null);
     resolve?.(confirmed);
   }, []);
 
-  const {
-    fetchCatalogs,
-    fetchData,
-    fetchRequests,
-    fetchSettings,
-    fetchStats,
-    handleDashboardCategoryChange,
-  } = useAppData({
-    dashboardCategoryIdRef,
-    setActiveTab,
-    setCategoryDefinitions,
-    setDashboardCategoryId,
-    setRequestsList,
-    setSelectedRequest,
-    setSettingsData,
-    setShowFirstLaunchSetup,
-    setStatsData,
-    setStatsLoading,
-    setTagCatalog,
-    statsRequestIdRef,
-  });
-
+  // ---- Per-view filters and sort (search stays in memory only) -------------
   useEffect(() => {
-    const removeUpdateListener = window.electronAPI?.onUpdateDownloaded?.(({ version }) => {
-      showToast(`Version ${version} is ready to install.`, 'info', {
-        label: 'Restart now',
-        onClick: () => void window.electronAPI.installUpdate?.(),
-      });
+    if (preferencesLoaded) setViewStates(current => ({ ...(preferences.views || {}), ...current }));
+    // Seed once from stored preferences.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preferencesLoaded]);
+
+  const updateViewState = useCallback((key, patch) => {
+    setViewStates((current) => {
+      const next = { ...(current[key] || {}), ...patch };
+      const persistable = { ...next };
+      delete persistable.search;
+      setPreference('views', views => ({ ...(views || {}), [key]: persistable }));
+      return { ...current, [key]: next };
     });
-    return () => removeUpdateListener?.();
-  }, [showToast]);
+  }, [setPreference]);
 
+  // ---- First-run setup -----------------------------------------------------
   useEffect(() => {
-    const applyTheme = () => {
-      document.documentElement.setAttribute('data-theme', getResolvedTheme(theme));
-    };
+    if (setupShownRef.current || !preferencesLoaded || !settings) return;
+    setupShownRef.current = true;
+    if (!settings.isConfigured && !preferences.setupDismissed) setIsSetupOpen(true);
+  }, [preferences.setupDismissed, preferencesLoaded, settings]);
 
-    applyTheme();
-    if (theme !== 'system') return undefined;
-
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: light)');
-    const handleThemeChange = () => applyTheme();
-    mediaQuery.addEventListener?.('change', handleThemeChange);
-    return () => mediaQuery.removeEventListener?.('change', handleThemeChange);
-  }, [theme]);
-
-  useEffect(() => {
-    if (dashboardCategoryId === 'all' || categoryDefinitions.length === 0) return;
-    const categoryStillExists = categoryDefinitions.some(
-      category => String(category.id) === dashboardCategoryId
-    );
-    if (!categoryStillExists) handleDashboardCategoryChange('all');
-  }, [categoryDefinitions, dashboardCategoryId, handleDashboardCategoryChange]);
-
-  const hasPendingMetadata = requestsList.some(request =>
-    request.metadata_sync_status === 'Pending' || request.metadata_sync_status === 'Processing'
+  // ---- Metadata sync progress ---------------------------------------------
+  const hasPendingMetadata = useMemo(
+    () => allRequests.some(request => request.metadata_sync_status === 'Pending' || request.metadata_sync_status === 'Processing'),
+    [allRequests],
   );
 
   useEffect(() => {
     if (!hasPendingMetadata) {
-      setMetadataSyncStatus(null);
+      setMetadataSyncStatus(current => (current && !current.Pending && !current.Processing ? current : null));
       return undefined;
     }
     let cancelled = false;
-    let timeoutId = null;
-    metadataProgressRef.current = { settled: null, lastListRefresh: Date.now() };
-
-    const pollMetadataStatus = async () => {
-      let scheduleNext = true;
+    let timer = null;
+    let lastSettled = null;
+    let lastListRefresh = Date.now();
+    const poll = async () => {
+      let keepPolling = true;
       try {
-        const response = await fetchWithTimeout('/api/beatmaps/sync/status');
-        if (!response.ok || cancelled) return;
-        const status = await response.json();
+        const status = await api.get('/api/beatmaps/sync/status');
         if (cancelled) return;
-        setMetadataSyncStatus(status);
-
+        setMetadataSyncStatus(current => (JSON.stringify(current) === JSON.stringify(status) ? current : status));
         const active = (status.Pending || 0) + (status.Processing || 0);
         const settled = (status.Completed || 0) + (status.Failed || 0);
-        const progress = metadataProgressRef.current;
-        const progressChanged = progress.settled !== null && progress.settled !== settled;
-        progress.settled = settled;
-
         if (active === 0) {
-          scheduleNext = false;
-          await Promise.all([fetchRequests(), fetchStats()]);
+          keepPolling = false;
+          await Promise.all([refreshRequests(), refreshStats()]);
           return;
         }
-
-        if (progressChanged && Date.now() - progress.lastListRefresh >= METADATA_LIST_REFRESH_MS) {
-          progress.lastListRefresh = Date.now();
-          await fetchRequests();
+        // Show synced maps as they arrive without refetching the list every poll.
+        if (lastSettled !== null && settled !== lastSettled && Date.now() - lastListRefresh >= METADATA_LIST_REFRESH_MS) {
+          lastListRefresh = Date.now();
+          await refreshRequests();
         }
+        lastSettled = settled;
       } catch (error) {
-        console.error('Failed to poll metadata sync status:', error);
+        console.error('Failed to poll metadata sync:', error);
       } finally {
-        if (!cancelled && scheduleNext) {
-          timeoutId = window.setTimeout(pollMetadataStatus, METADATA_STATUS_POLL_MS);
-        }
+        if (!cancelled && keepPolling) timer = window.setTimeout(poll, METADATA_POLL_MS);
       }
     };
-
-    void pollMetadataStatus();
+    void poll();
     return () => {
       cancelled = true;
-      if (timeoutId) window.clearTimeout(timeoutId);
+      window.clearTimeout(timer);
     };
-  }, [hasPendingMetadata, fetchRequests, fetchStats]);
+  }, [hasPendingMetadata, refreshRequests, refreshStats]);
+
+  // ---- Navigation helpers --------------------------------------------------
+  const navigate = useCallback((view, section = null) => {
+    setActiveView(view);
+    setSettingsSection(view === 'settings' ? section : null);
+  }, []);
+
+  const activeCategoryId = activeView.startsWith('requests-') && activeView !== 'requests-all' ? Number(activeView.slice('requests-'.length)) : null;
+  const activeCategory = activeCategoryId ? categories.find(category => category.id === activeCategoryId) : null;
+
+  // A category that was archived or deleted falls back to All requests.
+  useEffect(() => {
+    if (activeCategoryId && categories.length && !activeCategory) setActiveView('requests-all');
+  }, [activeCategory, activeCategoryId, categories.length]);
+
+  const openAddRequest = useCallback((initialLink = '') => {
+    setAddDialog({ initialLink, categoryId: activeCategoryId });
+  }, [activeCategoryId]);
+
+  const openImport = useCallback(() => setImportDialog({ categoryId: activeCategoryId }), [activeCategoryId]);
+
+  const showRequests = useCallback((categoryKey, filters = {}) => {
+    const key = categoryKey === 'all' ? 'all' : String(categoryKey);
+    updateViewState(key, { status: '', priority: '', tag: '', due: '', sync: '', search: '', ...filters });
+    navigate(key === 'all' ? 'requests-all' : `requests-${key}`);
+  }, [navigate, updateViewState]);
+
+  const openRequest = useCallback((requestOrId) => {
+    setOpenRequestId(typeof requestOrId === 'object' ? requestOrId.id : Number(requestOrId));
+  }, []);
+
+  const drawerRequest = openRequestId ? requests.find(request => request.id === openRequestId) : null;
+  useEffect(() => {
+    if (openRequestId && data.requestsLoaded && !drawerRequest && !allRequests.some(request => request.id === openRequestId)) {
+      setOpenRequestId(null);
+    }
+  }, [allRequests, data.requestsLoaded, drawerRequest, openRequestId]);
+
+  const onDataReplaced = useCallback(async () => {
+    setOpenRequestId(null);
+    data.setStatsCategoryId('all');
+    await Promise.all([data.refreshAll(), reloadPreferences()]);
+  }, [data, reloadPreferences]);
+
+  // ---- Global keyboard shortcuts -----------------------------------------
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (event.defaultPrevented || isAnyDialogOpen()) return;
+      const mod = event.ctrlKey || event.metaKey;
+      const key = event.key.toLowerCase();
+      if (mod && !event.shiftKey && !event.altKey) {
+        if (key === 'n') { event.preventDefault(); openAddRequest(); return; }
+        if (key === 'i') { event.preventDefault(); openImport(); return; }
+        if (key === 'f' || key === 'k') {
+          event.preventDefault();
+          if (!activeView.startsWith('requests-')) navigate('requests-all');
+          window.setTimeout(() => { searchInputRef.current?.focus(); searchInputRef.current?.select(); }, 0);
+          return;
+        }
+        if (key === '1') { event.preventDefault(); navigate('overview'); return; }
+        if (key === '2') { event.preventDefault(); navigate('requests-all'); return; }
+        if (key === ',') { event.preventDefault(); navigate('settings'); return; }
+        if (key === 'b') { event.preventDefault(); setPreference('sidebarCollapsed', collapsed => !collapsed); return; }
+      }
+      if (isTypingTarget(event.target) || mod || event.altKey) return;
+      if (event.key === '?') { event.preventDefault(); setIsShortcutsOpen(true); return; }
+      if (event.key === '/' && activeView.startsWith('requests-')) {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeView, navigate, openAddRequest, openImport, setPreference]);
+
+  // ---- Offer to add a copied beatmap link ---------------------------------
+  const isTrackedLink = useCallback((link) => {
+    const setId = beatmapsetIdFromLink(link);
+    if (setId) return allRequests.some(request => Number(request.beatmapset_id) === setId);
+    const beatmapId = beatmapIdFromLink(link);
+    return allRequests.some(request => (request.search_difficulties || []).some(difficulty => Number(difficulty.id) === beatmapId)
+      || request.input_link === link);
+  }, [allRequests]);
 
   useEffect(() => {
-    let isMounted = true;
-    const pollApiStatus = async () => {
+    const readClipboard = window.electronAPI?.readClipboardText;
+    if (!preferences.clipboardDetection || !readClipboard || !isConfigured) return undefined;
+    const checkClipboard = async () => {
+      if (isAnyDialogOpen()) return;
       try {
-        const res = await fetch('/api/osu/status');
-        if (res.ok && isMounted) setOsuApiStatus(await res.json());
-      } catch (error) {
-        console.error('Failed to load osu! API status:', error);
+        const link = extractOsuBeatmapLink(await readClipboard());
+        if (!link || offeredClipboardLinksRef.current.has(link) || isTrackedLink(link)) return;
+        offeredClipboardLinksRef.current.add(link);
+        showToast('You copied a beatmap link you don’t track yet.', 'info', {
+          title: 'Add this beatmap?',
+          duration: 10000,
+          action: { label: 'Add request', onClick: () => openAddRequest(link) },
+        });
+      } catch {
+        // Clipboard access can fail while another app holds it; try next time.
       }
     };
+    window.addEventListener('focus', checkClipboard);
+    return () => window.removeEventListener('focus', checkClipboard);
+  }, [isConfigured, isTrackedLink, openAddRequest, preferences.clipboardDetection, showToast]);
 
-    void pollApiStatus();
-    const intervalId = window.setInterval(pollApiStatus, 1000);
+  // ---- Drop a beatmap link anywhere to add it -----------------------------
+  useEffect(() => {
+    let dragDepth = 0;
+    const carriesText = event => [...(event.dataTransfer?.types || [])].some(type => type === 'text/uri-list' || type === 'text/plain');
+    const onDragEnter = (event) => {
+      if (!carriesText(event)) return;
+      dragDepth += 1;
+      setIsDraggingLink(true);
+    };
+    const onDragLeave = () => {
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) setIsDraggingLink(false);
+    };
+    const onDragOver = (event) => {
+      // Never let a dropped link navigate the app window away.
+      event.preventDefault();
+    };
+    const onDrop = (event) => {
+      event.preventDefault();
+      dragDepth = 0;
+      setIsDraggingLink(false);
+      if (event.target.closest?.('input, textarea')) return;
+      const text = event.dataTransfer?.getData('text/uri-list') || event.dataTransfer?.getData('text/plain');
+      const link = extractOsuBeatmapLink(text);
+      if (link && !isAnyDialogOpen()) {
+        if (isTrackedLink(link)) showToast('You already track this beatmap.', 'info', { duration: 3000 });
+        else openAddRequest(link);
+      }
+    };
+    window.addEventListener('dragenter', onDragEnter);
+    window.addEventListener('dragleave', onDragLeave);
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('drop', onDrop);
     return () => {
-      isMounted = false;
-      window.clearInterval(intervalId);
+      window.removeEventListener('dragenter', onDragEnter);
+      window.removeEventListener('dragleave', onDragLeave);
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('drop', onDrop);
     };
-  }, []);
+  }, [isTrackedLink, openAddRequest, showToast]);
 
-  const toggleTheme = (newTheme) => {
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-  };
-
-  const handleOpenRequest = useCallback(async (request) => {
-    setSelectedRequest(request);
-    if (!request.is_osu_link || !request.beatmapset_id) return;
-
-    try {
-      const response = await fetchWithTimeout(`/api/beatmaps/${request.beatmapset_id}?cacheOnly=1`);
-      if (!response.ok) return;
-      const beatmap = await response.json();
-      setSelectedRequest(current => current?.id === request.id
-        ? { ...current, difficulties: beatmap.difficulties || [] }
-        : current);
-    } catch (error) {
-      console.error('Failed to load request difficulty details:', error);
-    }
-  }, []);
-
-  // ADD Request
-  const handleAddRequest = async (payload, callback) => {
-    setDuplicateError(null);
-    try {
-      const res = await fetch('/api/requests', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+  // ---- App updates ---------------------------------------------------------
+  useEffect(() => {
+    const remove = window.electronAPI?.onUpdateDownloaded?.(({ version }) => {
+      showToast(`Version ${version} is ready. Restart to finish updating.`, 'info', {
+        title: 'Update downloaded',
+        duration: 0,
+        action: { label: 'Restart now', onClick: () => void window.electronAPI.installUpdate?.() },
       });
-
-      if (res.status === 409) {
-        const errData = await res.json();
-        setDuplicateError({
-          requestId: errData.requestId,
-          message: errData.message
-        });
-        showToast(errData.message || 'This beatmapset already exists.', 'warning');
-        window.setTimeout(() => document.querySelector('[data-duplicate-warning]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 0);
-        return { ok: false, reason: 'duplicate', requestId: errData.requestId };
-      }
-
-      if (res.ok) {
-        await Promise.all([fetchRequests(), fetchStats(), fetchCatalogs()]);
-        if (callback) callback();
-        return { ok: true };
-      } else {
-        const errData = await res.json();
-        const isMissingBeatmap = errData.code === 'BEATMAPSET_NOT_FOUND';
-        showToast(isMissingBeatmap
-          ? (errData.error || 'This osu! beatmap link no longer exists or is unavailable.')
-          : `Failed to add request: ${errData.error || 'Server Error'}`, isMissingBeatmap ? 'warning' : 'error');
-        return { ok: false, reason: isMissingBeatmap ? 'missing-beatmap' : 'server' };
-      }
-    } catch (e) {
-      console.error(e);
-      showToast('Network Error. Failed to add request.', 'error');
-      return { ok: false, reason: 'network' };
-    }
-  };
-
-  // Resolve duplicate by adding categories to existing request
-  const handleResolveDuplicate = async (requestId, categories, callback) => {
-    try {
-      const res = await fetch('/api/requests', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          add_to_existing_id: requestId,
-          categories
-        })
-      });
-
-      if (res.ok) {
-        setDuplicateError(null);
-        await Promise.all([fetchRequests(), fetchStats(), fetchCatalogs()]);
-        if (callback) callback();
-        showToast('Categories successfully added to the existing request!', 'success');
-        return { ok: true };
-      } else {
-        const errData = await res.json();
-        showToast(`Failed to resolve duplicate: ${errData.error}`, 'error');
-        return { ok: false };
-      }
-    } catch (e) {
-      console.error(e);
-      showToast('Network Error.', 'error');
-      return { ok: false };
-    }
-  };
-
-  // UPDATE Request
-  const handleUpdateRequest = async (id, payload) => {
-    try {
-      const res = await fetchWithTimeout(`/api/requests/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      if (res.ok) {
-        await Promise.all([fetchRequests(), fetchStats(), fetchCatalogs()]);
-        showToast('Request updated successfully.', 'success');
-        return true;
-      } else {
-        let message = `Request update failed (${res.status}).`;
-        try {
-          const errData = await res.json();
-          if (errData.error) message = `Request update failed: ${errData.error}`;
-        } catch {
-          // Keep the status-based message when the server did not return JSON.
-        }
-        showToast(message, 'error');
-        return false;
-      }
-    } catch (e) {
-      console.error(e);
-      const message = e.name === 'AbortError'
-        ? 'Request update timed out. Check the local server and osu! API connection.'
-        : 'Request update could not reach the local server.';
-      showToast(message, 'error');
-      return false;
-    }
-  };
-
-  const handleLinkManualRequest = async (id, link) => {
-    try {
-      const response = await fetchWithTimeout(`/api/requests/${id}/link-beatmap`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ link })
-      });
-      const result = await response.json();
-      if (!response.ok) {
-        showToast(result.error || 'Could not link this request to osu!.', 'error');
-        return { ok: false, duplicateRequestId: result.requestId };
-      }
-      await Promise.all([fetchRequests(), fetchStats()]);
-      const beatmapResponse = await fetchWithTimeout(`/api/beatmaps/${result.beatmapset_id}?cacheOnly=1`);
-      const beatmap = beatmapResponse.ok ? await beatmapResponse.json() : null;
-      setSelectedRequest(current => current?.id === id
-        ? { ...current, is_osu_link: true, beatmapset_id: result.beatmapset_id, difficulties: beatmap?.difficulties || [] }
-        : current);
-      showToast(result.message, 'success');
-      return { ok: true };
-    } catch (error) {
-      console.error('Failed to link manual request:', error);
-      showToast('Could not reach the local server to link this request.', 'error');
-      return { ok: false };
-    }
-  };
-
-  const handleChangeMapset = async (id, link) => {
-    try {
-      const response = await fetchWithTimeout(`/api/requests/${id}/change-mapset`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ link }),
-      });
-      const result = await response.json();
-      if (!response.ok) {
-        showToast(result.error || 'Could not change this beatmapset.', 'error');
-        return { ok: false, duplicateRequestId: result.requestId };
-      }
-      await Promise.all([fetchRequests(), fetchStats()]);
-      const beatmapResponse = await fetchWithTimeout(`/api/beatmaps/${result.beatmapset_id}?cacheOnly=1`);
-      const beatmap = beatmapResponse.ok ? await beatmapResponse.json() : null;
-      setSelectedRequest(current => current?.id === id
-        ? { ...current, beatmapset_id: result.beatmapset_id, difficulties: beatmap?.difficulties || [] }
-        : current);
-      const preserved = result.guest_difficulties_preserved_as_manual || 0;
-      showToast(`${result.message}${preserved ? ` ${preserved} guest difficult${preserved === 1 ? 'y was' : 'ies were'} preserved as manual.` : ''}`, 'success');
-      return { ok: true };
-    } catch (error) {
-      console.error('Failed to change beatmapset:', error);
-      showToast('Could not reach the local server to change this beatmapset.', 'error');
-      return { ok: false };
-    }
-  };
-
-  const handleForceRefreshBeatmap = async (request) => {
-    if (!request?.beatmapset_id || refreshingRequestId) return false;
-    setRefreshingRequestId(request.id);
-    try {
-      const response = await fetchWithTimeout('/api/beatmaps/refresh', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ beatmapset_id: request.beatmapset_id }),
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Could not refresh beatmap metadata.');
-      await fetchRequests();
-      showToast('Beatmap metadata refreshed successfully.', 'success');
-      return true;
-    } catch (error) {
-      showToast(error.message || 'Could not refresh beatmap metadata.', 'error');
-      return false;
-    } finally {
-      setRefreshingRequestId(null);
-    }
-  };
-
-  const handleDetailMetadataRefresh = useCallback(async (requestId, difficulties) => {
-    await fetchRequests();
-    if (Array.isArray(difficulties)) {
-      setSelectedRequest(current => current?.id === requestId
-        ? { ...current, difficulties }
-        : current);
-    }
-  }, [fetchRequests]);
-
-  // DELETE Request
-  const handleDeleteRequest = async (id) => {
-    try {
-      const res = await fetch(`/api/requests/${id}`, {
-        method: 'DELETE'
-      });
-
-      if (res.ok) {
-        if (selectedRequest && selectedRequest.id === id) {
-          setSelectedRequest(null);
-        }
-        await Promise.all([fetchRequests(), fetchStats()]);
-      } else {
-        const errData = await res.json();
-        showToast(`Failed to delete request: ${errData.error}`, 'error');
-      }
-    } catch (e) {
-      console.error(e);
-      showToast('Network Error.', 'error');
-    }
-  };
-
-  // Bulk status update
-  const handleBulkUpdateStatus = async (ids, status) => {
-    if (!ids.length) return false;
-    if (bulkStatusUpdateRef.current) {
-      showToast('A bulk status update is already in progress.', 'warning');
-      return false;
-    }
-
-    bulkStatusUpdateRef.current = true;
-    setIsBulkStatusUpdating(true);
-    const trackerId = ++toastIdRef.current;
-    let completed = 0;
-    let failed = 0;
-    setToastNotice({
-      id: trackerId,
-      type: 'progress',
-      persistent: true,
-      message: `Updating 0 of ${ids.length} requests to "${status}"...`,
-      progress: { completed: 0, total: ids.length }
     });
+    return () => remove?.();
+  }, [showToast]);
 
-    const updateTracker = () => {
-      const completedCount = completed;
-      setToastNotice(current => current?.id === trackerId ? {
-        ...current,
-        message: `Updating ${completedCount} of ${ids.length} requests to "${status}"...`,
-        progress: { completed: completedCount, total: ids.length }
-      } : current);
-    };
-
-    try {
-      for (const batch of requestIdBatches(ids)) {
-        try {
-          const response = await fetch('/api/requests/bulk', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ids: batch, request_status: status })
-          });
-          if (!response.ok) failed += batch.length;
-        } catch (error) {
-          failed += batch.length;
-          console.error('Failed to update request batch:', error);
-        } finally {
-          completed += batch.length;
-          updateTracker();
-        }
-      }
-      await Promise.all([fetchRequests(), fetchStats()]);
-      if (failed) {
-        showToast(`Updated ${ids.length - failed} of ${ids.length} requests to "${status}". ${failed} failed.`, 'warning');
-      } else {
-        showToast(`Successfully updated status to "${status}" for ${ids.length} requests.`, 'success');
-      }
-      return true;
-    } catch (e) {
-      console.error(e);
-      showToast('Failed to update status for some requests.', 'error');
-      return false;
-    } finally {
-      bulkStatusUpdateRef.current = false;
-      setIsBulkStatusUpdating(false);
+  // ---- Derived view data ---------------------------------------------------
+  const activeCounts = useMemo(() => {
+    const counts = { all: 0 };
+    for (const request of requests) {
+      if (!ACTIVE_REQUEST_STATUSES.includes(request.request_status)) continue;
+      counts.all += 1;
+      for (const category of request.categories || []) counts[category.category_id] = (counts[category.category_id] || 0) + 1;
     }
-  };
+    return counts;
+  }, [requests]);
 
-  const summarizeRefreshDateResult = (result = {}) => {
-    const parts = [`Refreshed ${result.updated || 0} request date${result.updated === 1 ? '' : 's'}.`];
-    if (result.skippedManual?.length) parts.push(`Skipped ${result.skippedManual.length} manual request${result.skippedManual.length === 1 ? '' : 's'}.`);
-    if (result.skippedNoUsableDate?.length) {
-      const names = result.skippedNoUsableDate.slice(0, 3).map(item => item.title || `Request ${item.id}`).join(', ');
-      const remainder = result.skippedNoUsableDate.length - 3;
-      parts.push(`No usable osu! date: ${names}${remainder > 0 ? `, and ${remainder} more` : ''}.`);
-    }
-    if (result.failed?.length) parts.push(`${result.failed.length} request${result.failed.length === 1 ? '' : 's'} failed to refresh.`);
-    return parts.join(' ');
-  };
+  const viewRequests = useMemo(() => {
+    if (!activeView.startsWith('requests-')) return requests;
+    if (!activeCategoryId) return requests;
+    return requests.filter(request => (request.categories || []).some(category => Number(category.category_id) === activeCategoryId));
+  }, [activeCategoryId, activeView, requests]);
 
-  const handleBulkRefreshDates = async (ids) => {
-    if (!ids.length || isBulkDateRefreshing) return false;
-    setIsBulkDateRefreshing(true);
-    const trackerId = ++toastIdRef.current;
-    try {
-      const response = await fetchWithTimeout('/api/requests/refresh-dates', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids })
-      });
-      const started = await response.json();
-      if (!response.ok) throw new Error(started.error || 'Could not start the date refresh.');
-      if (started.completed) {
-        showToast(summarizeRefreshDateResult(started.result), started.result?.skippedManual?.length ? 'warning' : 'info');
-        return true;
-      }
+  const viewKey = activeCategoryId ? String(activeCategoryId) : 'all';
+  const sectionName = activeView === 'overview' ? 'Overview' : activeView === 'settings' ? 'Settings' : activeCategory?.name || 'All requests';
 
-      setToastNotice({
-        id: trackerId,
-        type: 'progress',
-        persistent: true,
-        message: `Refreshing 0 of ${started.total} selected osu! request dates...`,
-        progress: { completed: 0, total: started.total }
-      });
-
-      let status = started;
-      while (status.status !== 'completed') {
-        await new Promise(resolve => window.setTimeout(resolve, BULK_DATE_REFRESH_POLL_MS));
-        const pollResponse = await fetchWithTimeout(`/api/requests/refresh-dates/status/${started.jobId}`);
-        status = await pollResponse.json();
-        if (!pollResponse.ok) throw new Error(status.error || 'Could not retrieve date refresh progress.');
-        setToastNotice(current => current?.id === trackerId ? {
-          ...current,
-          message: `Refreshing ${status.processed} of ${status.total} selected osu! request dates...`,
-          progress: { completed: status.processed, total: status.total }
-        } : current);
-      }
-
-      await Promise.all([fetchRequests(), fetchStats()]);
-      const hasWarnings = status.result.skippedManual?.length || status.result.skippedNoUsableDate?.length || status.result.failed?.length;
-      showToast(summarizeRefreshDateResult(status.result), hasWarnings ? 'warning' : 'success');
-      return true;
-    } catch (error) {
-      console.error('Failed to refresh selected request dates:', error);
-      showToast(error.message || 'Could not refresh the selected request dates.', 'error');
-      return false;
-    } finally {
-      setIsBulkDateRefreshing(false);
-    }
-  };
-
-  // Bulk priority update
-  const handleBulkUpdatePriority = async (ids, priority) => {
-    try {
-      for (const batch of requestIdBatches(ids)) {
-        const response = await fetch('/api/requests/bulk', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids: batch, priority })
-        });
-        if (!response.ok) throw new Error('Bulk priority update failed');
-      }
-      await Promise.all([fetchRequests(), fetchStats()]);
-      showToast(`Successfully updated priority to "${priority}" for ${ids.length} requests.`, 'success');
-    } catch (e) {
-      console.error(e);
-      showToast('Failed to update priority for some requests.', 'error');
-    }
-  };
-
-  // Bulk category/type update
-  const handleBulkUpdateCategory = async (ids, categoryId, mode) => {
-    const category = categoryDefinitions.find(item => item.id === Number(categoryId));
-    if (!category) return;
-    try {
-      for (const batch of requestIdBatches(ids)) {
-        const response = await fetch('/api/requests/bulk', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids: batch, categoryId: category.id, mode })
-        });
-        if (!response.ok) throw new Error('One or more category updates failed');
-      }
-
-      await Promise.all([fetchRequests(), fetchStats()]);
-      showToast(`${mode === 'move' ? 'Moved' : 'Added'} ${ids.length} requests ${mode === 'move' ? 'to' : 'into'} "${category.name}".`, 'success');
-    } catch (e) {
-      console.error(e);
-      showToast('Failed to update request types for some requests.', 'error');
-    }
-  };
-
-  const handleBulkAddTags = async (ids, tags) => {
-    try {
-      let changed = 0;
-      for (const batch of requestIdBatches(ids)) {
-        const response = await fetch('/api/requests/bulk', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids: batch, add_tags: tags })
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || 'Bulk tag update failed');
-        changed += result.updated || 0;
-      }
-      await Promise.all([fetchRequests(), fetchCatalogs()]);
-      showToast(`Added tags to ${changed} request${changed === 1 ? '' : 's'}.`, 'success');
-      return true;
-    } catch (error) {
-      console.error(error);
-      showToast(error.message || 'Failed to add tags.', 'error');
-      return false;
-    }
-  };
-
-  // Bulk delete
-  const handleBulkDelete = async (ids) => {
-    try {
-      for (const batch of requestIdBatches(ids)) {
-        const response = await fetch('/api/requests/bulk', {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids: batch })
-        });
-        if (!response.ok) throw new Error('Bulk delete failed');
-      }
-      await Promise.all([fetchRequests(), fetchStats()]);
-      showToast(`Successfully deleted ${ids.length} requests.`, 'success');
-    } catch (e) {
-      console.error(e);
-      showToast('Failed to delete some requests.', 'error');
-    }
-  };
-
-  // Save Settings Credentials
-  const handleSaveCredentials = async (creds) => {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(creds)
+  const setColumnsPreference = useCallback((value) => {
+    setPreference('columns', columns => {
+      const next = { ...(columns || {}) };
+      if (value) next[viewKey] = value; else delete next[viewKey];
+      return next;
     });
-    if (res.ok) {
-      await fetchSettings();
-    } else {
-      throw new Error('Save settings failed');
-    }
-  };
+  }, [setPreference, viewKey]);
 
-  // Disconnect Settings osu! profile
-  const handleDisconnect = async () => {
-    if (await requestConfirmation({
-      title: 'Disconnect osu! account?',
-      message: 'Your connected osu! account will be removed from ReqTrac. Your tracked requests will remain available.',
-      confirmLabel: 'Disconnect',
-    })) {
-      const res = await fetch('/api/settings/disconnect', { method: 'POST' });
-      if (res.ok) {
-        await fetchSettings();
-      }
-    }
-  };
+  const handleViewStateChange = useCallback(patch => updateViewState(viewKey, patch), [updateViewState, viewKey]);
 
-  // Delete all locally stored application data from Settings.
-  const handleDeleteAllData = async () => {
-    const res = await fetch('/api/settings/delete-all-data', { method: 'POST' });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      throw new Error(data.error || 'Delete all data failed');
-    }
-
-    setSelectedRequest(null);
-    dashboardCategoryIdRef.current = 'all';
-    setDashboardCategoryId('all');
-    setStatsData({});
-    localStorage.removeItem('credentialsSetupPromptShown');
-    await Promise.all([fetchRequests(), fetchStats('all'), fetchSettings(), fetchCatalogs()]);
-  };
-
-  // Beatmap link migration
-  const handleImportBeatmapLinks = async (linksText, categories) => {
-    try {
-      const res = await fetch('/api/migration/import-beatmap-links', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ linksText, categories })
-      });
-
-      const data = await res.json();
-      if (res.ok) {
-        await Promise.all([fetchRequests(), fetchStats()]);
-        showToast(data.message, data.apiFailures ? 'warning' : 'success');
-        return true;
-      } else {
-        showToast(`Beatmap Link Import Failed: ${data.error}`, 'error');
-        return false;
-      }
-    } catch (e) {
-      console.error(e);
-      showToast('Beatmap Link Import Network Error.', 'error');
-      return false;
-    }
-  };
-
-  // JSON Restore Backup
-  const handleImportJson = async (jsonFile) => {
-    try {
-      const res = await fetch('/api/migration/import-json', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: jsonFile
-      });
-
-      const data = await res.json();
-      if (res.ok) {
-        showToast('Backup database successfully restored!', 'success');
-        dashboardCategoryIdRef.current = 'all';
-        setDashboardCategoryId('all');
-        setStatsData({});
-        await fetchData();
-        return true;
-      } else {
-        showToast(`Database Restore Failed: ${data.error}`, 'error');
-        return false;
-      }
-    } catch (e) {
-      console.error(e);
-      showToast('Database Restore Network Error.', 'error');
-      return false;
-    }
-  };
-
-  const handleSpreadsheetImported = async () => {
-    await Promise.all([fetchRequests(), fetchStats(), fetchCatalogs()]);
-  };
-
-  // Render correct main view
-  const renderMainView = () => {
-    if (activeTab === 'dashboard') {
+  const renderView = () => {
+    if (activeView === 'overview') {
       return (
         <Dashboard
-          statsData={statsData}
-          statsLoading={statsLoading}
-          requestsList={requestsList}
-          onOpenRequest={handleOpenRequest}
-          connectedAccount={settingsData.connectedAccount}
-          categoryDefinitions={categoryDefinitions}
-          selectedCategoryId={dashboardCategoryId}
-          onCategoryChange={handleDashboardCategoryChange}
+          stats={data.stats}
+          statsLoading={data.statsLoading}
+          requests={requests}
+          requestsLoaded={data.requestsLoaded}
+          categories={categories}
+          selectedCategoryId={data.statsCategoryId}
+          onCategoryChange={data.setStatsCategoryId}
+          onOpenRequest={openRequest}
+          onShowRequests={showRequests}
+          onAddRequest={() => openAddRequest()}
+          onImport={openImport}
+          onOpenSetup={() => setIsSetupOpen(true)}
+          isConfigured={isConfigured}
         />
       );
     }
-
-    if (activeTab === 'settings') {
+    if (activeView === 'settings') {
       return (
         <SettingsPanel
-          settingsData={settingsData}
-          theme={theme}
-          onThemeChange={toggleTheme}
-          showFirstLaunchSetup={showFirstLaunchSetup}
-          onDismissFirstLaunchSetup={() => setShowFirstLaunchSetup(false)}
-          onSaveCredentials={handleSaveCredentials}
-           onDisconnect={handleDisconnect}
-          onDeleteAllData={handleDeleteAllData}
-          onImportJson={handleImportJson}
-          onSpreadsheetImported={handleSpreadsheetImported}
-          categoryDefinitions={categoryDefinitions}
-          onCategoriesChanged={fetchCatalogs}
-           onNotify={showToast}
-           onRequestConfirmation={requestConfirmation}
+          key={settingsSection || 'settings'}
+          settings={settings}
+          preferences={preferences}
+          setPreference={setPreference}
+          actions={actions}
+          isDateRefreshRunning={actions.isDateRefreshRunning}
+          initialSection={settingsSection}
+          onSettingsChanged={data.refreshSettings}
+          onCategoriesChanged={data.refreshCatalogs}
+          onDataReplaced={onDataReplaced}
+          onOpenImport={openImport}
+          onOpenSetup={() => setIsSetupOpen(true)}
+          onOpenShortcuts={() => setIsShortcutsOpen(true)}
+          onNotify={showToast}
+          onRequestConfirmation={requestConfirmation}
         />
       );
     }
-
-    if (activeTab.startsWith('requests-')) {
-      const activeCategoryKey = activeTab.replace('requests-', '');
-      const activeCategoryDefinition = activeCategoryKey === 'all'
-        ? null
-        : categoryDefinitions.find(category => category.id === Number(activeCategoryKey));
-      const activeCategory = activeCategoryDefinition?.name || 'All';
-      return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', padding: '24px 0 0 0' }}>
-
-          {/* Add and multi-import actions */}
-          <div style={{ padding: '0 24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsQuickAddOpen((current) => !current);
-                  setIsMultipleImportOpen(false);
-                }}
-                className="btn-primary"
-                style={{ width: 'fit-content', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
-              >
-                <Plus size={18} style={{ color: '#fff' }} />
-                <span style={{ fontWeight: '600', lineHeight: '1' }}>{isQuickAddOpen ? 'Close Add Request' : 'Add Request'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsMultipleImportOpen((current) => !current);
-                  setIsQuickAddOpen(false);
-                }}
-                className="btn-secondary"
-                style={{ width: 'fit-content', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
-              >
-                <Plus size={18} />
-                <span style={{ fontWeight: '600', lineHeight: '1' }}>{isMultipleImportOpen ? 'Close Add Multiple Requests' : 'Add Multiple Requests'}</span>
-              </button>
-            </div>
-
-            {isQuickAddOpen && (
-              <QuickAdd
-                onAddRequest={handleAddRequest}
-                duplicateError={duplicateError}
-                onResolveDuplicate={handleResolveDuplicate}
-                onCancelDuplicate={() => setDuplicateError(null)}
-                isOpen={isQuickAddOpen}
-                onToggle={() => setIsQuickAddOpen(false)}
-                defaultCategory={activeCategory}
-                onNotify={showToast}
-                categoryDefinitions={categoryDefinitions}
-                tagSuggestions={tagCatalog}
-                connectedAccount={settingsData.connectedAccount}
-              />
-            )}
-            {isMultipleImportOpen && (
-              <MultipleRequestsImport
-                onImportBeatmapLinks={handleImportBeatmapLinks}
-                onNotify={showToast}
-                onToggle={() => setIsMultipleImportOpen(false)}
-                defaultCategory={activeCategory}
-                categoryDefinitions={categoryDefinitions}
-              />
-            )}
-          </div>
-
-          {/* Requests List */}
-          <RequestsTable
-            requestsList={requestsList}
-            onOpenRequest={handleOpenRequest}
-            onDeleteRequest={handleDeleteRequest}
-            onUpdateRequest={handleUpdateRequest}
-            onForceRefreshBeatmap={handleForceRefreshBeatmap}
-            refreshingRequestId={refreshingRequestId}
-            onBulkUpdateStatus={handleBulkUpdateStatus}
-            isBulkStatusUpdating={isBulkStatusUpdating}
-            onBulkRefreshDates={handleBulkRefreshDates}
-            isBulkDateRefreshing={isBulkDateRefreshing}
-            onBulkUpdatePriority={handleBulkUpdatePriority}
-            onBulkUpdateCategory={handleBulkUpdateCategory}
-            onBulkAddTags={handleBulkAddTags}
-             onBulkDelete={handleBulkDelete}
-             onRequestConfirmation={requestConfirmation}
-            activeCategory={activeCategory}
-            activeCategoryDefinition={activeCategoryDefinition}
-            categoryDefinitions={categoryDefinitions}
-            tagSuggestions={tagCatalog}
-            sortBy={requestSort.sortBy}
-            sortOrder={requestSort.sortOrder}
-            onSortChange={(sortBy, sortOrder) => setRequestSort({ sortBy, sortOrder })}
-          />
-        </div>
-      );
-    }
-
-    return null;
+    return (
+      <RequestsTable
+        key={viewKey}
+        title={activeCategory?.name || 'All requests'}
+        categoryDefinition={activeCategory}
+        requests={viewRequests}
+        totalRequestCount={requests.length}
+        categories={categories}
+        tagSuggestions={tags}
+        viewState={viewStates[viewKey]}
+        onViewStateChange={handleViewStateChange}
+        columnsPreference={preferences.columns?.[viewKey]}
+        onColumnsPreferenceChange={setColumnsPreference}
+        density={preferences.density}
+        onDensityChange={density => setPreference('density', density)}
+        actions={actions}
+        isDateRefreshRunning={actions.isDateRefreshRunning}
+        onOpenRequest={openRequest}
+        onAddRequest={() => openAddRequest()}
+        onImport={openImport}
+        searchInputRef={searchInputRef}
+        onRequestConfirmation={requestConfirmation}
+      />
+    );
   };
 
   return (
     <div className="app-shell">
       <TopBar
-        activeTab={activeTab}
-        connectedAccount={settingsData.connectedAccount}
-        isSidebarOpen={isSidebarOpen}
-        onToggleSidebar={() => setIsSidebarOpen(open => !open)}
-        categoryDefinitions={categoryDefinitions}
+        sectionName={sectionName}
+        onToggleSidebar={() => setPreference('sidebarCollapsed', collapsed => !collapsed)}
+        isSidebarCollapsed={preferences.sidebarCollapsed}
+        isConfigured={isConfigured}
+        metadataSyncStatus={metadataSyncStatus}
+        onOpenSettings={(section = 'osu') => navigate('settings', section)}
       />
-      <div className="app-container">
-
-        {/* LEFT SIDEBAR PANEL */}
+      <div className="app-body">
         <Sidebar
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-          connectedAccount={settingsData.connectedAccount}
-          onDisconnect={handleDisconnect}
-          isSidebarOpen={isSidebarOpen}
-          categoryDefinitions={categoryDefinitions}
+          activeView={activeView}
+          onNavigate={navigate}
+          categories={categories}
+          activeCounts={activeCounts}
+          connectedAccount={connectedAccount}
+          isConfigured={isConfigured}
+          isCollapsed={preferences.sidebarCollapsed}
         />
-
-        {/* RIGHT MAIN LAYOUT */}
-        <main className="main-content">
-          <div className="main-view">
-            {renderMainView()}
-          </div>
+        <main className="main">
+          {data.requestsError && !data.requestsLoaded ? (
+            <div className="view"><div className="view-inner"><div className="panel"><div className="empty-state">
+              <h3>Couldn’t load your requests</h3>
+              <p>{data.requestsError.message}</p>
+              <div className="view-actions"><button type="button" className="btn btn-primary" onClick={() => void data.refreshAll()}>Try again</button></div>
+            </div></div></div></div>
+          ) : renderView()}
         </main>
       </div>
 
-      {/* REQUEST DETAIL MODAL (Overlay) */}
-      {selectedRequest && (
-        <RequestDetailModal
-          request={selectedRequest}
-          onClose={() => setSelectedRequest(null)}
-          onUpdateRequest={handleUpdateRequest}
-          onLinkManualRequest={handleLinkManualRequest}
-          onChangeMapset={handleChangeMapset}
-          onForceRefreshBeatmap={handleDetailMetadataRefresh}
-          connectedAccount={settingsData.connectedAccount}
+      {drawerRequest && (
+        <RequestDrawer
+          key={drawerRequest.id}
+          request={drawerRequest}
+          categories={categories}
+          tagSuggestions={tags}
+          connectedAccount={connectedAccount}
+          actions={actions}
+          onClose={() => setOpenRequestId(null)}
+          onRequestConfirmation={requestConfirmation}
           onNotify={showToast}
-          categoryDefinitions={categoryDefinitions}
-          tagSuggestions={tagCatalog}
         />
       )}
 
-      <Toast
-        status={osuApiStatus}
-        metadataSyncStatus={metadataSyncStatus}
-        notification={toastNotice}
-        onDismiss={dismissToast}
-      />
+      {addDialog && (
+        <AddRequestDialog
+          initialLink={addDialog.initialLink}
+          categories={categories}
+          tagSuggestions={tags}
+          defaultCategoryId={addDialog.categoryId}
+          lastCategories={preferences.lastCategories}
+          connectedAccount={connectedAccount}
+          isConfigured={isConfigured}
+          onRememberCategories={selection => setPreference('lastCategories', selection)}
+          onCreate={actions.createRequest}
+          onAddToExisting={actions.addCategoriesToExisting}
+          onOpenRequest={openRequest}
+          onClose={() => setAddDialog(null)}
+          onNotify={showToast}
+        />
+      )}
 
-      <ConfirmModal
-        isOpen={Boolean(confirmationRequest)}
-        {...confirmationRequest}
-        onConfirm={() => finishConfirmation(true)}
-        onCancel={() => finishConfirmation(false)}
-      />
+      {importDialog && (
+        <ImportDialog
+          categories={categories}
+          defaultCategoryId={importDialog.categoryId}
+          onImportLinks={actions.importBeatmapLinks}
+          onSpreadsheetImported={() => Promise.all([data.refreshRequests(), data.refreshStats(), data.refreshCatalogs()])}
+          onOpenBackupSettings={() => navigate('settings', 'data')}
+          onClose={() => setImportDialog(null)}
+          onNotify={showToast}
+        />
+      )}
 
+      {isSetupOpen && (
+        <SetupDialog
+          isConfigured={isConfigured}
+          connectedAccount={connectedAccount}
+          onSettingsChanged={data.refreshSettings}
+          onFinished={() => { setPreference('setupDismissed', true); setIsSetupOpen(false); }}
+          onSkip={() => {
+            setPreference('setupDismissed', true);
+            setIsSetupOpen(false);
+            if (!isConfigured) showToast('You can connect osu! any time from Settings.', 'info', { duration: 4000 });
+          }}
+          onAddRequest={() => openAddRequest()}
+          onImport={openImport}
+          onRestoreBackup={() => navigate('settings', 'data')}
+        />
+      )}
+
+      {isShortcutsOpen && <ShortcutsDialog onClose={() => setIsShortcutsOpen(false)} />}
+
+      {confirmation && (
+        <ConfirmModal
+          {...confirmation}
+          onConfirm={() => finishConfirmation(true)}
+          onCancel={() => finishConfirmation(false)}
+        />
+      )}
+
+      {isDraggingLink && <div className="drop-overlay">Drop an osu! beatmap link to add it</div>}
+
+      <ToastStack toasts={toasts.toasts} onDismiss={toasts.dismissToast} />
     </div>
   );
 }
+

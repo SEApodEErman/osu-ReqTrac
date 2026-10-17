@@ -1,3 +1,5 @@
+import { parseAppDate } from './dates.js';
+
 const TEXT_FILTERS = new Set(['creator', 'requester', 'artist', 'title', 'difficulty', 'tag', 'tags', 'category', 'type', 'status', 'request_status', 'beatmap_status', 'mapstatus', 'priority', 'mode']);
 const NUMBER_FILTERS = new Set(['stars', 'star', 'keys', 'key', 'id', 'beatmapset', 'ar', 'cs', 'od', 'hp', 'bpm', 'length', 'drain']);
 const DATE_FILTERS = new Set(['added', 'deadline']);
@@ -79,8 +81,10 @@ function matchesFilter(request, filter) {
     return operator === '=' && values.some(item => includes(item, value));
   }
   if (DATE_FILTERS.has(key)) {
-    const actual = Date.parse(request[key === 'added' ? 'added_date' : 'deadline']);
-    const expected = Date.parse(value);
+    // Compare calendar days so `added=2026-01-01` matches any time that day.
+    const toDay = date => (date ? new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime() : NaN);
+    const actual = toDay(parseAppDate(request[key === 'added' ? 'added_date' : 'deadline']));
+    const expected = toDay(parseAppDate(value));
     return matchesComparison(actual, operator, expected);
   }
   if (key === 'id' || key === 'beatmapset') return matchesComparison(Number(request.beatmapset_id), operator, Number(value));

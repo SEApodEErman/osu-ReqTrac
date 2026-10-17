@@ -1,15 +1,16 @@
 export const REQUEST_COLUMNS = [
   { key: 'cover', label: 'Cover' },
-  { key: 'song', label: 'Song / Artist', required: true },
+  { key: 'song', label: 'Beatmap', required: true },
+  { key: 'requester', label: 'Requester' },
   { key: 'tags', label: 'Tags' },
-  { key: 'modes', label: 'Gamemode' },
-  { key: 'beatmap_status', label: 'Beatmap Status' },
-  { key: 'request_status', label: 'Request Status' },
+  { key: 'modes', label: 'Your difficulties' },
+  { key: 'beatmap_status', label: 'Map status' },
+  { key: 'request_status', label: 'Status' },
   { key: 'priority', label: 'Priority' },
   { key: 'deadline', label: 'Deadline' },
   { key: 'notes', label: 'Notes' },
   { key: 'added', label: 'Added' },
-  { key: 'actions', label: 'Actions' },
+  { key: 'actions', label: 'Quick actions' },
 ];
 
 export const DEFAULT_COLUMN_ORDER = REQUEST_COLUMNS.map(column => column.key);
@@ -35,5 +36,5 @@ export function moveColumn(order, sourceKey, targetKey) {
 }
 
 export function requestColumnClassName(key) {
-  return `request-col-${key.replaceAll('_', '-')}`;
+  return `col-${key}`;
 }

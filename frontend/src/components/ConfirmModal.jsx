@@ -1,94 +1,59 @@
-import React, { useEffect, useRef } from 'react';
-import { AlertTriangle, X } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import Dialog from './ui/Dialog';
 
+// tone: 'danger' (destructive, red confirm) or 'primary'.
+// requireText: the user must type this exact text to confirm.
 export default function ConfirmModal({
-  isOpen,
   title,
   message,
   confirmLabel = 'Confirm',
   cancelLabel = 'Cancel',
   tone = 'danger',
+  requireText = null,
   onConfirm,
   onCancel,
 }) {
-  const dialogRef = useRef(null);
-  const confirmButtonRef = useRef(null);
-  const previousFocusRef = useRef(null);
-
-  useEffect(() => {
-    if (!isOpen) return undefined;
-
-    previousFocusRef.current = document.activeElement;
-    const focusConfirmButton = window.setTimeout(() => confirmButtonRef.current?.focus(), 0);
-
-    const handleKeyDown = (event) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onCancel();
-        return;
-      }
-
-      if (event.key !== 'Tab' || !dialogRef.current) return;
-
-      const focusableElements = dialogRef.current.querySelectorAll(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])'
-      );
-      if (focusableElements.length === 0) return;
-
-      const firstElement = focusableElements[0];
-      const lastElement = focusableElements[focusableElements.length - 1];
-      if (event.shiftKey && document.activeElement === firstElement) {
-        event.preventDefault();
-        lastElement.focus();
-      } else if (!event.shiftKey && document.activeElement === lastElement) {
-        event.preventDefault();
-        firstElement.focus();
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.clearTimeout(focusConfirmButton);
-      document.removeEventListener('keydown', handleKeyDown);
-      if (previousFocusRef.current instanceof HTMLElement) previousFocusRef.current.focus();
-    };
-  }, [isOpen, onCancel]);
-
-  if (!isOpen) return null;
+  const [typed, setTyped] = useState('');
+  const confirmRef = useRef(null);
+  const inputRef = useRef(null);
+  const canConfirm = !requireText || typed === requireText;
 
   return (
-    <div
-      className="app-confirmation-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onCancel();
-      }}
-    >
-      <section
-        ref={dialogRef}
-        className={`app-confirmation-dialog app-confirmation-dialog-${tone}`}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="app-confirmation-title"
-        aria-describedby="app-confirmation-message"
-      >
-        <div className="app-confirmation-header">
-          <div className="app-confirmation-icon" aria-hidden="true">
-            <AlertTriangle size={20} />
-          </div>
-          <h2 id="app-confirmation-title">{title}</h2>
-          <button type="button" className="app-confirmation-close" onClick={onCancel} aria-label="Close confirmation" title="Close">
-            <X size={17} />
-          </button>
-        </div>
-        <p id="app-confirmation-message" className="app-confirmation-message">{message}</p>
-        <div className="app-confirmation-actions">
-          <button type="button" className="btn-secondary" onClick={onCancel}>{cancelLabel}</button>
-          <button ref={confirmButtonRef} type="button" className="btn-secondary app-confirmation-confirm" onClick={onConfirm}>
+    <Dialog
+      title={title}
+      size="sm"
+      onClose={onCancel}
+      initialFocusRef={requireText ? inputRef : confirmRef}
+      footer={(
+        <>
+          <button type="button" className="btn btn-secondary" onClick={onCancel}>{cancelLabel}</button>
+          <button
+            ref={confirmRef}
+            type="button"
+            className={`btn ${tone === 'danger' ? 'btn-danger-solid' : 'btn-primary'}`}
+            onClick={onConfirm}
+            disabled={!canConfirm}
+          >
             {confirmLabel}
           </button>
-        </div>
-      </section>
-    </div>
+        </>
+      )}
+    >
+      <div className="muted" style={{ fontSize: 'var(--text-md)', lineHeight: 1.55 }}>{message}</div>
+      {requireText && (
+        <form className="field" onSubmit={(event) => { event.preventDefault(); if (canConfirm) onConfirm(); }}>
+          <label className="field-label" htmlFor="confirm-text">Type <code>{requireText}</code> to confirm</label>
+          <input
+            id="confirm-text"
+            ref={inputRef}
+            className="input"
+            value={typed}
+            onChange={event => setTyped(event.target.value)}
+            autoComplete="off"
+            spellCheck="false"
+          />
+        </form>
+      )}
+    </Dialog>
   );
 }

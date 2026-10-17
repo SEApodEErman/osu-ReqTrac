@@ -1,110 +1,169 @@
-import { useCallback, useEffect } from 'react';
-import { fetchWithTimeout } from '../api/client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api } from '../api/client';
 
-export function useAppData({
-  dashboardCategoryIdRef,
-  setActiveTab,
-  setCategoryDefinitions,
-  setDashboardCategoryId,
-  setRequestsList,
-  setSelectedRequest,
-  setSettingsData,
-  setShowFirstLaunchSetup,
-  setStatsData,
-  setStatsLoading,
-  setTagCatalog,
-  statsRequestIdRef,
-}) {
-  const fetchRequests = useCallback(async () => {
+// Owns the data every screen reads. Refreshes are coalesced: while one
+// request-list fetch is running, further refresh calls share it and trigger a
+// single follow-up fetch instead of stacking up.
+export function useAppData({ onSettingsLoaded } = {}) {
+  const [requests, setRequests] = useState([]);
+  const [requestsLoaded, setRequestsLoaded] = useState(false);
+  const [requestsError, setRequestsError] = useState(null);
+  const [stats, setStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [statsCategoryId, setStatsCategoryIdState] = useState('all');
+  const [settings, setSettings] = useState(null);
+  const [categories, setCategories] = useState([]);
+  const [tags, setTags] = useState([]);
+
+  const requestsInflightRef = useRef(null);
+  const requestsAgainRef = useRef(false);
+  const statsCategoryRef = useRef('all');
+  const statsRequestRef = useRef(0);
+  const onSettingsLoadedRef = useRef(onSettingsLoaded);
+  onSettingsLoadedRef.current = onSettingsLoaded;
+
+  const refreshRequests = useCallback(() => {
+    if (requestsInflightRef.current) {
+      requestsAgainRef.current = true;
+      return requestsInflightRef.current;
+    }
+    const run = async () => {
+      do {
+        requestsAgainRef.current = false;
+        try {
+          const data = await api.get('/api/requests');
+          setRequests(Array.isArray(data) ? data : []);
+          setRequestsLoaded(true);
+          setRequestsError(null);
+        } catch (error) {
+          console.error('Failed to load requests:', error);
+          setRequestsError(error);
+        }
+      } while (requestsAgainRef.current);
+    };
+    requestsInflightRef.current = run().finally(() => {
+      requestsInflightRef.current = null;
+    });
+    return requestsInflightRef.current;
+  }, []);
+
+  // Re-read only the given rows (merging them into the list) instead of the
+  // whole library. Rows the server no longer returns were deleted.
+  const refreshRequestsById = useCallback(async (ids) => {
+    const wanted = [...new Set((ids || []).map(Number).filter(Number.isSafeInteger))];
+    if (wanted.length === 0) return;
+    if (wanted.length > 400 || requestsInflightRef.current) {
+      await refreshRequests();
+      return;
+    }
     try {
-      const res = await fetchWithTimeout('/api/requests');
-      if (!res.ok) return;
-      const data = await res.json();
-      setRequestsList(data);
-      setSelectedRequest(current => {
-        if (!current) return current;
-        const updated = data.find(request => request.id === current.id);
-        return updated ? { ...current, ...updated, difficulties: current.difficulties } : current;
+      const rows = await api.get(`/api/requests?ids=${wanted.join(',')}`);
+      const byId = new Map((rows || []).map(row => [row.id, row]));
+      const wantedSet = new Set(wanted);
+      setRequests((current) => {
+        const present = new Set();
+        const merged = [];
+        for (const request of current) {
+          if (!wantedSet.has(request.id)) {
+            merged.push(request);
+          } else if (byId.has(request.id)) {
+            present.add(request.id);
+            merged.push(byId.get(request.id));
+          }
+        }
+        const added = [...byId.values()].filter(row => !present.has(row.id));
+        return added.length ? [...added, ...merged] : merged;
       });
     } catch (error) {
-      console.error('Error fetching requests list:', error);
+      console.error('Failed to refresh requests:', error);
+      await refreshRequests();
     }
-  }, [setRequestsList, setSelectedRequest]);
+  }, [refreshRequests]);
 
-  const fetchStats = useCallback(async (categoryId = dashboardCategoryIdRef.current) => {
-    const normalizedCategoryId = categoryId === 'all' ? 'all' : String(categoryId);
-    const requestId = ++statsRequestIdRef.current;
-    const endpoint = normalizedCategoryId === 'all'
-      ? '/api/stats'
-      : `/api/stats?categoryId=${encodeURIComponent(normalizedCategoryId)}`;
+  const removeRequestsLocally = useCallback((ids) => {
+    const idSet = new Set(ids);
+    setRequests(current => current.filter(request => !idSet.has(request.id)));
+  }, []);
+
+  const refreshStats = useCallback(async (categoryId = statsCategoryRef.current) => {
+    const requestId = ++statsRequestRef.current;
+    const query = categoryId === 'all' ? '' : `?categoryId=${encodeURIComponent(categoryId)}`;
     setStatsLoading(true);
     try {
-      const res = await fetchWithTimeout(endpoint);
-      if (!res.ok) throw new Error(`Statistics request failed (${res.status}).`);
-      const data = await res.json();
-      if (requestId === statsRequestIdRef.current) setStatsData(data);
+      const data = await api.get(`/api/stats${query}`);
+      if (requestId === statsRequestRef.current) setStats(data);
     } catch (error) {
-      console.error('Error fetching stats:', error);
+      console.error('Failed to load statistics:', error);
     } finally {
-      if (requestId === statsRequestIdRef.current) setStatsLoading(false);
+      if (requestId === statsRequestRef.current) setStatsLoading(false);
     }
-  }, [dashboardCategoryIdRef, setStatsData, setStatsLoading, statsRequestIdRef]);
+  }, []);
 
-  const handleDashboardCategoryChange = useCallback((categoryId) => {
-    const normalizedCategoryId = categoryId === 'all' ? 'all' : String(categoryId);
-    dashboardCategoryIdRef.current = normalizedCategoryId;
-    setDashboardCategoryId(normalizedCategoryId);
-    setStatsData({});
-    void fetchStats(normalizedCategoryId);
-  }, [dashboardCategoryIdRef, fetchStats, setDashboardCategoryId, setStatsData]);
+  const setStatsCategoryId = useCallback((categoryId) => {
+    const normalized = categoryId === 'all' ? 'all' : String(categoryId);
+    statsCategoryRef.current = normalized;
+    setStatsCategoryIdState(normalized);
+    void refreshStats(normalized);
+  }, [refreshStats]);
 
-  const fetchCatalogs = useCallback(async () => {
+  const refreshSettings = useCallback(async () => {
     try {
-      const [categoriesResponse, tagsResponse] = await Promise.all([
-        fetchWithTimeout('/api/categories'),
-        fetchWithTimeout('/api/tags'),
-      ]);
-      if (categoriesResponse.ok) setCategoryDefinitions(await categoriesResponse.json());
-      if (tagsResponse.ok) setTagCatalog(await tagsResponse.json());
+      const data = await api.get('/api/settings');
+      setSettings(data);
+      onSettingsLoadedRef.current?.(data);
+      return data;
     } catch (error) {
-      console.error('Failed to load categories or tags:', error);
+      console.error('Failed to load settings:', error);
+      return null;
     }
-  }, [setCategoryDefinitions, setTagCatalog]);
+  }, []);
 
-  const fetchSettings = useCallback(async () => {
-    try {
-      const res = await fetchWithTimeout('/api/settings');
-      if (!res.ok) return;
-      const data = await res.json();
-      setSettingsData(data);
-      if (!data.isConfigured && !localStorage.getItem('credentialsSetupPromptShown')) {
-        localStorage.setItem('credentialsSetupPromptShown', '1');
-        setActiveTab('settings');
-        setShowFirstLaunchSetup(true);
-      }
-    } catch (error) {
-      console.error('Error fetching settings:', error);
-    }
-  }, [setActiveTab, setSettingsData, setShowFirstLaunchSetup]);
+  const refreshCatalogs = useCallback(async () => {
+    const [categoriesResult, tagsResult] = await Promise.allSettled([api.get('/api/categories'), api.get('/api/tags')]);
+    if (categoriesResult.status === 'fulfilled') setCategories(categoriesResult.value || []);
+    if (tagsResult.status === 'fulfilled') setTags(tagsResult.value || []);
+  }, []);
 
-  const fetchData = useCallback(async () => {
-    try {
-      await Promise.all([fetchRequests(), fetchStats(), fetchSettings(), fetchCatalogs()]);
-    } catch (error) {
-      console.error('Failed to load initial data:', error);
-    }
-  }, [fetchCatalogs, fetchRequests, fetchSettings, fetchStats]);
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refreshRequests(), refreshStats(), refreshSettings(), refreshCatalogs()]);
+  }, [refreshCatalogs, refreshRequests, refreshSettings, refreshStats]);
+
+  // Apply a change to rows immediately; the caller refreshes from the server after.
+  const patchRequestsLocally = useCallback((ids, patch) => {
+    const idSet = new Set(ids);
+    setRequests(current => current.map(request => (idSet.has(request.id)
+      ? { ...request, ...(typeof patch === 'function' ? patch(request) : patch) }
+      : request)));
+  }, []);
 
   useEffect(() => {
-    void fetchData();
-  }, [fetchData]);
+    void refreshAll();
+  }, [refreshAll]);
+
+  // Drop a dashboard category filter that no longer exists.
+  useEffect(() => {
+    if (statsCategoryId === 'all' || categories.length === 0) return;
+    if (!categories.some(category => String(category.id) === statsCategoryId)) setStatsCategoryId('all');
+  }, [categories, setStatsCategoryId, statsCategoryId]);
 
   return {
-    fetchCatalogs,
-    fetchData,
-    fetchRequests,
-    fetchSettings,
-    fetchStats,
-    handleDashboardCategoryChange,
+    requests,
+    requestsLoaded,
+    requestsError,
+    stats,
+    statsLoading,
+    statsCategoryId,
+    settings,
+    categories,
+    tags,
+    setStatsCategoryId,
+    refreshRequests,
+    refreshRequestsById,
+    removeRequestsLocally,
+    refreshStats,
+    refreshSettings,
+    refreshCatalogs,
+    refreshAll,
+    patchRequestsLocally,
   };
 }
