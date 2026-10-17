@@ -847,6 +847,10 @@ input[type='date']::-webkit-calendar-picker-indicator {
   -webkit-app-region: no-drag;
 }
 
+.app-topbar.is-mac {
+  padding-left: 78px;
+}
+
 .app-topbar-title {
   display: flex;
   align-items: center;

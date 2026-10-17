@@ -169,7 +169,11 @@ async function createWindow() {
     ...(savedState?.bounds || {}),
     minWidth: 1000,
     minHeight: 700,
-    frame: false,
+    // macOS keeps its native traffic lights inside the app's own title bar;
+    // elsewhere the renderer draws the window controls.
+    ...(process.platform === 'darwin'
+      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 12 } }
+      : { frame: false }),
     backgroundColor: APP_BACKGROUND,
     webPreferences: {
       nodeIntegration: false,

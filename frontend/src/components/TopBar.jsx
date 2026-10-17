@@ -129,11 +129,13 @@ function ActivityIndicator({ isConfigured, metadataSyncStatus, onOpenSettings })
 }
 
 export default function TopBar({ sectionName, onToggleSidebar, isSidebarCollapsed, isConfigured, metadataSyncStatus, onOpenSettings }) {
-  const controls = window.electronAPI?.windowControls;
-  const toggleMaximize = () => void controls?.toggleMaximize();
+  const isMac = window.electronAPI?.platform === 'darwin';
+  // macOS shows native traffic lights, so only other platforms get drawn controls.
+  const controls = isMac ? null : window.electronAPI?.windowControls;
+  const toggleMaximize = () => void window.electronAPI?.windowControls?.toggleMaximize();
 
   return (
-    <header className="app-topbar">
+    <header className={`app-topbar${isMac ? ' is-mac' : ''}`}>
       <button
         type="button"
         className="btn btn-ghost btn-icon btn-sm no-drag"
