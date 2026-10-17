@@ -6,7 +6,7 @@ import { StarBadge } from './ui/Badges';
 import { api } from '../api/client';
 import { beatmapsetIdFromLink, isOsuBeatmapLink } from '../utils/osuLinks';
 import { todayInputValue } from '../utils/dates';
-import { GAMEMODES, PRIORITIES, priorityClass } from '../utils/requestConstants';
+import { GAMEMODES, PRIORITIES, formatMapStatus, priorityClass } from '../utils/requestConstants';
 import {
   addUploadedGuestDifficulty,
   createManualGuestDifficulty,
@@ -304,7 +304,7 @@ export default function AddRequestDialog({
               <div className="beatmap-preview-title">{lookup.data.title}</div>
               <div className="beatmap-preview-meta">{lookup.data.artist} · mapped by {lookup.data.creatorUsername || lookup.data.creator}</div>
               <div className="beatmap-preview-diffs">
-                {lookup.data.status && <span className={`pill map-${String(lookup.data.status).toLowerCase()}`}>{lookup.data.status}</span>}
+                {lookup.data.status && <span className={`pill map-${String(lookup.data.status).toLowerCase()}`}>{formatMapStatus(lookup.data.status)}</span>}
                 <span className="pill">{difficulties.length} difficult{difficulties.length === 1 ? 'y' : 'ies'}</span>
                 {starValues.length > 0 && <StarBadge stars={Math.max(...starValues)} title="Hardest difficulty" />}
               </div>

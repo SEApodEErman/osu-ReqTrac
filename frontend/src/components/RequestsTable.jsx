@@ -46,10 +46,10 @@ export const INTERNAL_DRAG_TYPE = 'application/x-reqtrac-internal';
 // Mirrors the column widths in index.css; the beatmap column gets at least
 // SONG_MIN_WIDTH and any extra space.
 const COLUMN_WIDTHS = {
-  select: 40, cover: 72, requester: 130, tags: 150, modes: 112, beatmap_status: 108,
-  request_status: 128, priority: 100, deadline: 120, notes: 170, added: 100, actions: 104,
+  select: 40, cover: 68, requester: 130, tags: 150, modes: 112, beatmap_status: 104,
+  request_status: 124, priority: 96, deadline: 116, notes: 170, added: 100, actions: 100,
 };
-const SONG_MIN_WIDTH = 280;
+const SONG_MIN_WIDTH = 240;
 const OVERSCAN = 8;
 const DEFAULT_VIEW = { search: '', status: '', priority: '', tag: '', due: '', sync: '', sortBy: 'added_date', sortOrder: 'desc' };
 const DESCENDING_FIRST = new Set(['added_date']);

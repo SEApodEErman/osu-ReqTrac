@@ -42,11 +42,18 @@ export function isMetadataPending(request) {
   return request?.metadata_sync_status === 'Pending' || request?.metadata_sync_status === 'Processing';
 }
 
+const MAP_STATUS_LABELS = { wip: 'WIP', graveyard: 'Graveyard', pending: 'Pending', qualified: 'Qualified', approved: 'Approved', ranked: 'Ranked', loved: 'Loved' };
+
+export function formatMapStatus(status) {
+  const text = String(status || 'pending');
+  return MAP_STATUS_LABELS[text.toLowerCase()] || text;
+}
+
 export function beatmapStatusLabel(request) {
   if (!request?.is_osu_link) return 'Manual';
   if (isMetadataPending(request)) return 'Syncing';
   if (request.metadata_sync_status === 'Failed') return 'Sync failed';
-  return request.ranked_status || 'Pending';
+  return formatMapStatus(request.ranked_status);
 }
 
 export function beatmapStatusClass(request) {

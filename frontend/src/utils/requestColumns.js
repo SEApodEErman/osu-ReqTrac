@@ -17,7 +17,9 @@ export const DEFAULT_COLUMN_ORDER = REQUEST_COLUMNS.map(column => column.key);
 
 export function defaultVisibleColumns(category) {
   return new Set([
-    'cover', 'beatmap_status', 'request_status', 'priority', 'deadline', 'notes', 'added', 'actions',
+    // Notes are read in the request drawer; leaving them out by default keeps
+    // the beatmap column readable in a 1280px window.
+    'cover', 'beatmap_status', 'request_status', 'priority', 'deadline', 'added', 'actions',
     ...(category?.view_type === 'tagged' ? ['tags'] : []),
     ...(category?.view_type === 'guest_difficulties' || category?.system_key === 'guest_difficulties' ? ['modes'] : []),
   ]);

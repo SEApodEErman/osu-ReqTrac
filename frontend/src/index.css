@@ -2261,18 +2261,18 @@ button.kpi:hover {
 /* Every column but the beatmap one has a fixed width; the table's min-width
    (set from these in RequestsTable) keeps the beatmap column readable and
    scrolls sideways instead of squeezing it. Keep both in sync. */
-.col-cover { width: 72px; }
+.col-cover { width: 68px; }
 .col-song { width: auto; }
 .col-requester { width: 130px; }
 .col-tags { width: 150px; }
 .col-modes { width: 112px; }
-.col-beatmap_status { width: 108px; }
-.col-request_status { width: 128px; }
-.col-priority { width: 100px; }
-.col-deadline { width: 120px; }
+.col-beatmap_status { width: 104px; }
+.col-request_status { width: 124px; }
+.col-priority { width: 96px; }
+.col-deadline { width: 116px; }
 .col-notes { width: 170px; }
 .col-added { width: 100px; }
-.col-actions { width: 104px; }
+.col-actions { width: 100px; }
 
 .is-compact .col-cover { width: 60px; }
 
