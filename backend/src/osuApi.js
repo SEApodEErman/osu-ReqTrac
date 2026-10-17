@@ -382,9 +382,23 @@ function finishApiJob(id) {
   apiJobs.delete(id);
 }
 
-// Fetch beatmapset details
-async function fetchBeatmapset(beatmapsetId) {
-  return apiFetch(`beatmapsets/${beatmapsetId}`);
+// Fetch beatmapset details. Every response is remembered briefly so a flow
+// that looks a set up and then saves it (add request) only calls osu! once;
+// callers opt into reuse with maxAgeMs, and force refreshes never pass it.
+const RECENT_BEATMAPSET_LIMIT = 50;
+const recentBeatmapsets = new Map();
+
+async function fetchBeatmapset(beatmapsetId, { maxAgeMs = 0 } = {}) {
+  const key = String(beatmapsetId);
+  const recent = recentBeatmapsets.get(key);
+  if (maxAgeMs > 0 && recent && Date.now() - recent.at <= maxAgeMs) return recent.data;
+  const data = await apiFetch(`beatmapsets/${beatmapsetId}`);
+  recentBeatmapsets.delete(key);
+  if (data) {
+    recentBeatmapsets.set(key, { data, at: Date.now() });
+    if (recentBeatmapsets.size > RECENT_BEATMAPSET_LIMIT) recentBeatmapsets.delete(recentBeatmapsets.keys().next().value);
+  }
+  return data;
 }
 
 // Fetch beatmap details (to find its beatmapset)

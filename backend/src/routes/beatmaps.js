@@ -39,9 +39,9 @@ async function hydrateDifficultyNames(db, cacheEntry) {
 }
 
 // Function to fetch, download cover, and cache a beatmapset
-async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null) {
+async function refreshAndCacheBeatmapset(db, beatmapsetId, apiJobId = null, { maxAgeMs = 0 } = {}) {
   if (apiJobId) updateApiJob(apiJobId, 1);
-  const mapsetData = await fetchBeatmapset(beatmapsetId);
+  const mapsetData = await fetchBeatmapset(beatmapsetId, { maxAgeMs });
   if (!mapsetData) {
     throw new Error(`Beatmapset with ID ${beatmapsetId} not found on osu!`);
   }

@@ -71,3 +71,12 @@ test('users are fetched in batches of 50', async (t) => {
   assert.equal(new URLSearchParams(userCalls[0].split('?')[1]).getAll('ids[]').length, 50);
   assert.equal(new URLSearchParams(userCalls[2].split('?')[1]).getAll('ids[]').length, 20);
 });
+
+test('a just-looked-up beatmapset is reused only when the caller allows it', async (t) => {
+  const { osuApi, calls } = loadOsuApi(t);
+  await osuApi.fetchBeatmapset(7);
+  await osuApi.fetchBeatmapset(7, { maxAgeMs: 60000 });
+  assert.deepEqual(apiPaths(calls), ['beatmapsets/7']);
+  await osuApi.fetchBeatmapset(7);
+  assert.deepEqual(apiPaths(calls), ['beatmapsets/7', 'beatmapsets/7']);
+});

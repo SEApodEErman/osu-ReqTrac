@@ -477,9 +477,10 @@ router.post('/', async (req, res, next) => {
         }
       }
 
-      // Make sure beatmap is fetched and cached
+      // Make sure beatmap is fetched and cached. The add-request form usually
+      // looked this set up moments ago, so reuse that response.
       try {
-        await refreshAndCacheBeatmapset(db, beatmapsetId);
+        await refreshAndCacheBeatmapset(db, beatmapsetId, null, { maxAgeMs: RECENT_LOOKUP_REUSE_MS });
       } catch (err) {
         if (/not found on osu!/i.test(err.message)) {
           return res.status(404).json({ code: 'BEATMAPSET_NOT_FOUND', error: 'This osu! beatmap link no longer exists or is unavailable.' });
@@ -1261,8 +1262,8 @@ router.get('/beatmap-info', async (req, res, next) => {
       return res.status(404).json({ error: 'Beatmapset not found on osu!' });
     }
 
-    // Fetch creator info
-    const creatorInfo = await fetchUser(beatmapset.user_id);
+    // The beatmapset response embeds its creator; only look them up when not.
+    const creatorInfo = beatmapset.user || await fetchUser(beatmapset.user_id).catch(() => null);
     const difficulties = (beatmapset.beatmaps || []).map(beatmap => {
       const owners = Array.isArray(beatmap.owners) ? beatmap.owners.filter(Boolean) : [];
       const creatorIds = owners.map(owner => Number(owner.id)).filter(Number.isSafeInteger);
@@ -1350,6 +1351,7 @@ router.get('/refresh-dates/status/:jobId', (req, res) => {
 
 // POST /api/requests/refresh-dates - Update added_date from each beatmapset's lifecycle date
 const LIFECYCLE_BATCH_SIZE = 50;
+const RECENT_LOOKUP_REUSE_MS = 5 * 60 * 1000;
 
 function capitalizeStatus(status) {
   return status ? status.charAt(0).toUpperCase() + status.slice(1).toLowerCase() : null;
