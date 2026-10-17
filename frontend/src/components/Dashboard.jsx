@@ -39,7 +39,7 @@ function RequestListItem({ request, onOpen, aside }) {
       <span style={{ minWidth: 0 }}>
         <div className="request-list-title">{requestDisplayTitle(request)}</div>
         <div className="request-list-meta">
-          {[request.artist, request.creator && `mapped by ${request.creator}`, request.requester_username && request.requester_username !== request.creator && `for ${request.requester_username}`].filter(Boolean).join(' · ')}
+          {[request.artist, request.creator && `mapped by ${request.creator}`, request.requester_username && !['anonymous', String(request.creator || '').toLowerCase()].includes(request.requester_username.toLowerCase()) && `for ${request.requester_username}`].filter(Boolean).join(' · ')}
         </div>
       </span>
       <span className="request-list-aside">{aside ?? <StatusPill status={request.request_status} />}</span>

@@ -95,14 +95,19 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preferencesLoaded]);
 
+  const viewStatesRef = useRef(viewStates);
+  viewStatesRef.current = viewStates;
+
   const updateViewState = useCallback((key, patch) => {
-    setViewStates((current) => {
-      const next = { ...(current[key] || {}), ...patch };
-      const persistable = { ...next };
-      delete persistable.search;
-      setPreference('views', views => ({ ...(views || {}), [key]: persistable }));
-      return { ...current, [key]: next };
-    });
+    const next = { ...(viewStatesRef.current[key] || {}), ...patch };
+    viewStatesRef.current = { ...viewStatesRef.current, [key]: next };
+    setViewStates(viewStatesRef.current);
+    const persistable = { ...next };
+    delete persistable.search;
+    // Typing in search changes nothing that is stored, so skip the save.
+    setPreference('views', views => (JSON.stringify(views?.[key]) === JSON.stringify(persistable)
+      ? views
+      : { ...(views || {}), [key]: persistable }));
   }, [setPreference]);
 
   // ---- First-run setup -----------------------------------------------------
