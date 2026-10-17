@@ -131,7 +131,12 @@ router.post('/', async (req, res, next) => {
     if (client_secret !== undefined) {
       await db.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'osu_client_secret', client_secret.toString().trim());
     }
-    if (client_id !== undefined || client_secret !== undefined) clearAccessToken();
+    if (client_id !== undefined || client_secret !== undefined) {
+      clearAccessToken();
+      // Maps that failed to sync before osu! was set up get another try.
+      const { retryFailedMetadata } = require('../services/beatmapMetadataSync');
+      await retryFailedMetadata(db).catch(error => console.warn('Could not retry failed metadata:', error.message));
+    }
 
     let account = null;
     if (user !== undefined) {

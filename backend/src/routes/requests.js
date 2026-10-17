@@ -32,6 +32,7 @@ function pruneRefreshDateJobs() {
 function toSearchDifficulty(difficulty) {
   const stars = Number(difficulty.stars);
   return {
+    id: difficulty.id,
     name: difficulty.name,
     mode: difficulty.mode,
     stars: Number.isFinite(stars) ? Math.round(stars * 100) / 100 : 0,
@@ -61,7 +62,15 @@ async function fetchAndCacheUser(db, userIdOrUsername) {
 router.get('/', async (req, res, next) => {
   try {
     const db = await getDatabase();
-    
+
+    // ?ids=1,2,3 returns just those rows so the UI can refresh what changed
+    // without downloading the whole library again.
+    const onlyIds = typeof req.query.ids === 'string'
+      ? normalizedRequestIds(req.query.ids.split(',')).slice(0, MAX_BULK_REQUESTS)
+      : null;
+    if (onlyIds && onlyIds.length === 0) return res.json([]);
+    const idFilter = onlyIds ? `WHERE r.id IN (${onlyIds.map(() => '?').join(', ')})` : '';
+
     // Fetch all requests and join with beatmap cache
     const requests = await db.all(`
       SELECT r.*, 
@@ -71,8 +80,9 @@ router.get('/', async (req, res, next) => {
       FROM requests r
       LEFT JOIN beatmap_cache b ON r.beatmapset_id = b.beatmapset_id
       LEFT JOIN beatmap_metadata_sync ms ON r.beatmapset_id = ms.beatmapset_id
+      ${idFilter}
       ORDER BY r.added_date DESC
-    `);
+    `, onlyIds || []);
 
     // Fetch all request categories
     const allCategories = await db.all(`
@@ -399,7 +409,10 @@ router.post('/', async (req, res, next) => {
       guest_difficulty_target_sr,
       guest_difficulty_name,
       guest_difficulties,
+      request_status: requestedStatus,
     } = req.body;
+    // New requests start undecided, agreed, or already in progress.
+    const initialStatus = ['Considering', 'Accepted', 'Working'].includes(requestedStatus) ? requestedStatus : 'Accepted';
 
     const db = await getDatabase();
     const normalizedCategories = await normalizeCategories(db, categories || []);
@@ -412,6 +425,9 @@ router.post('/', async (req, res, next) => {
 
     let beatmapsetId = null;
     let isOsuLink = false;
+    // Set when osu! couldn't be reached (or isn't set up yet) for a beatmapset
+    // link: the request is still saved and its details sync in the background.
+    let deferMetadata = false;
 
     // Handle existing duplicate add categories
     if (add_to_existing_id) {
@@ -485,7 +501,11 @@ router.post('/', async (req, res, next) => {
         if (/not found on osu!/i.test(err.message)) {
           return res.status(404).json({ code: 'BEATMAPSET_NOT_FOUND', error: 'This osu! beatmap link no longer exists or is unavailable.' });
         }
-        return res.status(400).json({ error: `Failed to fetch beatmap metadata from osu! API: ${err.message}` });
+        if (parsedLink.type !== 'beatmapset') {
+          return res.status(400).json({ error: `Couldn't look up this difficulty link on osu! (${err.message}). Paste the beatmapset link instead, or try again once osu! is reachable.` });
+        }
+        console.warn(`[requests] Saving beatmapset ${beatmapsetId} without metadata for now:`, err.message);
+        deferMetadata = true;
       }
     }
 
@@ -542,7 +562,7 @@ router.post('/', async (req, res, next) => {
       isOsuLink ? null : difficulty,
       requesterId,
       finalRequesterUsername,
-      'Accepted',
+      initialStatus,
       priority,
       deadline || null,
       notes || null,
@@ -586,6 +606,11 @@ router.post('/', async (req, res, next) => {
     `, [requestId, 'created', 'Request created manually']);
 
     await db.exec('COMMIT');
+
+    if (deferMetadata) {
+      const { enqueueBeatmapMetadata } = require('../services/beatmapMetadataSync');
+      await enqueueBeatmapMetadata(db, beatmapsetId);
+    }
 
     res.status(201).json({
       success: true,
