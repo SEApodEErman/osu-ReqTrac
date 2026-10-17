@@ -24,8 +24,9 @@ const MAX_USERS_PER_REQUEST = 50;
 // 60/minute. Calls are scheduled through priority lanes so work the user is
 // waiting on is never stuck behind background synchronization:
 //   interactive - a user action in the UI (add, open, refresh one request)
-//   bulk        - jobs the user started and is watching (imports, date refresh)
-//   background  - passive upkeep (metadata sync worker, username refresh)
+//   bulk        - jobs the user started and is watching (imports, date
+//                 refresh, and the metadata sync worker that fills them in)
+//   background  - passive upkeep (weekly username refresh)
 // User-driven lanes use the recommended 60/minute pace; background upkeep
 // keeps a slower pace so it never consumes the whole budget on its own.
 const API_PRIORITIES = ['interactive', 'bulk', 'background'];

@@ -41,6 +41,8 @@ import {
 import { REQUEST_COLUMNS, defaultVisibleColumns, moveColumn, normalizeColumnOrder, requestColumnClassName } from '../utils/requestColumns';
 
 const ROW_HEIGHT = { comfortable: 64, compact: 46 };
+// Marks drags that start inside the app (column reordering).
+export const INTERNAL_DRAG_TYPE = 'application/x-reqtrac-internal';
 // Mirrors the column widths in index.css; the beatmap column gets at least
 // SONG_MIN_WIDTH and any extra space.
 const COLUMN_WIDTHS = {
@@ -346,7 +348,7 @@ export default function RequestsTable({
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 700 });
   const scrollRef = useRef(null);
   const scrollFrameRef = useRef(null);
-  const lastToggledIndexRef = useRef(null);
+  const lastToggledIdRef = useRef(null);
   const rowHeight = ROW_HEIGHT[density] || ROW_HEIGHT.comfortable;
 
   const visibleColumns = useMemo(() => (Array.isArray(columnsPreference?.visible)
@@ -418,8 +420,9 @@ export default function RequestsTable({
     setSelectedIds(current => {
       const next = new Set(current);
       const select = !current.has(id);
-      if (withRange && lastToggledIndexRef.current !== null) {
-        const [from, to] = [lastToggledIndexRef.current, index].sort((a, b) => a - b);
+      const anchorIndex = lastToggledIdRef.current === null ? -1 : filteredRef.current.findIndex(request => request.id === lastToggledIdRef.current);
+      if (withRange && anchorIndex !== -1) {
+        const [from, to] = [anchorIndex, index].sort((a, b) => a - b);
         filteredRef.current.slice(from, to + 1).forEach(request => (select ? next.add(request.id) : next.delete(request.id)));
       } else if (select) {
         next.add(id);
@@ -428,7 +431,7 @@ export default function RequestsTable({
       }
       return next;
     });
-    lastToggledIndexRef.current = index;
+    lastToggledIdRef.current = id;
   }, []);
 
   const handleUpdate = useCallback((id, patch) => {
@@ -540,7 +543,12 @@ export default function RequestsTable({
         className={`${requestColumnClassName(key)}${dragColumn === key ? ' is-dragging' : ''}${dropColumn === key && dragColumn !== key ? ' is-drop-target' : ''}`}
         draggable
         aria-sort={isSorted ? (view.sortOrder === 'asc' ? 'ascending' : 'descending') : undefined}
-        onDragStart={(event) => { setDragColumn(key); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', key); }}
+        onDragStart={(event) => {
+          setDragColumn(key);
+          event.dataTransfer.effectAllowed = 'move';
+          event.dataTransfer.setData(INTERNAL_DRAG_TYPE, key);
+          event.dataTransfer.setData('text/plain', key);
+        }}
         onDragOver={(event) => { event.preventDefault(); setDropColumn(key); }}
         onDragLeave={() => setDropColumn(current => (current === key ? null : current))}
         onDrop={(event) => {

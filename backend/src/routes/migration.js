@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const router = express.Router();
 const { getDatabase, coversDir, BUILTIN_CATEGORIES } = require('../db');
-const { fetchBeatmaps } = require('../osuApi');
+const { fetchBeatmaps, runWithApiPriority } = require('../osuApi');
 const { createApiJob, addApiJobWork, updateApiJob, finishApiJob } = require('../osuApi');
 const { parseOsuLink } = require('../utils/requestUtils');
 const { parseWorkbook, suggestMapping, validateMapping, normalizeRows } = require('../utils/spreadsheetImport');
@@ -409,9 +409,9 @@ router.post('/import-beatmap-links', async (req, res, next) => {
     );
 
     addApiJobWork(apiJobId, beatmapBatchCount);
-    const fetchedBeatmaps = await fetchBeatmaps(beatmapIds, {
+    const fetchedBeatmaps = await runWithApiPriority('bulk', () => fetchBeatmaps(beatmapIds, {
       onBatchError: batch => batch.forEach(id => failedBeatmapIds.add(id))
-    });
+    }));
     updateApiJob(apiJobId, beatmapBatchCount);
     let fetchedBeatmapIndex = 0;
 
@@ -572,9 +572,9 @@ router.post('/import-spreadsheet', spreadsheetUpload.single('file'), async (req,
     const beatmapBatchCount = Math.ceil(new Set(beatmapIds).size / 50);
     const failedBeatmapIds = new Set();
     addApiJobWork(apiJobId, beatmapBatchCount);
-    const fetchedBeatmaps = await fetchBeatmaps(beatmapIds, {
+    const fetchedBeatmaps = await runWithApiPriority('bulk', () => fetchBeatmaps(beatmapIds, {
       onBatchError: batch => batch.forEach(id => failedBeatmapIds.add(id))
-    });
+    }));
     updateApiJob(apiJobId, beatmapBatchCount);
     let fetchedBeatmapIndex = 0;
     await db.exec('BEGIN TRANSACTION');

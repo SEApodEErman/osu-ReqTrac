@@ -121,7 +121,8 @@ async function getDashboardStats(db, { categoryId = null, now = new Date(), excl
       AND r.request_status = 'Completed'
   `, scope.params);
 
-  // Due within a week (7 days)
+  // Due in the next 7 days, after today (today counts as overdue, matching the
+  // Overview's drill-through filters).
   const oneWeekLater = new Date(now);
   oneWeekLater.setDate(now.getDate() + 7);
 
@@ -134,7 +135,7 @@ async function getDashboardStats(db, { categoryId = null, now = new Date(), excl
     WHERE ${scope.predicate}
       AND r.request_status IN ('Accepted', 'Considering', 'Working')
       AND deadline IS NOT NULL
-      AND deadline >= ?
+      AND deadline > ?
       AND deadline <= ?
   `, [...scope.params, nowStr, oneWeekLaterStr]);
 
@@ -145,7 +146,7 @@ async function getDashboardStats(db, { categoryId = null, now = new Date(), excl
       AND r.request_status IN ('Accepted', 'Considering', 'Working')
       AND deadline IS NOT NULL
       AND deadline != ''
-      AND deadline < ?
+      AND deadline <= ?
   `, [...scope.params, nowStr]);
 
   // 12-month activity trend: requests added and completed per calendar month.

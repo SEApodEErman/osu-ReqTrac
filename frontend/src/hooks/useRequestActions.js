@@ -149,24 +149,37 @@ export function useRequestActions({ data, toasts, categories }) {
     if (!pending) return;
     pendingDeletesRef.current.delete(key);
     window.clearTimeout(pending.timer);
-    try {
+    if (keepalive) {
+      // The page is closing: send every batch at once, nothing will wait.
       for (const batch of batches(pending.ids)) {
-        await api.delete('/api/requests/bulk', { ids: batch }, { keepalive });
+        void api.delete('/api/requests/bulk', { ids: batch }, { keepalive: true }).catch(() => {});
       }
-    } catch (error) {
-      showToast(`Some requests could not be deleted: ${error.message}`, 'error');
-    } finally {
-      if (!keepalive) {
-        removeRequestsLocally(pending.ids);
-        setPendingDeleteIds(current => {
-          const next = new Set(current);
-          pending.ids.forEach(id => next.delete(id));
-          return next;
-        });
-        void refreshStats();
+      return;
+    }
+    const deleted = [];
+    let failure = null;
+    for (const batch of batches(pending.ids)) {
+      try {
+        await api.delete('/api/requests/bulk', { ids: batch });
+        deleted.push(...batch);
+      } catch (error) {
+        failure = error;
       }
     }
-  }, [removeRequestsLocally, refreshStats, showToast]);
+    if (deleted.length) removeRequestsLocally(deleted);
+    setPendingDeleteIds(current => {
+      const next = new Set(current);
+      pending.ids.forEach(id => next.delete(id));
+      return next;
+    });
+    if (failure) {
+      // Rows that weren't deleted reappear; re-read them to be sure.
+      const remaining = pending.ids.filter(id => !deleted.includes(id));
+      void refreshRequestsById(remaining);
+      showToast(`${remaining.length} request${remaining.length === 1 ? '' : 's'} couldn’t be deleted and ${remaining.length === 1 ? 'is' : 'are'} back in the list: ${failure.message}`, 'error');
+    }
+    void refreshStats();
+  }, [refreshRequestsById, removeRequestsLocally, refreshStats, showToast]);
 
   const deleteRequests = useCallback((ids, label) => {
     if (!ids.length) return;

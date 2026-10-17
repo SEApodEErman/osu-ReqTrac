@@ -140,8 +140,8 @@ export default function Dashboard({
 
   const kpis = [
     { label: 'Active', value: overview.active, tone: 'working', foot: 'Considering, accepted, or working', filter: { status: 'active' } },
-    { label: 'Overdue', value: overview.overdue, tone: overview.overdue ? 'overdue' : undefined, foot: 'Past their deadline', filter: { due: 'overdue' } },
-    { label: 'Due this week', value: overview.dueSoon, tone: overview.dueSoon ? 'soon' : undefined, foot: 'Next 7 days', filter: { due: 'week' } },
+    { label: 'Overdue', value: overview.overdue, tone: overview.overdue ? 'overdue' : undefined, foot: 'Due today or earlier', filter: { due: 'overdue' } },
+    { label: 'Due this week', value: overview.dueSoon, tone: overview.dueSoon ? 'soon' : undefined, foot: 'In the next 7 days', filter: { due: 'week' } },
     { label: 'Completed', value: overview.completed, tone: 'done', foot: `${summary.totalDrainTime || '0 hours'} of drain time`, filter: { status: 'Completed' } },
     { label: 'All requests', value: overview.total, foot: `${summary.rankedCompletedCount || 0} completed maps ranked`, filter: {} },
   ];

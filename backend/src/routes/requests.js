@@ -85,11 +85,14 @@ router.get('/', async (req, res, next) => {
     `, onlyIds || []);
 
     // Fetch all request categories
+    const childFilter = column => (onlyIds ? `WHERE ${column} IN (${onlyIds.map(() => '?').join(', ')})` : '');
+    const childParams = onlyIds || [];
     const allCategories = await db.all(`
       SELECT rc.*, c.name AS catalog_name, c.system_key, c.view_type, c.is_active
       FROM request_categories rc
       LEFT JOIN categories c ON c.id = rc.category_id
-    `);
+      ${childFilter('rc.request_id')}
+    `, childParams);
     const categoriesByRequest = new Map();
     for (const category of allCategories) {
       if (!categoriesByRequest.has(category.request_id)) categoriesByRequest.set(category.request_id, []);
@@ -110,7 +113,8 @@ router.get('/', async (req, res, next) => {
       SELECT rt.request_id, t.name 
       FROM request_tags rt 
       JOIN tags t ON rt.tag_id = t.id
-    `);
+      ${childFilter('rt.request_id')}
+    `, childParams);
     const tagsByRequest = new Map();
     for (const tag of allTags) {
       if (!tagsByRequest.has(tag.request_id)) tagsByRequest.set(tag.request_id, []);
@@ -118,8 +122,8 @@ router.get('/', async (req, res, next) => {
     }
 
     const allGuestDifficultyRows = await db.all(`
-      SELECT * FROM request_guest_difficulties ORDER BY request_id, sort_order, id
-    `);
+      SELECT * FROM request_guest_difficulties ${childFilter('request_id')} ORDER BY request_id, sort_order, id
+    `, childParams);
     const guestRowsByRequest = new Map();
     for (const row of allGuestDifficultyRows) {
       if (!guestRowsByRequest.has(row.request_id)) guestRowsByRequest.set(row.request_id, []);
@@ -473,7 +477,16 @@ router.post('/', async (req, res, next) => {
       } else {
         // It's a beatmap link, fetch to get the beatmapset ID
         console.log(`Pasted individual beatmap link. Fetching map details for ID ${parsedLink.id}...`);
-        const mapData = await fetchBeatmap(parsedLink.id);
+        let mapData;
+        try {
+          mapData = await fetchBeatmap(parsedLink.id);
+        } catch (err) {
+          // A difficulty link can only be resolved to its set through osu!.
+          return res.status(400).json({
+            code: 'BEATMAP_LOOKUP_UNAVAILABLE',
+            error: `Couldn't look up this difficulty link on osu! (${err.message}). Paste the beatmapset link (osu.ppy.sh/beatmapsets/…) instead, or try again once osu! is reachable.`,
+          });
+        }
         if (mapData && mapData.beatmapset_id) {
           beatmapsetId = mapData.beatmapset_id;
         } else {

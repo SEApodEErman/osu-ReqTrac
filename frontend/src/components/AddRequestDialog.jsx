@@ -4,7 +4,7 @@ import Dialog from './ui/Dialog';
 import TagInput from './TagInput';
 import { StarBadge } from './ui/Badges';
 import { api } from '../api/client';
-import { isOsuBeatmapLink } from '../utils/osuLinks';
+import { beatmapsetIdFromLink, isOsuBeatmapLink } from '../utils/osuLinks';
 import { todayInputValue } from '../utils/dates';
 import { GAMEMODES, PRIORITIES, priorityClass } from '../utils/requestConstants';
 import {
@@ -315,7 +315,14 @@ export default function AddRequestDialog({
           <div className={`callout ${lookup.state === 'missing' ? 'callout-danger' : 'callout-warning'}`} role="alert"><AlertCircle size={16} /><span>{lookup.error}</span></div>
         )}
         {lookup.state === 'unconfigured' && (
-          <div className="callout callout-warning"><AlertCircle size={16} /><span>Connect the osu! API in Settings to fill in map details automatically. You can still add this link now.</span></div>
+          <div className="callout callout-warning">
+            <AlertCircle size={16} />
+            <span>
+              {beatmapsetIdFromLink(trimmedLink)
+                ? 'Connect the osu! API in Settings to fill in map details automatically. You can still add this link now; details sync once osu! is connected.'
+                : 'This is a difficulty link, which needs the osu! API to find its beatmapset. Paste the beatmapset link instead, or connect osu! in Settings first.'}
+            </span>
+          </div>
         )}
 
         {duplicate && (

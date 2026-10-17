@@ -130,6 +130,12 @@ test('dashboard statistics report overdue work and a 12-month activity trend', a
   assert.deepEqual(stats.monthlyActivity.find(row => row.month === '2026-07'), { month: '2026-07', added: 1, completed: 0 });
   assert.deepEqual(stats.monthlyActivity.find(row => row.month === '2026-01'), { month: '2026-01', added: 1, completed: 0 });
   assert.deepEqual(stats.monthlyActivity.find(row => row.month === '2026-02'), { month: '2026-02', added: 0, completed: 1 });
+
+  // A request due today counts as overdue, not due this week, matching the
+  // Overview's drill-through filters.
+  const dueToday = await getDashboardStats(db, { now: new Date(2026, 6, 25, 15) });
+  assert.equal(dueToday.overview.overdue, 1);
+  assert.equal(dueToday.overview.dueSoon, 0);
   await db.close();
 });
 

@@ -12,6 +12,7 @@ import ShortcutsDialog from './components/ShortcutsDialog';
 import ConfirmModal from './components/ConfirmModal';
 import ToastStack from './components/Toast';
 import { isAnyDialogOpen } from './components/ui/Dialog';
+import { INTERNAL_DRAG_TYPE } from './components/RequestsTable';
 import { api } from './api/client';
 import { useAppData } from './hooks/useAppData';
 import { usePreferences } from './hooks/usePreferences';
@@ -272,7 +273,11 @@ export default function App() {
   // ---- Drop a beatmap link anywhere to add it -----------------------------
   useEffect(() => {
     let dragDepth = 0;
-    const carriesText = event => [...(event.dataTransfer?.types || [])].some(type => type === 'text/uri-list' || type === 'text/plain');
+    // Column reordering inside the table tags its drags so they're ignored here.
+    const carriesText = (event) => {
+      const types = [...(event.dataTransfer?.types || [])];
+      return !types.includes(INTERNAL_DRAG_TYPE) && types.some(type => type === 'text/uri-list' || type === 'text/plain');
+    };
     const onDragEnter = (event) => {
       if (!carriesText(event)) return;
       dragDepth += 1;
@@ -287,10 +292,12 @@ export default function App() {
       event.preventDefault();
     };
     const onDrop = (event) => {
-      event.preventDefault();
       dragDepth = 0;
       setIsDraggingLink(false);
-      if (event.target.closest?.('input, textarea')) return;
+      // Text dropped into a field is inserted there as usual.
+      if (event.target.closest?.('input, textarea, [contenteditable="true"]')) return;
+      event.preventDefault();
+      if (!carriesText(event)) return;
       const text = event.dataTransfer?.getData('text/uri-list') || event.dataTransfer?.getData('text/plain');
       const link = extractOsuBeatmapLink(text);
       if (link && !isAnyDialogOpen()) {
