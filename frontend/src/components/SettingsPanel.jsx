@@ -427,7 +427,7 @@ function GoogleSheets({ theme, onNotify, onRequestConfirmation }) {
       <Row
         title={status?.connected ? 'Connected to Google Drive' : 'Publish a read-only copy of your requests'}
         description={status?.connected
-          ? 'Sync whenever you want the public sheet to match the app.'
+          ? 'Sync publishes your osu! requests, including notes, to a sheet anyone with the link can view. Manual requests stay local.'
           : 'ReqTrac creates a formatted sheet in your own Drive that anyone with the link can view — handy for your osu! profile or forum thread.'}
       >
         {!status?.connected ? (
@@ -443,6 +443,12 @@ function GoogleSheets({ theme, onNotify, onRequestConfirmation }) {
           </>
         )}
       </Row>
+      <div className="muted" style={{ padding: '0 var(--space-5) var(--space-5)', fontSize: 'var(--text-sm)' }}>
+        Google access is used to create and update your export sheet and enable link sharing. Disconnect removes the saved connection from this app; it leaves the sheet and its sharing settings in Drive.{' '}
+        <button type="button" className="btn-link" onClick={() => openExternal('https://seapodeerman.top/osu-reqtrac/privacy/')}>Privacy policy</button>
+        {' · '}
+        <button type="button" className="btn-link" onClick={() => openExternal('https://seapodeerman.top/osu-reqtrac/terms/')}>Terms of service</button>
+      </div>
       {status?.connected && status.sheetUrl && (
         <div style={{ padding: '0 var(--space-5) var(--space-5)' }}>
           <div className="panel-inset view-actions" style={{ justifyContent: 'space-between' }}>
@@ -458,7 +464,7 @@ function GoogleSheets({ theme, onNotify, onRequestConfirmation }) {
         <div style={{ padding: '0 var(--space-5) var(--space-5)' }}>
           <div className="callout callout-warning">
             <AlertCircle size={16} />
-            <span>Google may warn that the app is unverified while ReqTrac finishes Google’s review. Your requests go straight from this computer to your own Drive and nowhere else.</span>
+            <span>Google may show an unverified-app warning until verification is complete. Review the permissions before connecting. Publishing sends your export directly from this computer to Google Drive and enables anyone with the link to view it.</span>
           </div>
         </div>
       )}

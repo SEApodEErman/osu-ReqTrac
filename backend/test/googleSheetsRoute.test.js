@@ -3,6 +3,47 @@ const assert = require('node:assert/strict');
 
 const { testUtils } = require('../src/routes/googleSheets');
 
+test('Google authorization requests only per-file access and keeps PKCE and one-time state', async (t) => {
+  const configPath = require.resolve('../src/googleConfig');
+  const routePath = require.resolve('../src/routes/googleSheets');
+  const originalConfig = require.cache[configPath];
+  const originalRoute = require.cache[routePath];
+  let router;
+  try {
+    require.cache[configPath] = { id: configPath, filename: configPath, loaded: true,
+      exports: { getGoogleConfig: () => ({ clientId: 'test-client', clientSecret: '' }) } };
+    delete require.cache[routePath];
+    router = require('../src/routes/googleSheets');
+  } finally {
+    require.cache[configPath] = originalConfig;
+    require.cache[routePath] = originalRoute;
+  }
+  const app = require('express')();
+  app.use('/api/google', router);
+  const server = app.listen(0, '127.0.0.1');
+  t.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }));
+  await require('node:events').once(server, 'listening');
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const response = await fetch(`${origin}/api/google/auth-url`);
+  assert.equal(response.status, 200);
+  const url = new URL((await response.json()).url);
+  assert.equal(url.origin, 'https://accounts.google.com');
+  assert.equal(url.searchParams.get('scope'), 'https://www.googleapis.com/auth/drive.file');
+  assert.equal(url.searchParams.get('redirect_uri'), `${origin}/api/google/callback`);
+  assert.equal(url.searchParams.get('access_type'), 'offline');
+  assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
+  assert.match(url.searchParams.get('code_challenge'), /^[\w-]{43}$/);
+  assert.match(url.searchParams.get('state'), /^[a-f0-9]{48}$/);
+  const callback = new URL(`${origin}/api/google/callback`);
+  callback.search = new URLSearchParams({ state: url.searchParams.get('state'), error: 'access_denied' });
+  const denied = await fetch(callback);
+  assert.equal(denied.status, 400);
+  assert.match(await denied.text(), /access_denied/);
+  const replay = await fetch(callback);
+  assert.equal(replay.status, 400);
+  assert.match(await replay.text(), /authorization expired/);
+});
+
 test('Google Sheets route generates safe unique sheet titles and serial dates', () => {
   const used = new Set();
   assert.equal(testUtils.safeSheetTitle('ReqTrac: Hitsounds?', used), 'ReqTrac Hitsounds');

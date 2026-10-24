@@ -17,7 +17,9 @@ const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SHEETS_URL = 'https://sheets.googleapis.com/v4/spreadsheets';
 const DRIVE_URL = 'https://www.googleapis.com/drive/v3/files';
-const SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive.file'];
+// Sheets accepts drive.file for spreadsheets this app creates. Broad access to
+// every spreadsheet is unnecessary for the public-export workflow.
+const SCOPES = ['https://www.googleapis.com/auth/drive.file'];
 const pendingStates = new Map();
 
 function credentials() {
