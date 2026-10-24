@@ -10,6 +10,9 @@ const input = path.join(root, 'build', 'icon.svg');
 const png = path.join(root, 'build', 'icon.png');
 const ico = path.join(root, 'build', 'icon.ico');
 const icns = path.join(root, 'build', 'icon.icns');
+const rendererSvg = path.join(root, 'frontend', 'src', 'assets', 'app-icon.svg');
+const faviconSvg = path.join(root, 'frontend', 'public', 'favicon.svg');
+const faviconIco = path.join(root, 'frontend', 'public', 'favicon.ico');
 
 if (!fs.existsSync(input)) {
   throw new Error(`Icon source not found: ${input}`);
@@ -45,7 +48,12 @@ async function main() {
     fs.rmSync(generatedRoot, { recursive: true, force: true });
   }
 
-  console.log('Generated build/icon.png, build/icon.ico, and build/icon.icns from build/icon.svg');
+  // Keep the renderer and browser icons on the same source as Electron.
+  fs.copyFileSync(input, rendererSvg);
+  fs.copyFileSync(input, faviconSvg);
+  fs.copyFileSync(ico, faviconIco);
+
+  console.log('Generated Electron, renderer, and browser icons from build/icon.svg');
 }
 
 main().catch((error) => {
