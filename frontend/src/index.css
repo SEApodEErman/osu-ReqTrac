@@ -562,6 +562,15 @@ select option {
   gap: var(--space-3);
 }
 
+.request-options {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.request-options .segmented {
+  align-self: flex-start;
+}
+
 .checkbox {
   display: inline-flex;
   align-items: center;
@@ -1066,7 +1075,7 @@ input[type='date']::-webkit-calendar-picker-indicator {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
   min-height: 0;
   padding: var(--space-3) var(--space-2);
   overflow-x: hidden;

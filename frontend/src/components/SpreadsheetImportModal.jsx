@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AlertCircle, ArrowLeft, Check, CheckCircle, Loader2, Upload } from 'lucide-react';
+import { AlertCircle, ArrowLeft, Check, CheckCircle, FileSpreadsheet, Loader2, Upload } from 'lucide-react';
 import Dialog from './ui/Dialog';
 import { api } from '../api/client';
 import { downloadTextFile } from '../utils/csv';

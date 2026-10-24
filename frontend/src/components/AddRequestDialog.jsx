@@ -20,6 +20,7 @@ const INITIAL_STATUSES = [
   { value: 'Considering', hint: 'Not decided yet' },
   { value: 'Accepted', hint: 'Agreed to do it' },
   { value: 'Working', hint: 'Already started' },
+  { value: 'Completed', hint: 'Already finished' },
 ];
 
 function addDays(days) {
@@ -399,7 +400,7 @@ export default function AddRequestDialog({
           </div>
         )}
 
-        <div className="field-row">
+        <div className="field-row request-options">
           <div className="field">
             <span className="field-label">Status</span>
             <div className="segmented" role="group" aria-label="Initial status">
@@ -421,7 +422,7 @@ export default function AddRequestDialog({
         <div className="field">
           <label className="field-label" htmlFor="add-request-deadline">Deadline <span className="optional">(optional)</span></label>
           <div className="view-actions">
-            <input id="add-request-deadline" type="date" className="input" style={{ width: 170 }} value={deadline} min={todayInputValue()} onChange={event => setDeadline(event.target.value)} />
+            <input id="add-request-deadline" type="date" className="input" style={{ width: 170 }} value={deadline} onChange={event => setDeadline(event.target.value)} />
             {[['1 week', 7], ['2 weeks', 14], ['1 month', 30]].map(([label, days]) => (
               <button key={label} type="button" className="btn btn-ghost btn-sm" onClick={() => setDeadline(addDays(days))}>In {label}</button>
             ))}

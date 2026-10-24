@@ -415,8 +415,8 @@ router.post('/', async (req, res, next) => {
       guest_difficulties,
       request_status: requestedStatus,
     } = req.body;
-    // New requests start undecided, agreed, or already in progress.
-    const initialStatus = ['Considering', 'Accepted', 'Working'].includes(requestedStatus) ? requestedStatus : 'Accepted';
+    // Completed requests can be added retroactively.
+    const initialStatus = ['Considering', 'Accepted', 'Working', 'Completed'].includes(requestedStatus) ? requestedStatus : 'Accepted';
 
     const db = await getDatabase();
     const normalizedCategories = await normalizeCategories(db, categories || []);
@@ -564,8 +564,8 @@ router.post('/', async (req, res, next) => {
       INSERT INTO requests (
         beatmapset_id, is_osu_link, non_osu_artist, non_osu_title, non_osu_creator, non_osu_difficulty,
         requester_id, requester_username, request_status, priority, deadline, notes, input_link, discord_link, osu_profile_link,
-        guest_difficulty_target_sr
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        guest_difficulty_target_sr, completed_date
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       beatmapsetId,
       isOsuLink ? 1 : 0,
@@ -582,7 +582,8 @@ router.post('/', async (req, res, next) => {
       isOsuLink ? null : (input_link || link || null),
       discord_link || null,
       finalOsuProfileLink,
-      guest_difficulty_target_sr || null
+      guest_difficulty_target_sr || null,
+      initialStatus === 'Completed' ? new Date().toISOString() : null
     ]);
 
     const requestId = result.lastID;
